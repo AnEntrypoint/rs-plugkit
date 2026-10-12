@@ -1,6 +1,6 @@
 # Agentic Property-Based Testing - Hypothesis agent study
 
-Principle `PBTAGENT`, phase P4 VERIFY. Apply "Agentic Property-Based Testing - Hypothesis agent study" to the work of the P4 VERIFY phase.
+Principle `PBTAGENT`. Apply "Agentic Property-Based Testing - Hypothesis agent study" to the work this node stands on. The node is entered from any neighbour that leads here and left to any neighbour it links to; its place in a walk is decided by the work it applies to, not by a bucket.
 
 The agent proposes candidate properties from the PRD rows and admits only those statable from the contract alone. A candidate derivable from the function body is rejected, and the rejection with its reason goes into the row's witness text. Admitted properties run through the HUGHES probe. A property that restates the code fires the backreference to METAMORPH, and the agent states a relation between outputs instead.
 

@@ -1,5 +1,5 @@
 # The Smallest Set of High-Signal Tokens
 
-Principle `SMALLESTSET`, phase P7 CONTEXT ECONOMY. Apply "The Smallest Set of High-Signal Tokens" to the work of the P7 CONTEXT ECONOMY phase.
+Principle `SMALLESTSET`. Apply "The Smallest Set of High-Signal Tokens" to the work this node stands on. The node is entered from any neighbour that leads here and left to any neighbour it links to; its place in a walk is decided by the work it applies to, not by a bucket.
 
 The walk is recorded by the transition that leaves this node.

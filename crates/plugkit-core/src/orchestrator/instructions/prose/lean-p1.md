@@ -1,12 +1,14 @@
-# LEAN-P1 SHAPE
+# LEAN SHAPE
 
-P1 SHAPE turns the request into a PRD that covers the whole closure of the request before any contract is written. It orients on the live tree rather than on recalled memory, names every in-spirit row, states each row's pre-conditions, invariants and post-conditions, resolves every grounding unknown with a witness, and types every contract-level or runtime-level unknown for the phase that will discharge it. The phase exits when no row is unshaped, no grounding unknown is open, and an expansion pass over the rows adds nothing new. The exit runs LIVEPLAN, then the G_CONTRACT gate, then CONTRACT.
+This is a concern of the method, not a stage of a pipeline: it is entered from whichever node the work reaches it from, and left as soon as what it asks for holds. No concern gates entry to a set of nodes.
 
-Principles in this phase are applied as work, from the lean method (AnEntrypoint/lean, skills/lean/SKILL.md). Each H3 below carries a principle key, then the attribution exactly as fsm/graph.json labels it.
+SHAPE turns the request into a PRD that covers the whole closure of the request before any contract is written. It orients on the live tree rather than on recalled memory, names every in-spirit row, states each row's pre-conditions, invariants and post-conditions, resolves every grounding unknown with a witness, and types every contract-level or runtime-level unknown for the node that will discharge it. The node exits when no row is unshaped, no grounding unknown is open, and an expansion pass over the rows adds nothing new. The exit runs LIVEPLAN, then the G_CONTRACT gate, then CONTRACT.
+
+Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each H3 below carries a principle key, then the attribution exactly as fsm/graph.json labels it.
 
 ## Verbs
 
-The phase opens at the G_START gate. Dispatch `prd-list` first. When more than one row is in progress, the gate lean-one-task-in-flight refuses entry, and its response names the verb to dispatch next in next_dispatch. Finish or abandon the extra row, then continue. Next dispatch `instruction` with `{"prompt":"<the user request, verbatim>"}`. The response carries orient_nouns and recall_hits. Those hits are baseline for the orient step, not conclusions.
+The node opens at the G_START gate. Dispatch `prd-list` first. When more than one row is in progress, the gate lean-one-task-in-flight refuses entry, and its response names the verb to dispatch next in next_dispatch. Finish or abandon the extra row, then continue. Next dispatch `instruction` with `{"prompt":"<the user request, verbatim>"}`. The response carries orient_nouns and recall_hits. Those hits are baseline for the orient step, not conclusions.
 
 Every spool body carries session_id, and plugkit rejects an empty one. Re-dispatch `instruction` between rows, after any failed dispatch, and on any unfamiliar error. Pass `known_instruction_hash` only from a response you actually received. A match returns an empty prose body with instruction_unchanged true, which means the prose you already hold still applies.
 
@@ -18,13 +20,13 @@ For a question of the form "has this happened before", dispatch `codesearch` wit
 
 A question whose answer plausibly exists on the public web is answered by WebSearch followed by at least one targeted WebFetch, before any pause, every time. Ask the user only when that search returns nothing, or when the question needs a private credential, a choice among options already surfaced, or authorization for an irreversible action.
 
-Once per project per session, read gm.config.json (absent means every default applies) together with the README, CONTRIBUTING and `.gm/` signals. A real signal makes a prd-add row proposing the change. The signals are: the project already references TencentDB Agent Memory or a deployed instance of it; an embedding pipeline commits to a dimension the fixed 384-dimension default cannot hold; or the user names the need. Repointing `.gm/config.source.json` or flipping a `memory.tencentdb_backend` block is a reconfiguration, so ask through AskUserQuestion before writing it unless the user's own words named the need. Without a real signal the check concludes that no reconfiguration is warranted and the phase moves on.
+Once per project per session, read gm.config.json (absent means every default applies) together with the README, CONTRIBUTING and `.gm/` signals. A real signal makes a prd-add row proposing the change. The signals are: the project already references TencentDB Agent Memory or a deployed instance of it; an embedding pipeline commits to a dimension the fixed 384-dimension default cannot hold; or the user names the need. Repointing `.gm/config.source.json` or flipping a `memory.tencentdb_backend` block is a reconfiguration, so ask through AskUserQuestion before writing it unless the user's own words named the need. Without a real signal the check concludes that no reconfiguration is warranted and the node moves on.
 
 On the first dependency install of a session, and before trusting freshly cloned or vendored dependency content, dispatch `scan_deps`. The body `{}` scans the whole project, `{"root":"<relative dir>"}` scans a subdirectory, and `{"root":"<absolute dir>"}` scans a sibling project. A blockedCount or failCount above zero is a real hit. Stop, ask the user through AskUserQuestion, and investigate the introducing commit through the dependency's own history. Never add exclusions and never retry blindly. A warnCount alone is a glance, not a block. nodeModulesTruncated true gets a prd-add row for a standing unbounded sweep.
 
 Fan out only when the closure decomposes into independent slices, and launch each slice with the Agent tool. The subagent prompt opens with "use the gm skill for this; code questions go to codeinsight (callers/impact) first, then codesearch, and Read only a located path". It then carries the task, the terminal condition it serves (prd_pending_count 0 against the full discovered scope, not its slice), and its own session_id derived from the parent as `<parent_session_id>-sub<k>`. A parent never passes its own literal session id to a child. A shared recurring transform (a rename sweep, an API migration, or more than five applications of one pattern) first gets a mapping note drafted by one subagent and adversarially reviewed by a second. Only then do the parallel workers dispatch, each against that reviewed mapping.
 
-Every turn in this phase ends in a verb dispatch. A turn that ends in prose with no tool call stops the chain.
+Every turn in this node ends in a verb dispatch. A turn that ends in prose with no tool call stops the chain.
 
 ## PRD rows
 
@@ -44,13 +46,13 @@ Run the tell-tale sweep on any AI-written design element found anywhere: a boile
 
 A row the agent adds on its own authority, reached only because it sits inside the request's closure, gets one line in the response body beside its prd-add: "adding <row id> because <reason>". One line per such row, with no running narration of the whole cover.
 
-A bug, gap or hygiene issue outside this closure is still a prd-add row. It is never fixed inline during this phase, and it is never dropped.
+A bug, gap or hygiene issue outside this closure is still a prd-add row. It is never fixed inline during this node, and it is never dropped.
 
 At entry, rows already open from an earlier run (prd_pending above zero, or listed in ready_wave) are undone work of the same walk. Resume each one to a witnessed prd-resolve, or to an explicit re-scope, before any fresh row is cut.
 
 Cut the row that exercises the most failure modes at once first (concurrency, partial failure and real input together). The design is proven while reshaping is still cheap.
 
-A row is admitted on witness, not cheapness. An unmeasured optimization claim is rejected in this phase. A witnessed, correct change is admitted however expensive it is. The volume of the work never rejects a row.
+A row is admitted on witness, not cheapness. An unmeasured optimization claim is rejected in this node. A witnessed, correct change is admitted however expensive it is. The volume of the work never rejects a row.
 
 When an existing row's statement changes, rewrite it with `prd-add` under its existing id. The reply is `rescoped`, and the row keeps its position and dependents. Never delete and re-add a row, because that orphans its handle.
 
@@ -58,11 +60,11 @@ State lives on disk as one file per row: `.gm/prd/<id>.yml` and `.gm/mutables/<i
 
 ## Mutables
 
-P1 owns no obligation kind. Every P1 unknown is one of two things. A grounding unknown asks what exists, who calls it, what a service returns, or what a library version exposes. It is discharged inside P1: dispatch the codesearch, callers or recall that answers it, or exec_js against the real service, then resolve the mutable with that output before leaving the phase. No grounding-shaped mutable crosses the transition open.
+P1 owns no obligation kind. Every P1 unknown is one of two things. A grounding unknown asks what exists, who calls it, what a service returns, or what a library version exposes. It is discharged inside P1: dispatch the codesearch, callers or recall that answers it, or exec_js against the real service, then resolve the mutable with that output before leaving the node. No grounding-shaped mutable crosses the transition open.
 
-Any other unknown is a contract property or a runtime property. Record it with `mutable-add {"id":"<kebab-case slug>","status":"unknown","obligation_kind":"<kind>","depends_on":[...]}`, where the kind belongs to the phase that will discharge it. A contract property (precondition, invariant, postcondition, resource-bound or type-shape) is typed for CONTRACT. A runtime-safety property (totality, ownership, replay or effect-boundary) or a concurrency property (happens-before, disjointness or contention) is typed for BUILD. The witness field names the codesearch hit, file:line or exec output that made the thing an unknown. An unwitnessed unknown blocks every transition.
+Any other unknown is a contract property or a runtime property. Record it with `mutable-add {"id":"<kebab-case slug>","status":"unknown","obligation_kind":"<kind>","depends_on":[...]}`, where the kind belongs to the node that will discharge it. A contract property (precondition, invariant, postcondition, resource-bound or type-shape) is typed for CONTRACT. A runtime-safety property (totality, ownership, replay or effect-boundary) or a concurrency property (happens-before, disjointness or contention) is typed for BUILD. The witness field names the codesearch hit, file:line or exec output that made the thing an unknown. An unwitnessed unknown blocks every transition.
 
-`depends_on` lists the ids that must resolve first. mutable-add refuses an addition that would close a cycle, and the refusal names the cycle path. A mutable may depend on any row in the store regardless of the phase that typed it.
+`depends_on` lists the ids that must resolve first. mutable-add refuses an addition that would close a cycle, and the refusal names the cycle path. A mutable may depend on any row in the store regardless of the node that typed it.
 
 Two-pass rule: a mutable that survives two genuine resolution attempts without a witness is not attempted a third time with the same approach. Reclassify it as a fresh, differently scoped unknown with a new id, re-cut the affected rows with prd-add on their existing ids, and stay in SHAPE. The reclassification is reshaping, not failure.
 
@@ -122,25 +124,25 @@ Check each row for independent, negotiable, valuable, estimable, small and testa
 
 Handover: Hands each thin vertical slice to SPIKE, where an unknown that search cannot settle gets a throwaway probe; nominated next node: SPIKE; cite Thin Vertical Slice - Alistair Cockburn.
 
-Cut each row as a thin vertical slice that crosses every layer the behaviour touches, from entry point to store. One real input then drives the whole path, and one exec_js run witnesses it. A slice that cuts across a module boundary fires the backreference to PARNAS. Re-cut it along the module's interface, not along its internals.
+Cut each row as a thin vertical slice that crosses every layer the behaviour touches, from entry point to store. One real input then drives the whole path, and one exec_js run witnesses it. A slice is thin only when it passes that test: one real input, one entry point, one exec_js run. A slice that needs a second input or a second entry point is split until each piece passes. A slice that cuts across a module boundary fires the backreference to PARNAS. Re-cut it along the module's interface, not along its internals.
 
 ### SPIKE - Spike Solution - Kent Beck
 
 Handover: Hands the spike's printed output and the settled unknowns to YAGNI to cut scope to caller-backed rows; nominated next node: YAGNI; cite Spike Solution - Kent Beck.
 
-Where search cannot settle an unknown, spike it: a throwaway exec_js probe against the real service, run with a named command that is red-capable, deterministic and fast. The spike's printed output is the mutable's witness. Spike code is never shipped. If the unknown survives the spike, the backreference to LIVEPLAN fires and the plan is re-cut around the surviving unknown.
+Where search cannot settle an unknown, spike it: a throwaway exec_js probe against the real service, run with a named command that is red-capable, deterministic and fast. A spike is timeboxed to one exec_js dispatch and five minutes of wall clock; a spike that exceeds the box without settling the unknown fires the backreference to LIVEPLAN. The spike's printed output is the mutable's witness. Spike code is never shipped. If the unknown survives the spike, the backreference to LIVEPLAN fires and the plan is re-cut around the surviving unknown.
 
 ### YAGNI - YAGNI - Ron Jeffries
 
 Handover: Hands the caller-backed row set to LIVEPLAN as the current task's live plan; nominated next node: LIVEPLAN; cite YAGNI - Ron Jeffries.
 
-Every row's scope is the request's closure. A row that adds an option, an extension point or a generality is admitted only with a current caller named in its pre-condition text. Generality with one caller fires the backreference to TARPIT. That removal belongs to the pressure phase (P6), so the plan carries only the caller-backed shape.
+Every row's scope is the request's closure. A row that adds an option, an extension point or a generality is admitted only with a current caller named in its pre-condition text. Generality with one caller fires the backreference to TARPIT. That removal belongs to the pressure node (P6), so the plan carries only the caller-backed shape.
 
 ### LIVEPLAN - Live Plan, Current Task Only
 
 Handover: Hands the live PRD rows to the G_CONTRACT gate, which admits only rows whose contract can be stated; nominated next node: G_CONTRACT; cite Live Plan, Current Task Only.
 
-The PRD holds rows for this request only. Each completed row closes with prd-resolve and its witness, so the list shrinks as the task proceeds. When the plan outlives its task, the backreference to G_START fires: the finished task is closed before any new plan is opened. The phase exits through LIVEPLAN into the G_CONTRACT gate.
+The PRD holds rows for this request only. Each completed row closes with prd-resolve and its witness, so the list shrinks as the task proceeds. When the plan outlives its task, the backreference to G_START fires: the finished task is closed before any new plan is opened. The node exits through LIVEPLAN into the G_CONTRACT gate.
 
 ## Witness
 
@@ -150,7 +152,7 @@ A finding delegated to a subagent, or recalled from memory, is a hypothesis. Bef
 
 ## Memorize
 
-Memorize the decisions a subsequent task would otherwise re-derive: the config-fit conclusion, the scan_deps result for the project's dependency set, a module boundary the search exposed, and a rejected alternative together with the witness that rejected it. Each one is `memorize-fire` with a stable key and its witness inline. Do not memorize the search transcript, the raw recall hits, phase progress, or the PRD rows, which already live on disk.
+Memorize the decisions a subsequent task would otherwise re-derive: the config-fit conclusion, the scan_deps result for the project's dependency set, a module boundary the search exposed, and a rejected alternative together with the witness that rejected it. Each one is `memorize-fire` with a stable key and its witness inline. Do not memorize the search transcript, the raw recall hits, node progress, or the PRD rows, which already live on disk.
 
 When instruction returns a recall hit that a witnessed codesearch contradicts, prune it with `memorize-prune {"key":"<key>"}`. Use `memorize-prune {"query":"<text>"}` to list review candidates, then delete the confirmed ones with `memorize-prune {"keys":[...]}`.
 
@@ -160,8 +162,8 @@ Entry is gated by G_START. The gate lean-one-task-in-flight is blocking. Its ref
 
 Exit is `transition to=CONTRACT`, dispatched only when every row carries pre-conditions, invariants and post-conditions, every grounding unknown has a witness, every contract-kind mutable is typed, and the last expansion pass added zero rows. The exit path runs LIVEPLAN, then the G_CONTRACT gate (contract is the only durable description, advisory: it records the rule and never refuses), then UBIQ in CONTRACT. Before that transition no second durable description of the request exists. No design document is written, and no plan prose lives outside `.gm/prd/`, `.gm/mutables/` and their two commit logs. The rows and the types are the description.
 
-Feedback inside the phase: XYPROB routes back to JTBD, INVEST routes back to THINSLICE, and SPIKE routes back to LIVEPLAN. Each re-cuts rows in place with prd-add on existing ids, then continues the walk in this phase. EARS routes to DBC, which is a backreference into CONTRACT carrying the row id, because DBC is the earliest phase able to make the requirement falsifiable. The backreference from LIVEPLAN to G_START closes a finished task before a new plan opens.
+Feedback inside the node: XYPROB routes back to JTBD, INVEST routes back to THINSLICE, and SPIKE routes back to LIVEPLAN. Each re-cuts rows in place with prd-add on existing ids, then continues the walk in this node. EARS routes to DBC, which is a backreference into CONTRACT carrying the row id, because DBC is the earliest node able to make the requirement falsifiable. The backreference from LIVEPLAN to G_START closes a finished task before a new plan opens.
 
-Routing is to the earliest capable phase. A discovery made in SHAPE stays in SHAPE unless it changes a contract or a runtime property, and it never sends the walk further back than the discovery requires.
+Routing is to the earliest capable node. A discovery made in SHAPE stays in SHAPE unless it changes a contract or a runtime property, and it never sends the walk further back than the discovery requires.
 
 Every turn ends in a verb dispatch. A transition refused with a next_dispatch is dispatched next, not narrated, and the denied transition is not retried blind.

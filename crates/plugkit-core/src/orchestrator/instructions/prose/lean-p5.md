@@ -1,8 +1,10 @@
-# LEAN-P5 RECORD
+# LEAN RECORD
 
-RECORD makes the verified change durable and explains it to the history. It commits exactly the change the contract describes, with a message that states the change type, the subject and the reason the contract changed, pushes it, watches CI on the pushed sha, and closes the PRD and mutable state so the sweep can judge the artifact whole. The phase exits when the commit is pushed, CI is green for that sha, the claim audit and residual scan are clean, every row and mutable is closed, and the contract-satisfied gate G_DONE has passed.
+This is a concern of the method, not a stage of a pipeline: it is entered from whichever node the work reaches it from, and left as soon as what it asks for holds. No concern gates entry to a set of nodes.
 
-Principles in this phase are applied as work, from the lean method (AnEntrypoint/lean, skills/lean/SKILL.md). Each principle's attribution is the label used in fsm/graph.json, given in its heading below.
+RECORD makes the verified change durable and explains it to the history. It commits exactly the change the contract describes, with a message that states the change type, the subject and the reason the contract changed, pushes it, watches CI on the pushed sha, and closes the PRD and mutable state so the sweep can judge the artifact whole. The node exits when the commit is pushed, CI is green for that sha, the claim audit and residual scan are clean, every row and mutable is closed, and the contract-satisfied gate G_DONE has passed.
+
+Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each principle's attribution is the label used in fsm/graph.json, given in its heading below.
 
 ## Verbs
 
@@ -12,17 +14,17 @@ Commit through the git verbs only. git_finalize {"message":"<message>"} bundles 
 
 After the push, git_log {"limit":1} gives the sha to validate, and ci-status reports the run for that head. On green, write the marker with fs_write {"path":".gm/exec-spool/.ci-validated","content":"{\"head_sha\":\"<that sha>\"}"}. On red, read the failing step, name its cause, fix the cause, and push again.
 
-Before the transition, dispatch claim-audit, then residual-scan as the last write-free verb: residual-scan is one-shot per stop window and any prd-add, mutable-add or mutable write invalidates its marker. Then dispatch transition {"to":"CONVERGENCE"} from RECORD, which starts the sweep that re-walks every phase against the whole artifact. Use phase-status when the state is in doubt.
+Before the transition, dispatch claim-audit, then residual-scan as the last write-free verb: residual-scan is one-shot per stop window and any prd-add, mutable-add or mutable write invalidates its marker. Then dispatch transition {"to":"CONVERGENCE"} from RECORD, which starts the sweep that re-walks every node against the whole artifact. Use node-status when the state is in doubt.
 
 ## PRD rows
 
-A need spotted during RECORD becomes a row at once with prd-add {"id":"<kebab-case-slug>","subject":"<what it repairs or proves>"}: a missing witness, a CI failure with a named cause, a completion claim with no witness, a dirty entry with no owner. Each row closes with prd-resolve {"id":"<row id>","witness_evidence":"<commit sha, CI run id, claim-audit line or file:line>"}.
+A need spotted during RECORD becomes a row at once with prd-add {"id":"<kebab-case-slug>","subject":"<what it repairs or proves>"}: a missing witness, a CI failure with a named cause, a completion claim with no witness, a dirty entry with no owner. Each row closes with prd-resolve {"id":"<row id>","witness_evidence":"<commit sha, CI run id, claim-audit line or file:line>","witness_dispatch_id":"<dispatch id of your live run>"}.
 
 The agent never writes deferral wording into a row or a transition note. Wording that moves a need to another time, another session, another person or a scope exclusion is not admitted. A need is a row now or it is not a need, and the transition note states what each row was closed by.
 
 ## Mutables
 
-RECORD owns no obligation kind and creates no mutable. It must still leave no pending mutable, because mutables-all-resolved refuses on any pending row of any kind. Before the closing transition, list pending mutables with mutable-list and resolve each one with mutable-resolve {"mutable_id":"<id>","witness_evidence":"<witness>"} only when its witness exists. A mutable without a witness returns the chain to the phase that owns its kind, as described under Transition.
+RECORD owns no obligation kind and creates no mutable. It must still leave no pending mutable, because mutables-all-resolved refuses on any pending row of any kind. Before the closing transition, list pending mutables with mutable-list and resolve each one with mutable-resolve {"mutable_id":"<id>","witness_evidence":"<witness>"} only when its witness exists. A mutable without a witness returns the chain to the node that owns its kind, as described under Transition.
 
 ## Housekeeping and memorization run on every finalize
 
@@ -87,7 +89,7 @@ RECORD owns no typed obligation, so each closing predicate is witnessed by the v
 - ci-validated-fresh: the marker's head_sha equals the sha git_log {"limit":1} reports for HEAD after the push. A marker for an earlier sha is refused, and each new push needs a new CI run and marker.
 - worktree-clean and submodules-clean: git_status is empty and the submodule check reports no drift. A submodule change is committed and pushed inside the submodule first, then its new commit is pinned in the parent, then the parent is pushed.
 - claim-audit-clean: claim-audit reports no completion claim without a witness. Each claim in the message, the rows and the transition note is witnessed or removed.
-- residual-scan-fired: residual-scan ran last, and its reply names the open surface. A non-empty surface is a missed row: prd-add it and re-run from the phase start, since a clean scan on a short PRD for a long prompt is a false negative.
+- residual-scan-fired: residual-scan ran last, and its reply names the open surface. A non-empty surface is a missed row: prd-add it and re-run from the node start, since a clean scan on a short PRD for a long prompt is a false negative.
 - no-hedge-language-in-diff: every new prose line is re-read for hedges and deferral wording. The gate catches the common phrases, so the agent also checks the shape the list misses: a commitment stated and then qualified into a non-decision.
 - The human outcome: each shipped change is traced to something a person would see, such as a capability gained, a wait removed, a failure no longer hit, or a developer the interface stops fighting. A change whose chain ends in elegance with no reachable outcome is reverted with git_revert.
 
@@ -99,12 +101,12 @@ Before the commit, memorize-fire every correction the user gave, every default t
 
 ## Transition
 
-The phase is entered with transition {"to":"RECORD"} from PRESSURE. The graph has no gate on that edge, since the net-negative gate already passed before PRESSURE.
+The node is entered with transition {"to":"RECORD"} from PRESSURE. The graph has no gate on that edge, since the net-negative gate already passed before PRESSURE.
 
-The exit is ADRN, then G_DONE, the gate for "contract satisfied and recorded", whose predicate lean-contract-recorded is blocking: every PRD row is closed and the worktree is clean. The sweep starts only after that gate passes: dispatch transition {"to":"CONVERGENCE"} once every witness above is quoted in the transition note. The sweep walks every phase head to tail and ends in one of two terminal states: G_FIXPOINT when it changed nothing, or G_SURFACE when the variant did not decrease. Done is the terminal state the transition returns, never the agent's own pronouncement.
+The exit is ADRN, then G_DONE, the gate for "contract satisfied and recorded", whose predicate lean-contract-recorded is blocking: every PRD row is closed and the worktree is clean. The sweep starts only after that gate passes: dispatch transition {"to":"CONVERGENCE"} once every witness above is quoted in the transition note. The sweep walks every node head to tail and ends in one of two terminal states: G_FIXPOINT when it changed nothing, or G_SURFACE when the variant did not decrease. Done is the terminal state the transition returns, never the agent's own pronouncement.
 
 A closure predicate denial names its recovery verb in next_dispatch, and that verb is dispatched next, never the bare transition again. An identical denial repeated three times is escalated by the repeat threshold, and the escalation is read before any further dispatch.
 
-Feedback routes each discovery to the earliest phase able to resolve it. A message that states what but not why returns to CONVCOM. An unrecoverable reason records an ADR under ADRN. State outside the repository returns to SHAPE through LIVEPLAN. A broken promise returns to CONTRACT through CONTRACTTEST. A CI assertion failure returns to VERIFY; a missing module or broken build returns to BUILD; a CI type error returns to CONTRACT. A residual or claim-audit finding that is a behaviour defect returns to VERIFY, and one that is a code defect returns to BUILD. G_DONE sends the chain back to G_INDEP when the contract is not satisfied, which re-enters VERIFY with a fresh independent verifier.
+Feedback routes each discovery to the earliest node able to resolve it. A message that states what but not why returns to CONVCOM. An unrecoverable reason records an ADR under ADRN. State outside the repository returns to SHAPE through LIVEPLAN. A broken promise returns to CONTRACT through CONTRACTTEST. A CI assertion failure returns to VERIFY; a missing module or broken build returns to BUILD; a CI type error returns to CONTRACT. A residual or claim-audit finding that is a behaviour defect returns to VERIFY, and one that is a code defect returns to BUILD. G_DONE sends the chain back to G_INDEP when the contract is not satisfied, which re-enters VERIFY with a fresh independent verifier.
 
 The chain does not stop in RECORD on a summary, a recap or a message that names the next step without dispatching it. Every turn ends in a dispatch until the sweep returns a terminal state.

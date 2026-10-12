@@ -1,8 +1,10 @@
-# LEAN-P2 CONTRACT
+# LEAN CONTRACT
 
-CONTRACT writes each row's contract into types, names, signatures and obligations before any implementation exists. Each row is a proof goal. Its stated pre-conditions, invariants and post-conditions become typed signatures wherever the type can express them, and each remaining obligation becomes a PROVE-kind mutable discharged by a live witness. The phase replaces the former PROVE stage. It exits when every row's contract sits in its signatures, every contract-kind mutable is resolved and witnessed, and `transition to=BUILD` is dispatched.
+This is a concern of the method, not a stage of a pipeline: it is entered from whichever node the work reaches it from, and left as soon as what it asks for holds. No concern gates entry to a set of nodes.
 
-Principles in this phase are applied as work, from the lean method (AnEntrypoint/lean, skills/lean/SKILL.md). Each H3 below carries a principle key, then the attribution exactly as fsm/graph.json labels it.
+CONTRACT writes each row's contract into types, names, signatures and obligations before any implementation exists. Each row is a proof goal. Its stated pre-conditions, invariants and post-conditions become typed signatures wherever the type can express them, and each remaining obligation becomes a PROVE-kind mutable discharged by a live witness. The node replaces the former PROVE stage. It exits when every row's contract sits in its signatures, every contract-kind mutable is resolved and witnessed, and `transition to=BUILD` is dispatched.
+
+Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each H3 below carries a principle key, then the attribution exactly as fsm/graph.json labels it.
 
 ## Verbs
 
@@ -12,7 +14,7 @@ Before writing or changing a signature, dispatch `callers {symbol}` to list ever
 
 Every build, subprocess and filesystem probe is an exec_js dispatch. exec_js runs in a separate Node process and has no tools object. Run a command with arguments through `require("node:child_process").execFileSync(command, args, { encoding: "utf8" })`. Examples are the compiler check for the touched crate or package, and `node --check` on a touched file. Do not run bash or PowerShell for these. Git is read with `git_show` and `git_diff` and written with the git_* verbs, never through a shell. For a resource-bound witness, run exec_js with `opts.profile:true`. The response's duration_ms is free, and the worst-N self-time lines locate the cost.
 
-Resolve obligations with `mutable-resolve {"mutable_id":"<id>","witness_evidence":"<witness>"}`. For a resource-bound mutable, add `"measured_value":<number>` to the same body. Resolve rows with `prd-resolve {"id":"<row id>","witness_evidence":"<witness>"}`, with id at top level beside witness_evidence and never nested inside a string. A reply of deviation kind prd-resolve-unknown-id means the id missed. Read its hint field and re-dispatch corrected, never blind. Declare new obligations with `mutable-add {"id":"<kebab-case slug>","obligation_kind":"<kind>","depends_on":[...],"status":"unknown"}`.
+Resolve obligations with `mutable-resolve {"mutable_id":"<id>","witness_evidence":"<witness>"}`. For a resource-bound mutable, add `"measured_value":<number>` to the same body. Resolve rows with `prd-resolve {"id":"<row id>","witness_evidence":"<witness>","witness_dispatch_id":"<dispatch id of your own live run>"}`, with id at top level beside witness_evidence and never nested inside a string. A reply of deviation kind prd-resolve-unknown-id means the id missed. Read its hint field and re-dispatch corrected, never blind. Declare new obligations with `mutable-add {"id":"<kebab-case slug>","obligation_kind":"<kind>","depends_on":[...],"status":"unknown"}`.
 
 Reshaping is `transition to=SHAPE`, dispatched in the same turn as the discovery, with the affected rows re-cut in place through prd-add on their existing ids. Advancing is `transition to=BUILD`.
 
@@ -32,21 +34,21 @@ Pass `commit_comment` on `prd-resolve` when the resolved contract encodes a rule
 
 ## Mutables
 
-This phase owns the five PROVE kinds, and only these five: `precondition`, `invariant`, `postcondition`, `resource-bound` and `type-shape`. Each has a distinct witness, and a mutable of the wrong kind is re-typed before it is resolved.
+This node owns the five PROVE kinds, and only these five: `precondition`, `invariant`, `postcondition`, `resource-bound` and `type-shape`. Each has a distinct witness, and a mutable of the wrong kind is re-typed before it is resolved.
 
 A precondition is what must hold on entry: input shape, caller invariant, resource availability. An invariant is what must hold across every reachable state of a mutation sequence. A postcondition is what must hold on exit: output shape and side-effect completeness. A resource-bound is a worst-case time, size or memory bound the path must not exceed, and it carries a numeric `bound` field. A type-shape is a data representation in which the invalid state has no constructor, so the implementation inhabits the type rather than merely satisfying it at run time.
 
-Every obligation is a node in one dependency DAG. A mutable declares `depends_on` with the ids it requires resolved first. A dependency may cross phase boundaries, since the DAG is store-wide: a CONTRACT mutable may depend on a P1 mutable, and a BUILD mutable may depend on a CONTRACT mutable. mutable-add rejects a cycle and names the cycle path. Resolve in dependency order. A row whose depends_on are all resolved is ready. A row with an unresolved dependency is not reachable yet, so resolve the dependency first.
+Every obligation is a node in one dependency DAG. A mutable declares `depends_on` with the ids it requires resolved first. A dependency may cross node boundaries, since the DAG is store-wide: a CONTRACT mutable may depend on a P1 mutable, and a BUILD mutable may depend on a CONTRACT mutable. mutable-add rejects a cycle and names the cycle path. Resolve in dependency order. A row whose depends_on are all resolved is ready. A row with an unresolved dependency is not reachable yet, so resolve the dependency first.
 
 Composition: a row declares `supplies: "<description>"` naming what its postcondition hands to a dependent row's precondition. The handoff is written into both rows' text, so a reader can trace how obligations chain.
 
 The resource-bound check is mechanical. `mutable-resolve` accepts `measured_value`. When the value exceeds `bound`, the resolution is refused with both numbers named, so a prose claim alone cannot close it. The other four kinds have no equally cheap mechanical check and rest on witness_evidence.
 
-Mutable gate: drain every pending PROVE-kind mutable before leaving the phase. Loop: `mutable-resolve` each ready row. When one resolution surfaces a new unknown, `mutable-add` it immediately with its obligation_kind and depends_on, and resolve it in the same turn before advancing. When the transition refuses, the mutables-all-resolved and mutables-all-typed predicates name the blocking row and its reason. That row is resolved next.
+Mutable gate: drain every pending PROVE-kind mutable before leaving the node. Loop: `mutable-resolve` each ready row. When one resolution surfaces a new unknown, `mutable-add` it immediately with its obligation_kind and depends_on, and resolve it in the same turn before advancing. When the transition refuses, the mutables-all-resolved and mutables-all-typed predicates name the blocking row and its reason. That row is resolved next.
 
 Two-pass rule: a mutable that survives two genuine resolution attempts without a witness is reclassified as a fresh, differently scoped unknown with a new id. Re-cut the affected rows, and dispatch `transition to=SHAPE`, since the reclassification shows the plan must reshape.
 
-Always rearchitect immediately: an in-spirit architectural improvement found mid-phase, clearly better and not merely different, is handled at once. Dispatch `transition to=SHAPE` in the same turn, and re-cut the affected rows with prd-add on their existing ids, which keeps handle and position. Sunk cost in the old shape never justifies shipping the worse design. The urge to write "this should be rearchitected" is the trigger for the transition. Narrating it without dispatching the transition strands the chain on a stale plan.
+Always rearchitect immediately: an in-spirit architectural improvement found mid-node, clearly better and not merely different, is handled at once. Dispatch `transition to=SHAPE` in the same turn, and re-cut the affected rows with prd-add on their existing ids, which keeps handle and position. Sunk cost in the old shape never justifies shipping the worse design. The urge to write "this should be rearchitected" is the trigger for the transition. Narrating it without dispatching the transition strands the chain on a stale plan.
 
 Surface divergence: a state that differs from the PRD's assumed shape is a new mutable with its witness. A broken tool that blocks a witness is a mutable whose task is to make the witness reachable: fix the tool, replace it, or drive its lower-level interface directly.
 
@@ -156,10 +158,10 @@ Do not memorize the exec output in bulk, intermediate compiler errors, or the co
 
 ## Transition
 
-The exit is `transition to=BUILD`. The edge from ACCEPTPORT to TOTALITY carries no gate in the lean graph, so the phase closes by its own rules: every PROVE-kind mutable resolved, every row's contract in its signatures, and every row's witness printed. A refusal from the compiled predicates names the blocking row, and that row is resolved next. The response's next_dispatch names the recovery verb, and that verb is dispatched next.
+The exit is `transition to=BUILD`. The edge from ACCEPTPORT to TOTALITY carries no gate in the lean graph, so the node closes by its own rules: every PROVE-kind mutable resolved, every row's contract in its signatures, and every row's witness printed. A refusal from the compiled predicates names the blocking row, and that row is resolved next. The response's next_dispatch names the recovery verb, and that verb is dispatched next.
 
-Feedback from BUILD returns to the phase that owns the discovery. A partial function that escaped its domain fires the backreference from TOTALITY to PARSEDV, so the walk returns to PARSEDV in CONTRACT. A mixed abstraction level in a function fires the backreference from SLAP to DEEPMOD. An adapter that leaked into the core fires the backreference from ACCEPTPORT to PARNAS. Each is resolved in CONTRACT before BUILD resumes.
+Feedback from BUILD returns to the node that owns the discovery. A partial function that escaped its domain fires the backreference from TOTALITY to PARSEDV, so the walk returns to PARSEDV in CONTRACT. A mixed abstraction level in a function fires the backreference from SLAP to DEEPMOD. An adapter that leaked into the core fires the backreference from ACCEPTPORT to PARNAS. Each is resolved in CONTRACT before BUILD resumes.
 
-A discovery that reshapes the plan (the representation a row assumed does not exist in reality, or the rows' boundaries are wrong) is `transition to=SHAPE`. Route to the earliest capable phase, and never further back than the discovery requires.
+A discovery that reshapes the plan (the representation a row assumed does not exist in reality, or the rows' boundaries are wrong) is `transition to=SHAPE`. Route to the earliest capable node, and never further back than the discovery requires.
 
 Every turn ends in a verb dispatch. A transition refused with a next_dispatch is dispatched next, not narrated.
