@@ -1,31 +1,18 @@
+## 2026-10-12 - codeinsight: an incomplete symbol index drives further sync passes and then answers, instead of refusing after the whole wait
+
+**Changes:** `code_symbols.rs` `handle` no longer answers `ok: false` the moment its one top-up sync pass (`index.incremental_topup_wall_budget_ms`, 4 s) comes back incomplete. `drive_sync_to_completion` now runs after that pass for every action except `outline`: while the report is incomplete, the root is answerable, the store is not busy and `files_deferred` is still non-zero, it drives further `sync_tree_with_budget` passes, each capped at `SELF_HEAL_SYNC_PASS_CEILING_MS` (20 s) and all of them together at `SELF_HEAL_SYNC_WALL_BUDGET_MS` (45 s) measured from the start of the dispatch, hard-capped at `SELF_HEAL_SYNC_MAX_PASSES` (6). A pass whose `SELF_HEAL_PROGRESS_COUNTERS` tuple is identical to the one before it moved the index nowhere and ends the loop, so an index that is incomplete for a reason no pass can fix (an oversized or unreadable file, a tree-sitter failure, a store failure, a listing the walk cannot finish) costs one pass instead of six; the last report carries `self_heal_passes`. When the budget runs out first the verb answers anyway: the reply gains `index_current: false`, `answered_from` and `index_incomplete_reason` (`stale_index_refusal` with `answered: true`, which keeps the counters and the remedy and says the answer is not current evidence), and it still carries `codeinsight_index` with `complete: false`, so a caller that gates on `complete` reads the same fact it always did. The refusal is kept exactly where another pass cannot help: a root the host does not grant, and a store another writer holds. `refresh_is_complete`, `refresh_deferred_files`, `refresh_counters` and `refresh_can_advance` name the four predicates the loop reads, replacing the inline `refresh.get("complete")` test.
+
+**Not changed:** `action=sync` still spends `index.wall_budget_ms` in one pass and returns its report unchanged; `outline` still takes exactly one top-up pass and still answers `partial: true` with its own `focus` state, which is the contract `scripts/codeinsight-outline-deferred-witness.mjs` pins; a project whose index is already complete runs the same single top-up pass and one `refresh_is_complete` test, so a fully-synced project pays nothing extra; `callers` under a busy store still answers from the persisted call-edge index with `store: "busy"`; a `root_granted: false` reply is byte-for-byte the same refusal; `refresh_refusal_detail`'s counters and its two-name `deferred_set` cap are untouched.
+
+**Not yet measured:** built on Actions; the running guest predates it, so the live witness waits on a CI build and a runner reload.
+
 ## 2026-10-12 - prd/mutables: one file per row, and a resolved row moves into the commit log
 
 **Changes:** `.gm/prd.yml` and `.gm/mutables.yml` stop being the store. A PRD row now lives at `.gm/prd/<id>.yml` and a mutable at `.gm/mutables/<id>.yml`; the folder IS the index (a `readdir`), and `item_stem(id)` maps an id to its file, so no second list can drift from the rows it names. New `orchestrator/row_store.rs` owns the layout: `read_blocks` materialises the document from the folder, `write_blocks` compare-and-swaps ONLY the item files whose bytes changed and removes the files of ids that are gone, and `cas_retry_write`/`cas_retry_write_verified` are store-backed twins of `cas::cas_retry_write*` carrying the same contract, so every modify/verify closure already in `prd.rs` and `mutables.rs` is carried over unchanged. Every write goes through `pkfs::cas_write`, which the host implements as a temp file plus `fs::rename` plus `sync_all` under a per-path lock, so a partial write cannot leave a row unreadable. Resolving is a move, not a flag: `retire_to_log` appends the row material to `.gm/prd-log.jsonl` (`.gm/mutables-log.jsonl` for a mutable) with `ts`, `ts_ms`, `session_id`, the file it came from and the full block set, then removes the item file, so the folder holds open work only. The log is append-only and hash chained: each line carries `prev`, the sha256 of the line before it, and `sha256` over its own body, so a truncation or an edit is visible rather than silent. `prd-list` and `mutable-list` search the log for an id the folder no longer holds, and for a closed status asked for explicitly, so a resolved row stays answerable. `pkfs` gains `remove_file` on both cfg arms. The legacy single files are still read: `maybe_absorb` splits them into the folder on the first write and records the legacy size and mtime in `.gm/prd.absorbed.json`, after which reads skip them; a legacy row whose id already has a file, or already sits in the log, is suppressed, so nothing is duplicated or resurrected. The legacy file is never rewritten and never deleted, because projects track and commit it.
 
 **Not changed:** every verb body shape and every existing response field. `prd-add`, `prd-list`, `prd-resolve`, `prd-defer`, `prd-block`, `mutable-add`, `mutable-list`, `mutable-resolve` and `mutable-defer` answer as before; a resolve reply gains three new fields (`filed_to`, `filed_at`, `row_file_cleared`). The git verbs' foreign-row filter still keys on the legacy path alone, because one file per row is one owner per file and there is no whole-file rewrite left to filter. `prd-repair` still targets the legacy file. `is_prd_state_pathspec` is added for the wider path class and `is_runtime_state_path` now routes through it.
 
-**Measured:** `native-check` (run 38281523359) and `publish/release` (38281524071) both succeeded on the pushed commit. `predicates-md-drift` failed once on a checkout race -- it read gm-config before 5cfc399e landed -- and passed on rerun. Served live against `C:\dev\gm` with plugin gm 0.1.1612:
-
-```
-prd-add {id: gm-prd-rows-one-file-per-row-live-proof, ...}
-  -> added; .gm/prd/ created, .gm/prd.absorbed.json = {"legacy":{"size":232778,...}}
-     legacy .gm/prd.yml (232778 bytes) held 309 distinct row ids
-     .gm/prd/ holds 309 files; re-deriving item_stem over every legacy id: 0 without a file
-     the new row is .gm/prd/gm-prd-rows-one-file-per-row-live-proof.yml, a bare mapping, id first
-prd-list {"id":"gm-prd-rows-one-file-per-row-live-proof"} -> 1 item, store_total 310
-prd-resolve {id, witness_evidence, witness_dispatch_id}
-  -> resolved, filed_to .gm/prd-log.jsonl, filed_at 2026-10-12T17:22:02.085Z, row_file_cleared true
-     .gm/prd/<id>.yml gone; .gm/prd/ back to 309
-     .gm/prd-log.jsonl: one line with v, kind, id, status, ts, ts_ms, session_id,
-                        prev (64 zeros = genesis), sha256, file, note, material
-prd-list {"id":"gm-prd-rows-one-file-per-row-live-proof"} -> 1 item, resolved: true,
-                        resolved_at 2026-10-12T17:22:02.085Z, source .gm/prd-log.jsonl
-
-mutable-add / mutable-resolve: .gm/mutables.yml (356215 bytes, 367 ids) -> 367 files, 0 missing;
-resolved mutable moved to .gm/mutables-log.jsonl, row_file_cleared true
-```
-
-Both legacy files stay on disk, unmodified and uncommitted-away, because projects track them.
+**Not yet measured:** built on Actions; the running guest predates it, so the live witness waits on a CI build and a runner reload.
 
 ## 2026-10-12 - codeinsight: a stale-index refusal names its own remedy instead of inlining the deferred file set
 

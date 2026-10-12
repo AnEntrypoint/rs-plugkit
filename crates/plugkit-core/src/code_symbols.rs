@@ -2483,7 +2483,7 @@ fn refresh_refusal_detail(refresh: &Value) -> String {
     detail
 }
 
-fn stale_index_refusal(action: &str, root: Option<&str>, refresh: &Value) -> String {
+fn stale_index_refusal(action: &str, root: Option<&str>, refresh: &Value, answered: bool) -> String {
     let (scope, sync_body) = match root {
         Some(root) => (
             format!("root '{root}': "),
@@ -2494,10 +2494,122 @@ fn stale_index_refusal(action: &str, root: Option<&str>, refresh: &Value) -> Str
             "codeinsight {\"action\":\"sync\"}".to_string(),
         ),
     };
+    if answered {
+        return format!(
+            "{scope}symbol index refresh is incomplete, so this {action} answer is not current evidence; it reads the cached graph only as far as this dispatch's own sync passes advanced it, and codeinsight_index below says how far that was. Refresh it with `{sync_body}`, then re-dispatch this {action}; a sync pass is incremental, so one that does not finish still advances the index. Refresh: {}",
+            refresh_refusal_detail(refresh)
+        );
+    }
     format!(
         "{scope}symbol index refresh is incomplete, so {action} read no current answer from it; cached graph is not current evidence. Refresh it with `{sync_body}`, then re-dispatch this {action}; a sync pass is incremental, so one that does not finish still advances the index. The sync report's deferred_set names the deferred files and is not repeated here. Refresh: {}",
         refresh_refusal_detail(refresh)
     )
+}
+
+/// How much wall time, on top of the single top-up pass every answering action already
+/// runs, one dispatch may spend driving further incremental sync passes to make its own
+/// index complete. The host dispatch call deadline is 120 s, so this stays well inside it
+/// even when the caller's own queue wait is added on top.
+const SELF_HEAL_SYNC_WALL_BUDGET_MS: u64 = 45_000;
+/// One self-heal pass never spends more than this, so a slow pass cannot swallow the whole
+/// self-heal budget where two shorter ones would have converged.
+const SELF_HEAL_SYNC_PASS_CEILING_MS: u64 = 20_000;
+/// The loop ends after this many passes even when every pass reports progress.
+const SELF_HEAL_SYNC_MAX_PASSES: u32 = 6;
+/// The counters whose tuple identifies a pass. Two passes with the same tuple moved the
+/// index nowhere, which is the loop's own stop signal.
+const SELF_HEAL_PROGRESS_COUNTERS: [&str; 12] = [
+    "files_listed",
+    "listing_complete",
+    "files_synced",
+    "files_unchanged",
+    "files_deferred",
+    "files_removed",
+    "symbols_written",
+    "edges_written",
+    "treesitter_failures",
+    "files_unreadable",
+    "files_oversized",
+    "store_failures",
+];
+
+fn refresh_is_complete(refresh: &Value) -> bool {
+    refresh.get("complete").and_then(Value::as_bool) == Some(true)
+}
+
+fn refresh_deferred_files(refresh: &Value) -> u64 {
+    refresh.get("files_deferred").and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn refresh_counters(refresh: &Value) -> String {
+    SELF_HEAL_PROGRESS_COUNTERS
+        .iter()
+        .map(|key| {
+            format!(
+                "{key}={}",
+                refresh
+                    .get(*key)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A further pass can only help while the root is answerable and files are still being
+/// deferred. A store another writer holds, a root the host does not grant, an error report
+/// and an index that is incomplete for any other reason (an oversized or unreadable file, a
+/// tree-sitter failure, a store failure) are all states another pass cannot spend its way
+/// out of, and re-running one would spend the caller's wall clock to reproduce the same
+/// counters.
+fn refresh_can_advance(refresh: &Value) -> bool {
+    refresh.get("store_busy").and_then(Value::as_bool) != Some(true)
+        && refresh.get("root_granted").and_then(Value::as_bool) != Some(false)
+        && refresh.get("ok").and_then(Value::as_bool) != Some(false)
+        && refresh_deferred_files(refresh) > 0
+}
+
+/// Drive incremental sync passes until the index is complete, the wall budget for this
+/// dispatch runs out, or a pass stops moving the index. A sync pass is incremental, so a
+/// sequence of them converges where one cannot; the verb used to refuse instead, leaving the
+/// caller three round trips for one answer. The returned report is the last pass's, with
+/// `self_heal_passes` naming how many extra passes this dispatch paid for.
+fn drive_sync_to_completion(
+    cfg: &crate::ragconfig::RagConfig,
+    project_path: Option<&str>,
+    focus: Option<&str>,
+    started_ms: u64,
+    mut refresh: Value,
+) -> Value {
+    let mut passes = 0u32;
+    let mut previous = refresh_counters(&refresh);
+    while !refresh_is_complete(&refresh)
+        && passes < SELF_HEAL_SYNC_MAX_PASSES
+        && refresh_can_advance(&refresh)
+    {
+        let spent = host_now_ms().saturating_sub(started_ms);
+        if spent >= SELF_HEAL_SYNC_WALL_BUDGET_MS {
+            break;
+        }
+        let pass_budget =
+            (SELF_HEAL_SYNC_WALL_BUDGET_MS - spent).min(SELF_HEAL_SYNC_PASS_CEILING_MS);
+        let next = sync_tree_with_budget(cfg, project_path, pass_budget, focus);
+        passes += 1;
+        let counters = refresh_counters(&next);
+        let advanced = counters != previous;
+        previous = counters;
+        refresh = next;
+        if !advanced {
+            break;
+        }
+    }
+    if passes > 0 {
+        if let Some(map) = refresh.as_object_mut() {
+            map.insert("self_heal_passes".to_string(), json!(passes));
+        }
+    }
+    refresh
 }
 
 pub(crate) fn handle(body: &Value) -> Result<Value, String> {
@@ -2525,6 +2637,7 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
         }
     }
     let cfg = crate::ragconfig::RagConfig::resolved();
+    let handle_started_ms = host_now_ms();
     if let Some(path) = text_field(body, &["path", "file", "path_prefix"]) {
         if path
             .rsplit_once('.')
@@ -2545,13 +2658,26 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     } else {
         None
     };
-    let refresh = sync_tree_with_budget(
+    let mut refresh = sync_tree_with_budget(
         &cfg,
         project_path,
         cfg.index.incremental_topup_wall_budget_ms,
         focus.as_deref(),
     );
-    let refresh_complete = refresh.get("complete").and_then(Value::as_bool) == Some(true);
+    // `outline` is exempt: it already answers an incompletely-synced index with partial:true
+    // and its own focus state, and its contract is that one pass decides the focus file's
+    // state. Every other action used to refuse here, so drive the index to completion
+    // instead and answer even when the budget runs out first.
+    if action != "outline" {
+        refresh = drive_sync_to_completion(
+            &cfg,
+            project_path,
+            focus.as_deref(),
+            handle_started_ms,
+            refresh,
+        );
+    }
+    let refresh_complete = refresh_is_complete(&refresh);
     let answer_from_index = refresh.get("store_busy").and_then(Value::as_bool) == Some(true) && action == "callers";
     if !refresh_complete && action != "outline" && !answer_from_index {
         if refresh.get("root_granted").and_then(Value::as_bool) == Some(false) {
@@ -2560,10 +2686,14 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
                 project_path.unwrap_or_default()
             ));
         }
-        if let Some(root) = project_path {
-            return Err(stale_index_refusal(action, Some(root), &refresh));
+        // A busy store is contention another pass cannot sync its way out of, so it still
+        // refuses rather than answering from a store this dispatch could not write.
+        if refresh.get("store_busy").and_then(Value::as_bool) == Some(true) {
+            return Err(stale_index_refusal(action, project_path, &refresh, false));
         }
-        return Err(stale_index_refusal(action, None, &refresh));
+        // Otherwise the index is incomplete but readable: answer with what it has, carrying
+        // the same reason the refusal used to be, instead of returning no answer at all
+        // after the whole wait.
     }
     let limit = body
         .get("limit")
@@ -2652,6 +2782,13 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
         output["store"] = json!("busy");
         output["index_current"] = json!(false);
         output["answered_from"] = json!("persisted call-edge index (host KV); the symbol index was not refreshed because the libsql store was busy, and definition lookups read that store and may be empty this pass");
+    }
+    if !refresh_complete && action != "outline" {
+        output["index_current"] = json!(false);
+        if output.get("answered_from").is_none() {
+            output["answered_from"] = json!("a symbol index this dispatch could not refresh to completion; definition and call-edge lookups read it as-is, so anything living in a still-deferred file is absent from this answer rather than reported as absent from the project");
+        }
+        output["index_incomplete_reason"] = json!(stale_index_refusal(action, project_path, &refresh, true));
     }
     output["codeinsight_index"] = refresh;
     Ok(output)
