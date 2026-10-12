@@ -140,7 +140,7 @@ Fan-out: each recall hit's live-tree re-verification is an independent slice: on
 
 Nominations (set): {STABLEPREFIX}. Backreferences in from {NAURTHEORY}; out to {COMPACT}.
 
-A fact that a resuming session needs and that the live tree cannot supply is written with `memorize-fire`, as one of the four memory types: user, feedback, project or reference. A recall that opens this phase is a lead. Re-verify that the named file, function or flag still exists before acting on it. A stale, superseded or wrong hit is removed on sight with `memorize-prune {key}`. For an uncertain set, `memorize-prune {query}` returns review-only candidates, and the chosen ones are removed by `{keys}`. The backreference NAURTHEORY to MEMTOOL ("the theory died with the session") is taken when a theory exists only in the window. Witness: a `recall` after the write returns the new key with its text, and after a prune the same query no longer returns the key.
+A fact that a resuming session needs and that the live tree cannot supply is written with `memorize-fire`, under the storage-tier kind that fits it: `l0` or `l1`. A recall that opens this phase is a lead. Re-verify that the named file, function or flag still exists before acting on it. A stale, superseded or wrong hit is removed on sight with `memorize-prune {key}`. For an uncertain set, `memorize-prune {query}` returns review-only candidates, and the chosen ones are removed by `{keys}`. The backreference NAURTHEORY to MEMTOOL ("the theory died with the session") is taken when a theory exists only in the window. Witness: a `recall` after the write returns the new key with its text, and after a prune the same query no longer returns the key.
 
 ### STABLEPREFIX - Stable Prefix for Cache Hits
 
@@ -178,7 +178,7 @@ The phase closes when a sweep records no context-spend measure that rose per uni
 
 ## Memorize
 
-`memorize-fire` writes what a resuming session needs and cannot re-derive cheaply: which search mode answered a class of question, a subagent SESSION_ID pattern that held, a correction the user gave about context handling, and the reason a recall key was pruned. Each write is one of the four types (user, feedback, project, reference) in the default namespace. Nothing derivable from the live tree is written: file paths, function names, code patterns, git history and document contents. A stored derivable fact becomes a second source that drifts. Pruning is part of this phase. A recall hit the live tree contradicts is removed with `memorize-prune {key}` in the same pass that found it.
+`memorize-fire` writes what a resuming session needs and cannot re-derive cheaply: which search mode answered a class of question, a subagent SESSION_ID pattern that held, a correction the user gave about context handling, and the reason a recall key was pruned. Each write carries a storage-tier kind, `l0` or `l1`, in the default namespace. Nothing derivable from the live tree is written: file paths, function names, code patterns, git history and document contents. A stored derivable fact becomes a second source that drifts. Pruning is part of this phase. A recall hit the live tree contradicts is removed with `memorize-prune {key}` in the same pass that found it.
 
 ## Transition
 
