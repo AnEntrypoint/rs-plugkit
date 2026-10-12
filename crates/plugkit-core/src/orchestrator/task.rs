@@ -287,7 +287,8 @@ pub fn handle_wait_for_task(content: &str) -> (String, String, i32) {
         };
         let now = host_now_ms();
         let waited_ms = now.saturating_sub(started);
-        if task.get("status").and_then(Value::as_str) != Some("running") {
+        let running = task.get("running").and_then(Value::as_bool).unwrap_or(false);
+        if !running {
             let output = host_task("output", &json!({ "id": id, "max_bytes": 65536 }));
             return ok_resp(
                 "wait-for-task",
@@ -306,7 +307,7 @@ pub fn handle_wait_for_task(content: &str) -> (String, String, i32) {
                 json!({
                     "completed": false,
                     "timed_out": true,
-                    "status": "running",
+                    "running": true,
                     "task": task,
                     "timeout_ms": requested,
                     "waited_ms": waited_ms,
