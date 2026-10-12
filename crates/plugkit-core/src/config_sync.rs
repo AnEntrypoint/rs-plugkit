@@ -208,9 +208,12 @@ fn try_lock(src: &RepoSource) -> LockProbe {
              }}\
              let first=acquire();if(first!=='busy'){{return first;}}\
              let st=null;try{{st=fs.statSync(p);}}catch(e2){{return e2.code==='ENOENT'?'busy':'failed:stat:'+e2.code;}}\
+             let observed=null;try{{observed=fs.readFileSync(p+'/owner','utf8');}}catch(e5){{observed=null;}}\
              if(ownerAlive()!==false&&Date.now()-st.mtimeMs<=staleMs){{return 'busy';}}\
              const aside=p+'.stale-'+process.pid+'-'+Date.now();\
              try{{fs.renameSync(p,aside);}}catch(e3){{return 'failed:stale-rename:'+e3.code;}}\
+             let moved=null;try{{moved=fs.readFileSync(aside+'/owner','utf8');}}catch(e6){{moved=null;}}\
+             if(moved!==observed){{try{{fs.renameSync(aside,p);}}catch(e7){{}}return 'busy';}}\
              try{{fs.rmSync(aside,{{recursive:true,force:true}});}}catch(e4){{}}\
              return acquire();\
              }})());"

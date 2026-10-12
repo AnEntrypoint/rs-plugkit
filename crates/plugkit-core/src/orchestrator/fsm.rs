@@ -131,7 +131,7 @@ fn default_await_allowed_verbs() -> Vec<String> {
         .collect()
 }
 fn default_longgap_exempt_verbs() -> Vec<String> {
-    ["health", "auto-recall", "wait", "sleep"]
+    ["health", "auto-recall", "wait", "sleep", "wait-for-task"]
         .iter()
         .map(|s| s.to_string())
         .collect()
