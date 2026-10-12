@@ -7359,21 +7359,66 @@ pub(super) fn git_worktree_target(body: &Value, cwd: Option<&str>, verb: &str) -
 }
 
 pub(super) fn git_worktree_add(body: &Value) -> u64 {
-    if let Some(refusal) = refuse_unknown_fields("git_worktree_add", body, &["path", "ref", "create", "allowOutsideRoot"]) { return refusal; }
+    if let Some(refusal) = refuse_unknown_fields("git_worktree_add", body, &["path", "ref", "rev", "commit", "start_point", "create", "allowOutsideRoot"]) { return refusal; }
     let cwd = body_cwd(body);
     let (root, path) = match git_worktree_target(body, cwd, "git_worktree_add") { Ok(v) => v, Err(detail) => return err_json("git_worktree_add", detail) };
     let create = body.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
-    let reference = body.get("ref").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
-    if create && reference.is_none() { return err("git_worktree_add", "create:true requires a ref naming the new branch"); }
-    if reference.is_some_and(|s| s.starts_with('-')) { return err("git_worktree_add", "ref must not start with '-'"); }
-    let mut argv: Vec<String> = vec!["worktree".to_string(), "add".to_string()];
-    if create {
-        argv.push("-b".to_string());
-        argv.push(reference.unwrap_or_default().to_string());
+    let reference = body.get("ref").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let start = ["rev", "commit", "start_point"].iter().filter_map(|key| body.get(*key).and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| s.to_string())).next();
+    if reference.as_deref().is_some_and(|s| s.starts_with('-')) || start.as_deref().is_some_and(|s| s.starts_with('-')) {
+        return err("git_worktree_add", "ref and rev must not start with '-'");
     }
-    argv.push(path.clone());
-    if !create {
-        if let Some(s) = reference { argv.push(s.to_string()); }
+    if create && reference.is_none() { return err("git_worktree_add", "create:true requires a ref naming the new branch"); }
+    if !create && reference.is_some() && start.is_some() {
+        return err("git_worktree_add", "ref and rev name two revisions: pass create:true to open ref as a new branch at rev, or drop one of them");
+    }
+    let resolve_commit = |rev: &str| -> Option<String> {
+        let sha = exec_git_in(cwd, &format!("rev-parse --verify --quiet {}^{{commit}}", rev)).trim().to_string();
+        if sha.is_empty() { None } else { Some(sha) }
+    };
+    let is_local_branch = |name: &str| -> bool {
+        !exec_git_in(cwd, &format!("rev-parse --verify --quiet refs/heads/{}", name)).trim().is_empty()
+    };
+    let mut argv: Vec<String> = vec!["worktree".to_string(), "add".to_string()];
+    let mut expected: Option<String> = None;
+    match (create, reference.as_deref(), start.as_deref()) {
+        (true, Some(name), Some(rev)) => {
+            match resolve_commit(rev) { Some(sha) => expected = Some(sha), None => return err("git_worktree_add", &format!("rev \"{}\" does not resolve to a commit in {}", rev, root)) };
+            argv.push("-b".to_string());
+            argv.push(name.to_string());
+            argv.push(path.clone());
+            argv.push(rev.to_string());
+        }
+        (true, Some(name), None) => {
+            if is_local_branch(name) {
+                return err("git_worktree_add", &format!("create:true refuses ref \"{}\": a branch named \"{}\" already exists; drop create to check it out, or name a branch that does not exist yet", name, name));
+            }
+            match resolve_commit(name) {
+                Some(sha) => {
+                    argv.push("--detach".to_string());
+                    argv.push(path.clone());
+                    argv.push(name.to_string());
+                    expected = Some(sha);
+                }
+                None => {
+                    argv.push("-b".to_string());
+                    argv.push(name.to_string());
+                    argv.push(path.clone());
+                }
+            }
+        }
+        (false, _, Some(rev)) => {
+            match resolve_commit(rev) { Some(sha) => expected = Some(sha), None => return err("git_worktree_add", &format!("rev \"{}\" does not resolve to a commit in {}", rev, root)) };
+            argv.push("--detach".to_string());
+            argv.push(path.clone());
+            argv.push(rev.to_string());
+        }
+        (false, Some(name), None) => {
+            expected = resolve_commit(name);
+            argv.push(path.clone());
+            argv.push(name.to_string());
+        }
+        _ => { argv.push(path.clone()); }
     }
     let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
     let r = git_call_argv(&argv_refs, cwd);
@@ -7382,10 +7427,16 @@ pub(super) fn git_worktree_add(body: &Value) -> u64 {
         r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
         r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
     if code != 0 { return err("git_worktree_add", &output); }
+    let requested = match expected { Some(sha) => sha, None => exec_git_in(cwd, "rev-parse HEAD").trim().to_string() };
+    let landed = exec_git_in(Some(path.as_str()), "rev-parse HEAD").trim().to_string();
+    if landed.is_empty() || landed != requested {
+        let removed = git_call_argv(&["worktree", "remove", "--force", path.as_str()], cwd);
+        let removed_code = removed.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1);
+        return err("git_worktree_add", &format!("the new worktree at {} landed on {} but {} was requested; it was removed again (git worktree remove exit {})", path, landed, requested, removed_code));
+    }
     let branch = exec_git_in(Some(path.as_str()), "rev-parse --abbrev-ref HEAD").trim().to_string();
-    ok("git_worktree_add", json!({ "root": root, "path": path, "branch": branch, "created": true, "output": output.trim() }))
+    ok("git_worktree_add", json!({ "root": root, "path": path, "branch": branch, "detached": branch == "HEAD", "rev": landed, "created": true, "output": output.trim() }))
 }
-
 pub(super) fn git_worktree_row(path: &str) -> serde_json::Map<String, Value> {
     let mut row = serde_json::Map::new();
     row.insert("path".to_string(), json!(path.replace('\\', "/")));
