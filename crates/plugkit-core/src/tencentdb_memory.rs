@@ -97,6 +97,20 @@ fn content_key(namespace: &str, text: &str) -> String {
     format!("tdai-{:016x}-{}", hash, text.len())
 }
 
+pub const TIERS: [&str; 2] = ["l0", "l1"];
+
+pub fn validate_tier(kind: &str) -> Result<(), String> {
+    if TIERS.contains(&kind) {
+        Ok(())
+    } else {
+        Err(format!(
+            "tencentdb_memory: unknown memory kind '{}'; accepted tiers: {}",
+            kind,
+            TIERS.join(", ")
+        ))
+    }
+}
+
 fn file_path_for_kind_grouped_memory(
     data_dir: &str,
     namespace: &str,
@@ -131,6 +145,7 @@ pub fn write_cfg(
     now_ms: i64,
     cfg: &TencentBackendConfig,
 ) -> Result<Value, String> {
+    validate_tier(kind)?;
     let vec = crate::vecns::json_to_f32_vec(embedding)
         .filter(|v| !v.is_empty())
         .ok_or_else(|| {
