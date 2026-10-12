@@ -801,10 +801,11 @@ pub(super) fn scan_result_limit(body: &Value, fields: &[&str], default: u32) -> 
     for field in fields {
         if let Some(v) = body.get(*field) {
             match v.as_u64() {
-                Some(n) if n > 0 => seen.push((field, n)),
-                _ => {
+                Some(0) => seen.push((field, u64::MAX)),
+                Some(n) => seen.push((field, n)),
+                None => {
                     return Err(format!(
-                        "body field \"{field}\" must be a positive integer result limit, got {v}"
+                        "body field \"{field}\" must be a non-negative integer result limit (0 means unlimited), got {v}"
                     ))
                 }
             }
@@ -2358,6 +2359,12 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         Ok(v) => v,
         Err(e) => return err("codesearch", &e),
     };
+    if k == u32::MAX && mode == "dual" {
+        return err(
+            "codesearch",
+            "result limit 0 (unlimited) applies to the exhaustive modes \"literal\", \"regex\" and \"filename\" only -- \"dual\" is ranked top-k, so pass a positive k",
+        );
+    }
     if mode == "literal" || mode == "regex" || mode == "filename" {
         if let Some(refusal) =
             refuse_unknown_fields("codesearch", body, CODESEARCH_EXHAUSTIVE_FIELDS)
