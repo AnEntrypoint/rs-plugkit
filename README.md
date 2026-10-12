@@ -38,6 +38,13 @@ verified dispatch returns `status: "deferred"` with a reason and no acknowledgme
 ID. Ordinary pending-pipeline gates remain authoritative. This maintenance verb
 does not refresh agent phase-prose timestamps.
 
+`dream-strategy-propose` takes no body fields and owns the calling dispatch session.
+It replays that session's `automatic_replay` evidence and writes
+`.gm/dream-rsi/<session>/proposed-strategy.json` (`kind: "strategy-proposal"`, with
+`proposed_selection` and `replay`), returning the same object. It is propose-only:
+it never writes `active-strategy.json`, is not called by `dream-replay-cycle`, and
+deploys nothing.
+
 Callers write request JSON to `.gm/exec-spool/in/<verb>/<N>.txt` (or
 `in/<lang>/<N>.<ext>` for language-execution stems); the watcher processes on
 read and writes `out/<N>.json` (metadata) alongside `out/<N>.out`/`.err` for
