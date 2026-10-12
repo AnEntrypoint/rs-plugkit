@@ -1,5 +1,5 @@
 # Git Is the State - stateless runtime, Kapale
 
-Principle `GITSTATE`, phase P5 RECORD. Apply "Git Is the State - stateless runtime, Kapale" to the work of the P5 RECORD phase.
+Principle `GITSTATE`. Apply "Git Is the State - stateless runtime, Kapale" to the work this node stands on. The node is entered from any neighbour that leads here and left to any neighbour it links to; its place in a walk is decided by the work it applies to, not by a bucket.
 
 The walk is recorded by the transition that leaves this node.

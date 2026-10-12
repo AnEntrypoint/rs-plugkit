@@ -1,5 +1,5 @@
 # Testing Shows Presence, Never Absence - Edsger Dijkstra
 
-Principle `DIJKSTRATEST`, phase P4 VERIFY. Apply "Testing Shows Presence, Never Absence - Edsger Dijkstra" to the work of the P4 VERIFY phase.
+Principle `DIJKSTRATEST`. Apply "Testing Shows Presence, Never Absence - Edsger Dijkstra" to the work this node stands on. The node is entered from any neighbour that leads here and left to any neighbour it links to; its place in a walk is decided by the work it applies to, not by a bucket.
 
 The walk is recorded by the transition that leaves this node.

@@ -1,8 +1,8 @@
 # Coverage-Guided Fuzzing - Michal Zalewski
 
-Principle `FUZZ`, phase P4 VERIFY. Apply "Coverage-Guided Fuzzing - Michal Zalewski" to the work of the P4 VERIFY phase.
+Principle `FUZZ`. Apply "Coverage-Guided Fuzzing - Michal Zalewski" to the work this node stands on. The node is entered from any neighbour that leads here and left to any neighbour it links to; its place in a walk is decided by the work it applies to, not by a bucket.
 
-Checkable claims for the P4 VERIFY work. Each is checked by live dispatches against the real entry point, never by a test file, fuzz harness or mock:
+Checkable claims for the work this node stands on. Each is checked by live dispatches against the real entry point, never by a test file, fuzz harness or mock:
 
 1. Coverage feedback: a verification pass records which files, symbols and verbs it reached, and a pass that reaches nothing new is recorded as no new coverage, not as passed. Witness: the reached-set count from the `codesearch` or `prd-list` reply before and after the pass, each with its dispatch id.
 2. Seed corpus: each check starts from the real inputs the request names (its paths, verbs and PRD rows), and only then from inputs derived from them. Witness: the dispatch id of the first live call, made with the named input.
