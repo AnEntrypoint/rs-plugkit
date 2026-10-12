@@ -540,6 +540,49 @@ impl RuleRecordingWalk<'_> {
     }
 }
 
+pub fn scope_has_no_entries(root: &str, scope: Option<&str>) -> bool {
+    let rel = match scope {
+        Some(s) => match relative_scope(root, s) {
+            Ok(r) => r,
+            Err(_) => return false,
+        },
+        None => None,
+    };
+    let target = rel
+        .as_deref()
+        .map(|r| join_under(root, r))
+        .unwrap_or_else(|| root.to_string());
+    host_stat_is_directory(&target) == Some(true) && child_names(&target).is_empty()
+}
+
+pub fn empty_universe_refusal(
+    root: &str,
+    scope: Option<&str>,
+    source: FileSource,
+    listing_complete: bool,
+    walk_reason: Option<&str>,
+    file_cap: usize,
+) -> String {
+    let searched = match scope {
+        Some(s) => format!("scope '{s}' under root '{}'", absolute_root_for_message(root)),
+        None => format!("root '{}'", absolute_root_for_message(root)),
+    };
+    let cause = match (source, walk_reason) {
+        (FileSource::Git, _) => "git listed no file in it".to_string(),
+        (FileSource::SingleFile, _) => "the named file was not listed".to_string(),
+        (_, Some(reason)) => format!("a disk walk listed no file in it ({reason})"),
+        (FileSource::Walk, None) => "a disk walk listed no file in it".to_string(),
+    };
+    let completeness = if listing_complete {
+        "the listing reported itself complete"
+    } else {
+        "the listing was cut short by its file cap or its time budget"
+    };
+    format!(
+        "nothing was searched: {searched} yielded no searchable file, {cause}, and {completeness} (file cap {file_cap}) -- an empty result here would read as \"no matches\" when it really means \"nothing scanned\", so this is refused instead; narrow \"path\" to a subtree that exists, or pass \"refresh\": true to walk the disk instead of asking git, or \"no_ignore\": true to include ignored paths, then re-dispatch"
+    )
+}
+
 pub fn absolute_root_for_message(root: &str) -> String {
     if crate::pkfs::is_absolute(root) {
         return root.to_string();
