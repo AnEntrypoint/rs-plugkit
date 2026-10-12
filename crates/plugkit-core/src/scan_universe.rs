@@ -555,6 +555,14 @@ pub fn scope_has_no_entries(root: &str, scope: Option<&str>) -> bool {
     host_stat_is_directory(&target) == Some(true) && child_names(&target).is_empty()
 }
 
+// Does a caller-named scope resolve to something that exists under this root? A named scope that
+// resolves to nothing must be answered as an error: an empty scan over a scope that was never
+// opened is indistinguishable from a real zero-match, and a caller reading the second as the
+// first drops a hit that is really there.
+pub fn scope_path_exists(root: &str, rel: &str) -> bool {
+    host_stat_is_directory(&join_under(root, rel)).is_some()
+}
+
 pub fn empty_universe_refusal(
     root: &str,
     scope: Option<&str>,

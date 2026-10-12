@@ -5718,6 +5718,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     }
     let elapsed_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms);
     if req.verbose {
+        out.insert("count".to_string(), json!(match_count));
         out.insert("match_count".to_string(), json!(match_count));
         out.insert("occurrence_count".to_string(), json!(occurrence_count));
         out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
@@ -5739,8 +5740,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("count".to_string(), json!(format!(
             "{lines_with_matches} lines, {occurrence_count} occurrences, {files_with_matches} files of {files_scanned} scanned ({lines_scanned} lines read)"
         )));
+        // "files_scanned" is the difference between "nothing matched" and "nothing was read":
+        // it is always reported, so a caller can never read an empty match set as a zero-match
+        // when the scope was never opened.
+        out.insert("files_scanned".to_string(), json!(files_scanned));
         if matched_nothing_needs_coverage_fields {
-            out.insert("files_scanned".to_string(), json!(files_scanned));
             out.insert("files_listed".to_string(), json!(files.len()));
             out.insert("files_with_matches".to_string(), json!(files_with_matches));
             out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
