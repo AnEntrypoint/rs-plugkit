@@ -2566,7 +2566,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 "commit_comment_attached": commit_comment.is_some() || commit_sha.is_some(),
                 "resolution_attached": resolution.is_some(),
                 "commit_sha_attached": commit_sha.is_some(),
-                "witness_bound": witness_binding.is_some(),
+                "witness_bound": witness_binding.is_some() || dispatch_verified,
                 "witness_binding": witness_binding.as_ref().map(VerifiedWitness::to_json),
                 "witness_dispatch_id_verified": dispatch_verified,
                 "witness_dispatch_id_verified_via": verified_via,
