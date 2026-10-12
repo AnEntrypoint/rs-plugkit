@@ -577,6 +577,20 @@ fn extract_file(
 }
 
 const DEFERRED_SET_NAMES_LIMIT: usize = 256;
+const REFUSAL_REFRESH_EXEMPLARS: usize = 2;
+const REFUSAL_REFRESH_SCALAR_FIELDS: &[&str] = &[
+    "files_deferred",
+    "files_synced",
+    "files_unchanged",
+    "files_listed",
+    "elapsed_ms",
+    "listing_complete",
+    "store_busy",
+    "store_failures",
+    "treesitter_failures",
+    "files_unreadable",
+    "files_oversized",
+];
 const DEFERRED_PARTIAL_REASON: &str = "the symbol refresh deferred this file in this pass, so the outline is its cached row and may be stale; codeinsight_index.deferred_set names the deferred files, and deferred_set_truncated says when that list is cut short";
 const DEFERRED_NEVER_INDEXED_REASON: &str = "the symbol refresh deferred this file before it was ever indexed, so the empty outline is not evidence that the file has no symbols; codeinsight_index.deferred_set names the deferred files";
 const UNLISTED_PARTIAL_REASON: &str = "the file is not in the current listing, so the outline is its cached row from an earlier pass";
@@ -2436,6 +2450,56 @@ fn text_field<'a>(body: &'a Value, keys: &[&str]) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+fn refresh_refusal_detail(refresh: &Value) -> String {
+    let mut detail = REFUSAL_REFRESH_SCALAR_FIELDS
+        .iter()
+        .filter_map(|key| {
+            refresh
+                .get(*key)
+                .filter(|v| !v.is_null())
+                .map(|value| format!("{key}={value}"))
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Some(list) = refresh.get("deferred_set").and_then(Value::as_array) {
+        let total = refresh
+            .get("files_deferred")
+            .and_then(Value::as_u64)
+            .unwrap_or(list.len() as u64);
+        let exemplars = list
+            .iter()
+            .take(REFUSAL_REFRESH_EXEMPLARS)
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        detail.push_str(&format!("; deferred {total} files"));
+        if !exemplars.is_empty() {
+            detail.push_str(&format!(", e.g. {exemplars}"));
+        }
+        if refresh.get("deferred_set_truncated").and_then(Value::as_bool) == Some(true) {
+            detail.push_str(", names already capped by the sync report");
+        }
+    }
+    detail
+}
+
+fn stale_index_refusal(action: &str, root: Option<&str>, refresh: &Value) -> String {
+    let (scope, sync_body) = match root {
+        Some(root) => (
+            format!("root '{root}': "),
+            format!("codeinsight {{\"action\":\"sync\",\"root\":\"{root}\"}}"),
+        ),
+        None => (
+            String::new(),
+            "codeinsight {\"action\":\"sync\"}".to_string(),
+        ),
+    };
+    format!(
+        "{scope}symbol index refresh is incomplete, so {action} read no current answer from it; cached graph is not current evidence. Refresh it with `{sync_body}`, then re-dispatch this {action}; a sync pass is incremental, so one that does not finish still advances the index. The sync report's deferred_set names the deferred files and is not repeated here. Refresh: {}",
+        refresh_refusal_detail(refresh)
+    )
+}
+
 pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     clear_store_busy();
     let action = text_field(body, &["action", "mode"]).unwrap_or("overview");
@@ -2497,11 +2561,9 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
             ));
         }
         if let Some(root) = project_path {
-            return Err(format!(
-                "root '{root}': symbol index refresh is incomplete, so {action} read no current answer from it; cached graph is not current evidence. Run action=sync and retry. Refresh: {refresh}"
-            ));
+            return Err(stale_index_refusal(action, Some(root), &refresh));
         }
-        return Err(format!("symbol index refresh is incomplete; cached graph is not current evidence. Run action=sync and retry. Refresh: {refresh}"));
+        return Err(stale_index_refusal(action, None, &refresh));
     }
     let limit = body
         .get("limit")
