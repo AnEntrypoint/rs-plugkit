@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::traversal::{assign_row_traversal_surface, assign_traversal_surface};
+use super::traversal::{assign_row_traversal_node, assign_traversal_node};
 use super::{now_ms, TRAVERSAL_LAUNCH_ID};
 use crate::pkfs;
 
@@ -45,19 +45,19 @@ pub fn handle_brief(content: &str) -> (String, String, i32) {
     let mut surface = Value::Null;
     if role == "traversal" {
         let assigned = if row == TRAVERSAL_LAUNCH_ID {
-            assign_traversal_surface(".", now_ms())
+            assign_traversal_node(".", now_ms())
         } else {
-            assign_row_traversal_surface(".", &row, now_ms()).map(Some)
+            assign_row_traversal_node(".", &row, now_ms()).map(Some)
         };
         match assigned {
             Ok(Some(name)) => {
                 brief.push_str(&format!(
-                    "\nAssigned traversal surface: {name}. This brief leases it to your session. Scan only this surface, whatever surface your spawn prompt names, and list it under surfaces scanned in your receipt.\n"
+                    "\nAssigned traversal node: {name}. This brief leases that one file to your session. Scan only this node, whatever node your spawn prompt names, and list it under nodes scanned in your receipt.\n"
                 ));
                 surface = json!(name);
             }
             Ok(None) => brief.push_str(
-                "\nAssigned traversal surface: none. Every surface is leased or scanned. Log no rows and return a receipt that says so.\n",
+                "\nAssigned traversal node: none. Every node is leased or scanned. Log no rows and return a receipt that says so.\n",
             ),
             Err(message) => return (String::new(), message, 1),
         }

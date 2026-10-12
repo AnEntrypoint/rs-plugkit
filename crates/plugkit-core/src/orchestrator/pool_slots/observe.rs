@@ -7,7 +7,7 @@ use super::floor::{ceiling_from_refusal, floor_denial_text, launch_instruction, 
 use super::heartbeats::{count_of_record_live, write_count_of_record, HELD_ROWS_FILE};
 use super::state::{read_ceiling, slot_parts, spawn_ceiling};
 use super::traversal::{
-    read_surface_state, record_scanned_surfaces, traversal_candidates, TRAVERSAL_SURFACE_SHOWN,
+    read_node_state, record_scanned_nodes, traversal_candidates, TRAVERSAL_NODE_SHOWN,
 };
 use super::{now_ms, pool_dir, LAUNCH_ID_PREFIX, REFILL_FLOOR, TRAVERSAL_LAUNCH_ID};
 use crate::pkfs;
@@ -90,27 +90,27 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     let free_slots = ceiling.saturating_sub(live);
     let now = now_ms();
     let state_dir = pool_dir(".");
-    let scanned: Vec<String> = body
-        .get("scanned_surfaces")
-        .and_then(Value::as_array)
-        .into_iter()
+    let scanned: Vec<String> = ["scanned_nodes", "scanned_surfaces"]
+        .iter()
+        .copied()
+        .filter_map(|key| body.get(key).and_then(Value::as_array))
         .flatten()
         .filter_map(Value::as_str)
         .map(str::to_string)
         .collect();
     if !scanned.is_empty() {
-        if let Err(reason) = record_scanned_surfaces(&state_dir, &scanned, now) {
+        if let Err(reason) = record_scanned_nodes(".", &state_dir, &scanned, now) {
             return (String::new(), format!("pool-observe: {reason}"), 1);
         }
     }
-    let (surface_state, state_error) = match read_surface_state(&state_dir) {
+    let (node_state, state_error) = match read_node_state(&state_dir) {
         Ok(state) => (state, None),
         Err(reason) => (std::collections::BTreeMap::new(), Some(reason)),
     };
     let unscanned = if state_error.is_some() {
         Vec::new()
     } else {
-        traversal_candidates(".", &surface_state, now)
+        traversal_candidates(".", &node_state, now)
     };
     let launchable = slots["launchable"].as_u64().unwrap_or(0);
     let node_launchable = slots["node_launchable"].as_u64().unwrap_or(0);
@@ -123,7 +123,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     };
     let idle_slots = free_slots.saturating_sub(refill_needed);
     let unfilled_shortfall = shortfall.saturating_sub(refill_needed);
-    let next_surface = unscanned.first().cloned();
+    let next_node = unscanned.first().cloned();
     attach_reasons(&mut slots, &advertised, refill_needed, free_slots);
     let mut launch: Vec<Value> = advertised
         .iter()
@@ -131,15 +131,16 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         .enumerate()
         .map(|(index, id)| json!({"id": id, "role": "resolver", "reason": advertised_reason(index + 1, refill_needed)}))
         .collect();
+    let shown: Vec<&String> = unscanned.iter().take(TRAVERSAL_NODE_SHOWN).collect();
     if traversal_needed && (launch.len() as u64) < refill_needed {
-        launch.push(json!({"id": TRAVERSAL_LAUNCH_ID, "role": "traversal", "surface": next_surface, "reason": "traversal: fills a free slot after every advertised row, scanning the next unscanned surface"}));
+        launch.push(json!({"id": TRAVERSAL_LAUNCH_ID, "role": "traversal", "node": next_node, "surface": next_node, "reason": "traversal: fills a free slot after every advertised row, scanning the next unscanned node"}));
     }
     let launch_ids: Vec<String> = launch
         .iter()
         .filter_map(|item| item["id"].as_str().map(str::to_string))
         .collect();
     let sufficient = open_rows == 0 || shortfall == 0 || (launch_ids.len() as u64) >= shortfall;
-    let route = pool_route(open_rows, &launch_ids, traversal_needed, next_surface.as_deref(), launchable);
+    let route = pool_route(open_rows, &launch_ids, traversal_needed, next_node.as_deref(), launchable);
     let candidates_shown = slots["candidates"].as_array().map_or(0, Vec::len) as u64;
     if let Some(fields) = slots["candidates_route"].as_object_mut() {
         fields.insert("next_verb".to_string(), json!(route.kind));
@@ -150,9 +151,10 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         "state_error": state_error,
         "node_witness_candidates": node_launchable,
         "threshold": traversal_threshold,
-        "unscanned_surfaces": unscanned.iter().take(TRAVERSAL_SURFACE_SHOWN).collect::<Vec<&String>>(),
+        "unscanned_nodes": shown.clone(),
+        "unscanned_surfaces": shown,
         "unscanned_total": unscanned.len(),
-        "rule": "traversal is needed only while node witness candidates are below 2 x floor, or the advertised launches do not cover the shortfall, and candidate surfaces remain; a candidate is unscanned, unleased, and has a module (up to 3 levels deep, .js/.mjs/.cjs/.ts/.jsx/.tsx) that no scripts/ file names it by content (the module file stem as a whole word in the text of a scripts/ file); pool-observe advertises the first candidate in launch and leases nothing; a traversal brief for an open row leases the surface that row names when that surface is unscanned, and is refused otherwise; a traversal brief for traversal-node-supply leases the first candidate when it is issued; a surface named in scanned_surfaces is leased for 6 hours",
+        "rule": "traversal is needed only while node witness candidates are below 2 x floor, or the advertised launches do not cover the shortfall, and candidate nodes remain; a candidate is one unscanned, unleased source file (a node: .js/.mjs/.cjs/.ts/.jsx/.tsx up to 3 directory levels under a traversal root) whose own file stem no scripts/ file names by content (the stem as a whole word in the text of a scripts/ file); a node is never grouped into its directory, so a directory scan does not lease its files. Traversal roots are .gm/gm.config.json traversal.roots when it is set; otherwise src, apps and client as far as they exist; otherwise every top-level directory except node_modules, target, dist, build, out, vendor, coverage, .next, __pycache__, deps, _build and .venv. pool-observe advertises the first candidate in launch and leases nothing; a traversal brief for an open row leases the node that row names (its path, a directory prefix of it, or its bare file name) when that node is unscanned, and is refused otherwise; a traversal brief for traversal-node-supply leases the first candidate when it is issued; a node named in scanned_nodes (or scanned_surfaces, where a directory name leases every node under it) is leased for 6 hours; a state key with no file extension is a directory left by an older build, is dropped on read and leases nothing",
     });
     let mut monitor = monitor_block(&slots);
     if monitor["alarm"] == json!(false) {
@@ -290,7 +292,7 @@ fn pool_route(
     open_rows: u64,
     launch_ids: &[String],
     traversal_needed: bool,
-    next_surface: Option<&str>,
+    next_node: Option<&str>,
     launchable: u64,
 ) -> PoolRoute {
     if open_rows == 0 {
@@ -304,11 +306,11 @@ fn pool_route(
         };
     }
     if traversal_needed {
-        let surface = next_surface.unwrap_or("unknown");
+        let node = next_node.unwrap_or("unknown");
         return PoolRoute {
             kind: "traversal",
             text: format!(
-                "traversal: no row is launchable, so take the traversal route: call pool-brief {{\"role\":\"traversal\",\"row\":\"{traversal}\",\"session\":\"<your SESSION_ID>\"}} and scan surface {surface}",
+                "traversal: no row is launchable, so take the traversal route: call pool-brief {{\"role\":\"traversal\",\"row\":\"{traversal}\",\"session\":\"<your SESSION_ID>\"}} and scan node {node}",
                 traversal = TRAVERSAL_LAUNCH_ID
             ),
         };
