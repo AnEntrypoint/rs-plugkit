@@ -116,11 +116,101 @@ fn row_referenced_paths(map: &serde_yaml::Mapping) -> Vec<String> {
         };
         for token in text.split(|c: char| c.is_whitespace() || "\"'`()[]{}<>,;|=*".contains(c)) {
             if let Some(path) = referenced_path_token(token) {
-                out.push(path);
+                if !is_markdown_path(&path) {
+                    out.push(path);
+                }
             }
         }
     }
     out
+}
+
+fn is_markdown_path(path: &str) -> bool {
+    let lowered = path.to_ascii_lowercase();
+    [".md", ".mdx", ".markdown"].iter().any(|ext| lowered.ends_with(ext))
+}
+
+fn markdown_heading_slug(heading: &str) -> String {
+    heading
+        .trim()
+        .chars()
+        .filter_map(|c| {
+            if c.is_alphanumeric() {
+                Some(c.to_ascii_lowercase())
+            } else if c.is_whitespace() || c == '-' {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn markdown_section(text: &str, anchor: &str) -> Option<String> {
+    let mut level: Option<usize> = None;
+    let mut out = String::new();
+    for line in text.lines() {
+        let hashes = line.bytes().take_while(|b| *b == b'#').count();
+        let heading = (1..=6).contains(&hashes) && line.as_bytes().get(hashes) == Some(&b' ');
+        if heading {
+            match level {
+                Some(open) if hashes <= open => break,
+                Some(_) => {}
+                None if markdown_heading_slug(&line[hashes..]) == anchor => level = Some(hashes),
+                None => continue,
+            }
+        }
+        if level.is_some() {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    level.map(|_| out)
+}
+
+fn rule_section_fingerprint(path: &str, anchor: &str) -> String {
+    use sha2::{Digest, Sha256};
+    crate::pkfs::read_to_string(path)
+        .and_then(|text| markdown_section(&text, anchor))
+        .map(|section| format!("{:x}", Sha256::digest(section.as_bytes())))
+        .unwrap_or_else(|| "absent".to_string())
+}
+
+fn rule_references(texts: &[String]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for text in texts {
+        for token in text.split(|c: char| c.is_whitespace() || "\"'`()[]{}<>,;|=*".contains(c)) {
+            let token = token.trim_end_matches(|c: char| matches!(c, '.' | ':' | '!' | '?'));
+            let Some((path, anchor)) = token.split_once('#') else {
+                continue;
+            };
+            let path = path.replace('\\', "/").trim_start_matches("./").to_string();
+            let anchor = anchor.to_ascii_lowercase();
+            let safe = !path.is_empty()
+                && !pkfs::is_absolute(&path)
+                && !path.split('/').any(|segment| segment == "..");
+            if safe && !anchor.is_empty() && is_markdown_path(&path) && !out.contains(&(path.clone(), anchor.clone())) {
+                out.push((path, anchor));
+            }
+        }
+    }
+    out
+}
+
+fn rule_bindings_value(texts: &[String]) -> Value {
+    Value::Sequence(
+        rule_references(texts)
+            .into_iter()
+            .map(|(path, anchor)| {
+                let fingerprint = rule_section_fingerprint(&path, &anchor);
+                let mut map = serde_yaml::Mapping::new();
+                map.insert(Value::String("path".to_string()), Value::String(path));
+                map.insert(Value::String("anchor".to_string()), Value::String(anchor));
+                map.insert(Value::String("sha256".to_string()), Value::String(fingerprint));
+                Value::Mapping(map)
+            })
+            .collect(),
+    )
 }
 
 fn referenced_path_token(token: &str) -> Option<String> {
@@ -1374,6 +1464,20 @@ fn stale_completed_rows(doc: &Value, changed: &[String]) -> Vec<(String, Vec<Str
                     }
                 }
             }
+            if let Some(rules) = map.get(&key("rule_bindings")).and_then(Value::as_sequence) {
+                for rule in rules.iter().filter_map(Value::as_mapping) {
+                    let field = |name: &str| rule.get(&key(name)).and_then(Value::as_str);
+                    let (Some(path), Some(anchor), Some(bound)) = (field("path"), field("anchor"), field("sha256")) else {
+                        continue;
+                    };
+                    if changed.iter().any(|c| path_is_within(path, c)) {
+                        let now = rule_section_fingerprint(path, anchor);
+                        if now != bound {
+                            reasons.push(format!("rule {path}#{anchor} changed: fingerprint is now {now}, bound {bound}"));
+                        }
+                    }
+                }
+            }
             for referenced in row_referenced_paths(map) {
                 if let Some(module) = changed.iter().find(|c| path_is_within(&referenced, c)) {
                     reasons.push(format!("module {module} changed after this row was witnessed"));
@@ -2445,6 +2549,10 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             .unwrap_or_else(|| "completed".to_string())
     };
 
+    let rule_texts: Vec<String> = [witness.clone(), resolution.clone(), commit_comment.clone()]
+        .into_iter()
+        .flatten()
+        .collect();
     let outcome = cas::cas_retry_write_verified(
         &path_s,
         policy.cas_max_attempts,
@@ -2492,6 +2600,12 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                             map.insert(
                                 Value::String("commit_comment".to_string()),
                                 Value::String(c.clone()),
+                            );
+                        }
+                        if !annotate_only {
+                            map.insert(
+                                Value::String("rule_bindings".to_string()),
+                                rule_bindings_value(&rule_texts),
                             );
                         }
                         if let Some(r) = resolution.as_ref() {
