@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::config::{Freshness, RepoFetcher, RepoSource};
 
@@ -10,6 +11,15 @@ const BACKOFF_BASE_MS: u64 = 60 * 1000;
 const BACKOFF_MAX_MS: u64 = 60 * 60 * 1000;
 
 const LOCK_STALE_MS: u64 = 10 * 60 * 1000;
+
+/// Re-probe interval for a ref whose change cadence this machine has never
+/// measured. The first probe that sees a new tip replaces it with the measured
+/// interval, so the steady-state cadence is a fact about the ref, not a constant.
+const UNMEASURED_REF_INTERVAL_MS: u64 = 60 * 60 * 1000;
+
+const PROBE_BACKOFF_BASE_MS: u64 = 60 * 1000;
+
+const PROBE_BACKOFF_MAX_MS: u64 = 60 * 60 * 1000;
 
 #[derive(Debug, Clone)]
 pub struct SyncOutcome {
@@ -82,6 +92,131 @@ impl SyncState {
     }
 }
 
+/// The machine-wide answer to "what is the tip of `<repo> <reference>`". One record
+/// per (repo, reference), shared by every project root on this machine, so N project
+/// roots resolving in the same window cost at most one `git ls-remote`.
+#[derive(Debug, Clone, Default)]
+struct RemoteRecord {
+    remote_sha: String,
+    advertised_since_ms: u64,
+    last_probe_ms: u64,
+    change_interval_ms: u64,
+    probe_count: u64,
+    consecutive_failures: u32,
+    degraded_reason: Option<String>,
+}
+
+impl RemoteRecord {
+    fn newer(a: &RemoteRecord, b: &RemoteRecord) -> RemoteRecord {
+        if b.last_probe_ms > a.last_probe_ms {
+            b.clone()
+        } else {
+            a.clone()
+        }
+    }
+
+    fn parse(raw: &str) -> RemoteRecord {
+        let v: Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(_) => return RemoteRecord::default(),
+        };
+        RemoteRecord {
+            remote_sha: v
+                .get("remote_sha")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            advertised_since_ms: v
+                .get("advertised_since_ms")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
+            last_probe_ms: v.get("last_probe_ms").and_then(|x| x.as_u64()).unwrap_or(0),
+            change_interval_ms: v
+                .get("change_interval_ms")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
+            probe_count: v.get("probe_count").and_then(|x| x.as_u64()).unwrap_or(0),
+            consecutive_failures: v
+                .get("consecutive_failures")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u32,
+            degraded_reason: v
+                .get("degraded_reason")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+        }
+    }
+
+    fn to_json(&self) -> String {
+        json!({
+            "remote_sha": self.remote_sha,
+            "advertised_since_ms": self.advertised_since_ms,
+            "last_probe_ms": self.last_probe_ms,
+            "change_interval_ms": self.change_interval_ms,
+            "probe_count": self.probe_count,
+            "consecutive_failures": self.consecutive_failures,
+            "degraded_reason": self.degraded_reason,
+        })
+        .to_string()
+    }
+}
+
+/// Whether a remote probe is warranted. The probe answers exactly one question:
+/// "what is the tip of this (repo, reference)", so it is warranted only when this
+/// machine cannot already answer it:
+///
+/// * no tip is recorded for this (repo, reference) yet, or
+/// * the recorded tip has stood longer than the interval at which this ref was last
+///   observed to move.
+///
+/// A recorded probe failure replaces both with a backoff counted in failures. A
+/// project whose checkout is behind a freshly recorded tip never probes: the machine
+/// already holds the answer, and the project materializes to that tip.
+enum ProbeDecision {
+    Due,
+    Skip { sha: String },
+    Backoff { reason: String },
+}
+
+fn probe_decision(rec: &RemoteRecord, now: u64) -> ProbeDecision {
+    if rec.remote_sha.is_empty() {
+        return ProbeDecision::Due;
+    }
+    if rec.consecutive_failures > 0 {
+        let backoff = PROBE_BACKOFF_BASE_MS
+            .saturating_mul(1u64 << rec.consecutive_failures.min(20))
+            .min(PROBE_BACKOFF_MAX_MS);
+        return if now.saturating_sub(rec.last_probe_ms) >= backoff {
+            ProbeDecision::Due
+        } else {
+            ProbeDecision::Backoff {
+                reason: rec
+                    .degraded_reason
+                    .clone()
+                    .unwrap_or_else(|| "the last remote probe failed".to_string()),
+            }
+        };
+    }
+    let interval = if rec.change_interval_ms > 0 {
+        rec.change_interval_ms
+    } else {
+        UNMEASURED_REF_INTERVAL_MS
+    };
+    if now.saturating_sub(rec.advertised_since_ms) >= interval {
+        ProbeDecision::Due
+    } else {
+        ProbeDecision::Skip {
+            sha: rec.remote_sha.clone(),
+        }
+    }
+}
+
+enum GlobalTip {
+    Known(String),
+    Held,
+    Unavailable(String),
+}
+
 fn now_ms() -> u64 {
     crate::orchestrator::state::now_ms() as u64
 }
@@ -120,6 +255,151 @@ fn state_path(src: &RepoSource) -> String {
 
 fn lock_path(src: &RepoSource) -> String {
     format!("{}.{}.lock", cache_root(src), source_key(src))
+}
+
+struct RemoteProbePaths {
+    root: String,
+    key: String,
+}
+
+impl RemoteProbePaths {
+    fn record(&self) -> String {
+        format!("{}/{}.json", self.root, self.key)
+    }
+
+    fn lock(&self) -> String {
+        format!("{}/{}.lock", self.root, self.key)
+    }
+}
+
+/// The machine-global home of the remote-tip record for this (repo, reference).
+fn remote_probe_paths(src: &RepoSource) -> RemoteProbePaths {
+    let project_gm_dir = Path::new(&src.cache_dir)
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"));
+    let root = crate::config::global_probe_root(project_gm_dir.as_deref())
+        .unwrap_or_else(|| project_gm_dir.unwrap_or_default());
+    let ident = format!(
+        "{}\u{0}{}",
+        src.repo,
+        src.reference.as_deref().unwrap_or("")
+    );
+    RemoteProbePaths {
+        root,
+        key: format!("{:016x}", crate::hash::fnv1a64(ident.as_bytes())),
+    }
+}
+
+/// The in-memory twin of the on-disk record: the write can fail under load, and
+/// without it every dispatch would re-run `git ls-remote` with no backoff.
+static REMEMBERED_REMOTE: std::sync::Mutex<Option<HashMap<String, RemoteRecord>>> =
+    std::sync::Mutex::new(None);
+
+fn remembered_remote(key: &str) -> Option<RemoteRecord> {
+    REMEMBERED_REMOTE
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|map| map.get(key)).cloned())
+}
+
+fn remember_remote(key: &str, rec: &RemoteRecord) {
+    if let Ok(mut guard) = REMEMBERED_REMOTE.lock() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        let merged = RemoteRecord::newer(&map.get(key).cloned().unwrap_or_default(), rec);
+        map.insert(key.to_string(), merged);
+    }
+}
+
+fn read_remote_record(paths: &RemoteProbePaths) -> RemoteRecord {
+    let disk = crate::pkfs::read_to_string(&paths.record())
+        .as_deref()
+        .map(RemoteRecord::parse)
+        .unwrap_or_default();
+    match remembered_remote(&paths.key) {
+        Some(remembered) => RemoteRecord::newer(&disk, &remembered),
+        None => disk,
+    }
+}
+
+fn write_remote_record(paths: &RemoteProbePaths, rec: &RemoteRecord) {
+    remember_remote(&paths.key, rec);
+    let path = paths.record();
+    let tmp = format!("{path}.tmp-{}", now_ms());
+    if !crate::pkfs::write(&tmp, &rec.to_json()) {
+        return;
+    }
+    if !rename(&tmp, &path) {
+        let _ = crate::wasm_dispatch::host_remove_file_never_directory(&tmp);
+    }
+}
+
+/// The single-flight, machine-global remote probe. Every project root on this
+/// machine asks the same question, so at most one of them runs `git ls-remote`
+/// per window and the rest adopt the recorded answer.
+fn global_remote_tip(src: &RepoSource, now: u64) -> GlobalTip {
+    let paths = remote_probe_paths(src);
+    let rec = read_remote_record(&paths);
+    match probe_decision(&rec, now) {
+        ProbeDecision::Skip { sha } => return GlobalTip::Known(sha),
+        ProbeDecision::Backoff { reason } => return GlobalTip::Unavailable(reason),
+        ProbeDecision::Due => {}
+    }
+    let baseline = rec.last_probe_ms;
+    match try_lock_at(&paths.lock(), &paths.root) {
+        LockProbe::Acquired(lock) => {
+            let under_lock = read_remote_record(&paths);
+            let outcome = match probe_decision(&under_lock, now) {
+                ProbeDecision::Skip { sha } => GlobalTip::Known(sha),
+                ProbeDecision::Backoff { reason } => GlobalTip::Unavailable(reason),
+                ProbeDecision::Due => probe_and_record(src, &paths, &under_lock, now),
+            };
+            let _ = unlock(&lock);
+            outcome
+        }
+        // No sleep on this target: adopt the holder's answer if it has landed, and
+        // otherwise serve this project's checkout rather than probe a second time.
+        LockProbe::Held => {
+            let shared = read_remote_record(&paths);
+            if !shared.remote_sha.is_empty() && shared.last_probe_ms > baseline {
+                GlobalTip::Known(shared.remote_sha)
+            } else {
+                GlobalTip::Held
+            }
+        }
+        LockProbe::Failed(reason) => GlobalTip::Unavailable(reason),
+    }
+}
+
+fn probe_and_record(
+    src: &RepoSource,
+    paths: &RemoteProbePaths,
+    rec: &RemoteRecord,
+    now: u64,
+) -> GlobalTip {
+    let mut next = rec.clone();
+    next.last_probe_ms = now;
+    next.probe_count = next.probe_count.saturating_add(1);
+    match probe_remote_sha(src) {
+        Ok(sha) => {
+            if next.remote_sha.as_str() != sha.as_str() {
+                if !next.remote_sha.is_empty() && now > next.advertised_since_ms {
+                    next.change_interval_ms = now.saturating_sub(next.advertised_since_ms);
+                }
+                next.remote_sha = sha.clone();
+                next.advertised_since_ms = now;
+            }
+            next.consecutive_failures = 0;
+            next.degraded_reason = None;
+            write_remote_record(paths, &next);
+            GlobalTip::Known(sha)
+        }
+        Err(e) => {
+            next.consecutive_failures = next.consecutive_failures.saturating_add(1);
+            next.degraded_reason = Some(e.clone());
+            write_remote_record(paths, &next);
+            GlobalTip::Unavailable(e)
+        }
+    }
 }
 
 fn read_state(src: &RepoSource) -> SyncState {
@@ -182,16 +462,24 @@ enum LockProbe {
 }
 
 fn try_lock(src: &RepoSource) -> LockProbe {
-    let path = lock_path(src);
+    let mkdir_dir = Path::new(&cache_root(src))
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    try_lock_at(&lock_path(src), &mkdir_dir)
+}
+
+fn try_lock_at(lock_path: &str, mkdir_dir: &str) -> LockProbe {
+    let path = lock_path.to_string();
     let Ok(p) = serde_json::to_string(&path) else {
         return LockProbe::Failed("lock path is not representable".to_string());
     };
-    let Ok(parent_p) = serde_json::to_string(&cache_root(src)) else {
+    let Ok(parent_p) = serde_json::to_string(mkdir_dir) else {
         return LockProbe::Failed("cache root is not representable".to_string());
     };
     let code = format!(
         "const fs=require('fs');const p={p};const staleMs={LOCK_STALE_MS};\
-             const parentDir=require('path').dirname({parent_p});\
+             const parentDir={parent_p};\
              try{{fs.mkdirSync(parentDir,{{recursive:true}});}}catch(e0){{}}\
              process.stdout.write((function(){{\
              function acquire(){{\
@@ -514,6 +802,20 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64) -> Result<SyncOutcome,
         }
     }
 
+    let probe_paths = remote_probe_paths(src);
+    // At the recorded tip: no probe and no fetch. Behind it, fall through and
+    // materialize to the tip this machine already recorded.
+    if let ProbeDecision::Skip { sha } = probe_decision(&read_remote_record(&probe_paths), now) {
+        if have_local.as_deref() == Some(sha.as_str()) {
+            return Ok(SyncOutcome {
+                sha: have_local,
+                changed: false,
+                degraded_reason: st.degraded_reason.clone(),
+                detail: format!("remote sha {sha} is already recorded machine-wide; no probe needed"),
+            });
+        }
+    }
+
     let lock = match try_lock(src) {
         LockProbe::Acquired(lock) => lock,
         LockProbe::Held => {
@@ -568,12 +870,26 @@ fn refresh_locked(
     remember_probe_ms(src, now);
     let have_local = local_sha(src).or(have_local);
 
-    let remote = match probe_remote_sha(src) {
-        Ok(sha) => sha,
-        Err(e) => {
+    let remote = match global_remote_tip(src, now) {
+        GlobalTip::Known(sha) => sha,
+        GlobalTip::Held => {
+            return match have_local {
+                Some(sha) => Ok(SyncOutcome {
+                    sha: Some(sha),
+                    changed: false,
+                    degraded_reason: st.degraded_reason.clone(),
+                    detail: "another refresh in progress; serving current checkout".to_string(),
+                }),
+                None => Err(format!(
+                    "another process is cloning {} and no local checkout exists yet",
+                    src.repo
+                )),
+            };
+        }
+        GlobalTip::Unavailable(reason) => {
             st.last_checked_ms = now;
             st.consecutive_failures = st.consecutive_failures.saturating_add(1);
-            let detail = format!("remote probe failed ({e})");
+            let detail = format!("remote probe failed ({reason})");
             return match have_local {
                 Some(sha) => {
                     let detail = format!("{detail}; serving last good checkout");
@@ -582,7 +898,7 @@ fn refresh_locked(
                     Ok(degraded(Some(sha), detail, src))
                 }
                 None => {
-                    let detail = format!("{e}; no local checkout to fall back to");
+                    let detail = format!("{reason}; no local checkout to fall back to");
                     st.degraded_reason = Some(detail.clone());
                     st.degraded_sticky = false;
                     emit_degraded(None, &detail, src);
