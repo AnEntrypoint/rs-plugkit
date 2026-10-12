@@ -1,6 +1,7 @@
 use super::cas;
 use super::gm_dir;
 use super::memorize;
+use super::row_store;
 use super::yaml_util::{invalidate_residual_marker, levenshtein, yaml_to_json};
 use crate::pkfs;
 use serde_yaml::Value;
@@ -8,6 +9,16 @@ use std::collections::BTreeMap;
 
 pub fn mutables_path() -> std::path::PathBuf {
     gm_dir().join("mutables.yml")
+}
+
+/// The folder that holds one file per mutable: the index, read on every access.
+pub fn mutables_dir() -> std::path::PathBuf {
+    gm_dir().join("mutables")
+}
+
+/// The append-only commit log a resolved mutable's material is moved into.
+pub fn mutables_log_path() -> std::path::PathBuf {
+    gm_dir().join("mutables-log.jsonl")
 }
 
 fn row_id(item: &Value) -> Option<&str> {
@@ -175,12 +186,11 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         return (String::new(), err, 1);
     }
     let new_depends_on = extract_depends_on(&map);
-    let path = mutables_path();
-    let path_s = path.to_string_lossy().to_string();
+    let store = row_store::Store::mutables();
     let policy = super::fsm::graph().policy.clone();
 
-    let outcome = cas::cas_retry_write(
-        &path_s,
+    let outcome = row_store::cas_retry_write(
+        &store,
         policy.cas_max_attempts,
         "mutable-add",
         |mut doc: Value| {
@@ -243,7 +253,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             } else {
                 return cas::CasOutcome::Abort(
                     String::new(),
-                    "mutables.yml is not a sequence".to_string(),
+                    "the mutable store is not a sequence".to_string(),
                     1,
                 );
             }
@@ -346,33 +356,21 @@ fn json_brief_row(row: &serde_json::Value, default_status: &str) -> serde_json::
 }
 
 fn load_mutable_rows() -> Result<Vec<serde_json::Value>, (String, i32)> {
-    let path = mutables_path();
-    let path_s = path.to_string_lossy().to_string();
-    if !pkfs::exists(&path_s) {
-        return Ok(Vec::new());
-    }
-    let raw = pkfs::read_to_string(&path_s).unwrap_or_default();
-    let doc: Value = match serde_yaml::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => return Err((format!("parse failed: {}", e), 1)),
-    };
-    Ok(doc
-        .as_sequence()
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| {
-                    let m = v.as_mapping()?;
-                    let mut out = serde_json::Map::new();
-                    for (k, val) in m {
-                        if let Some(ks) = k.as_str() {
-                            out.insert(ks.to_string(), yaml_to_json(val));
-                        }
-                    }
-                    Some(serde_json::Value::Object(out))
-                })
-                .collect()
+    let store = row_store::Store::mutables();
+    let blocks = row_store::read_blocks(&store)?.blocks;
+    Ok(blocks
+        .iter()
+        .filter_map(|v| {
+            let m = v.as_mapping()?;
+            let mut out = serde_json::Map::new();
+            for (k, val) in m {
+                if let Some(ks) = k.as_str() {
+                    out.insert(ks.to_string(), yaml_to_json(val));
+                }
+            }
+            Some(serde_json::Value::Object(out))
         })
-        .unwrap_or_default())
+        .collect())
 }
 
 fn fold_duplicate_ids_keeping_resolved_else_last(
@@ -447,7 +445,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
     }
     let wanted_ids = super::prd::request_strings(&request, MUTABLE_ROW_ID_FIELDS);
     let wanted_statuses = super::prd::request_strings(&request, MUTABLE_ROW_STATUS_FIELDS);
-    let selected: Vec<serde_json::Value> = folded
+    let mut selected: Vec<serde_json::Value> = folded
         .into_iter()
         .filter(|row| {
             let id_ok = wanted_ids.is_empty()
@@ -461,11 +459,41 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
             id_ok && status_ok
         })
         .collect();
+    // A resolved mutable is moved out of the folder into the commit log, so an id
+    // stays answerable here: the log is searched for any id the folder no longer holds.
+    let store = row_store::Store::mutables();
+    if !wanted_ids.is_empty() {
+        for want in &wanted_ids {
+            if selected
+                .iter()
+                .any(|row| json_row_ids(row).iter().any(|have| have == want))
+            {
+                continue;
+            }
+            if let Some(row) = row_store::log_row(&store, want) {
+                selected.push(row);
+            }
+        }
+    } else if !wanted_statuses.is_empty() {
+        if wanted_statuses
+            .iter()
+            .any(|want| resolved_statuses.iter().any(|c| c.eq_ignore_ascii_case(want)))
+        {
+            for row in row_store::log_rows_with_status(&store, &resolved_statuses) {
+                if wanted_statuses
+                    .iter()
+                    .any(|want| want.eq_ignore_ascii_case(&json_row_status(&row, &default_status)))
+                {
+                    selected.push(row);
+                }
+            }
+        }
+    }
     if !wanted_ids.is_empty() && selected.is_empty() {
         return (
             String::new(),
             format!(
-                "no mutable row with id {} of the {} rows in .gm/mutables.yml -- pass no id for the listing",
+                "no mutable row with id {} of the {} rows in .gm/mutables/ or the resolved rows in .gm/mutables-log.jsonl -- pass no id for the listing",
                 wanted_ids.join(", "),
                 store_total
             ),
@@ -498,7 +526,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         "truncated": truncated,
         "brief": !want_full,
         "full": want_full,
-        "hint": "pass {\"id\":\"<mutable id>\"} for one full row (repeated rows of an id fold to the last one unless an earlier one is resolved), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), or {\"full\":true} for every full body",
+        "hint": "pass {\"id\":\"<mutable id>\"} for one full row (repeated rows of an id fold to the last one unless an earlier one is resolved), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), or {\"full\":true} for every full body. .gm/mutables/ holds OPEN work only: a resolved mutable is moved to .gm/mutables-log.jsonl, and an id or a resolved status asked for here is answered from that log.",
     });
     (reply.to_string(), String::new(), 0)
 }
@@ -626,48 +654,38 @@ fn mutable_blocked_external(item: &serde_yaml::Value) -> bool {
 }
 
 pub fn pending_detailed() -> Vec<serde_json::Value> {
-    let path = mutables_path();
-    let path_s = path.to_string_lossy().to_string();
-    if !pkfs::exists(&path_s) {
-        return Vec::new();
-    }
-    let raw = match pkfs::read_to_string(&path_s) {
-        Some(s) => s,
-        None => return Vec::new(),
-    };
-    let doc: Value = match serde_yaml::from_str(&raw) {
-        Ok(v) => v,
+    let store = row_store::Store::mutables();
+    let seq = match row_store::read_blocks(&store) {
+        Ok(read) => read.blocks,
         Err(_) => return Vec::new(),
     };
     let mut out: Vec<serde_json::Value> = Vec::new();
     let mut slot_of_id: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let policy = super::fsm::graph().policy.clone();
     let resolved_statuses = policy.mutables_resolved_statuses;
-    if let Some(seq) = doc.as_sequence() {
-        for item in seq {
-            let status = item
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&policy.mutables_default_status);
-            if !resolved_statuses.iter().any(|s| s == status) && !mutable_blocked_external(item) {
-                if let Some(m) = item.as_mapping() {
-                    let mut obj = serde_json::Map::new();
-                    for (k, v) in m {
-                        if let Some(ks) = k.as_str() {
-                            obj.insert(ks.to_string(), yaml_to_json(v));
+    for item in &seq {
+        let status = item
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&policy.mutables_default_status);
+        if !resolved_statuses.iter().any(|s| s == status) && !mutable_blocked_external(item) {
+            if let Some(m) = item.as_mapping() {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in m {
+                    if let Some(ks) = k.as_str() {
+                        obj.insert(ks.to_string(), yaml_to_json(v));
+                    }
+                }
+                let row = serde_json::Value::Object(obj);
+                match row_id(item).map(|s| s.to_string()) {
+                    Some(id) => match slot_of_id.get(&id) {
+                        Some(&slot) => out[slot] = row,
+                        None => {
+                            slot_of_id.insert(id, out.len());
+                            out.push(row);
                         }
-                    }
-                    let row = serde_json::Value::Object(obj);
-                    match row_id(item).map(|s| s.to_string()) {
-                        Some(id) => match slot_of_id.get(&id) {
-                            Some(&slot) => out[slot] = row,
-                            None => {
-                                slot_of_id.insert(id, out.len());
-                                out.push(row);
-                            }
-                        },
-                        None => out.push(row),
-                    }
+                    },
+                    None => out.push(row),
                 }
             }
         }
@@ -704,19 +722,18 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         };
     let trimmed = id_str.as_str();
 
-    let path = mutables_path();
-    let path_s = path.to_string_lossy().to_string();
-    if !pkfs::exists(&path_s) {
+    let store = row_store::Store::mutables();
+    if !pkfs::exists(&store.dir) && !pkfs::exists(&store.legacy) {
         return (
             String::new(),
-            format!("{} does not exist", path.display()),
+            format!("{} does not exist", store.dir),
             1,
         );
     }
     let policy = super::fsm::graph().policy.clone();
 
-    let outcome = cas::cas_retry_write(
-        &path_s,
+    let outcome = row_store::cas_retry_write(
+        &store,
         policy.cas_max_attempts,
         "mutable-resolve",
         |mut doc: Value| {
@@ -867,6 +884,27 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         Ok(v) => v,
         Err((out, err, rc)) => return (out, err, rc),
     };
+    // Resolution moves the material: the mutable's content is appended to the commit
+    // log and its file is cleared, so the folder holds open work only.
+    let filed_id = resolved_id.clone().unwrap_or_else(|| trimmed.to_string());
+    let filed = match row_store::retire_to_log(
+        &store,
+        &filed_id,
+        &policy.mutables_witness_status,
+        resolved_evidence.as_deref(),
+    ) {
+        Ok(entry) => entry,
+        Err(reason) => {
+            return (
+                String::new(),
+                format!(
+                    "mutable-resolve: {} was set to {} but could not be moved into {}: {}",
+                    filed_id, policy.mutables_witness_status, store.log, reason
+                ),
+                1,
+            )
+        }
+    };
 
     let evidence_body = resolved_evidence
         .clone()
@@ -889,6 +927,9 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let payload = serde_json::json!({
         "resolved": resolved_id,
         "memorize_write": memo_written,
+        "filed_to": ".gm/mutables-log.jsonl",
+        "filed_at": filed.get("ts").cloned().unwrap_or(serde_json::Value::Null),
+        "row_file_cleared": true,
     });
     (payload.to_string(), String::new(), 0)
 }
@@ -928,18 +969,17 @@ pub fn handle_defer(content: &str) -> (String, String, i32) {
         );
         return (String::new(), err, 1);
     }
-    let path = mutables_path();
-    let path_s = path.to_string_lossy().to_string();
-    if !pkfs::exists(&path_s) {
+    let store = row_store::Store::mutables();
+    if !pkfs::exists(&store.dir) && !pkfs::exists(&store.legacy) {
         return (
             String::new(),
-            format!("{} does not exist", path.display()),
+            format!("{} does not exist", store.dir),
             1,
         );
     }
     let policy = super::fsm::graph().policy.clone();
-    let outcome = cas::cas_retry_write(
-        &path_s,
+    let outcome = row_store::cas_retry_write(
+        &store,
         policy.cas_max_attempts,
         "mutable-defer",
         |mut doc: Value| {

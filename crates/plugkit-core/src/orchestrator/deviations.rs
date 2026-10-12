@@ -87,7 +87,7 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
     ),
     (
         "prd-resolve-unknown-id",
-        "`prd-resolve` named an id that is not in .gm/prd.yml -- the row was never prd-added in this chain, or the id is a typo (see `suggested_id`)",
+        "`prd-resolve` named an id that is not in .gm/prd/ and not in .gm/prd-log.jsonl -- the row was never prd-added in this chain, or it was already resolved and moved into the log, or the id is a typo (see `suggested_id`)",
         Severity::Deny,
     ),
     (
@@ -112,7 +112,7 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
     ),
     (
         "residual-premature",
-        "`residual-scan` was dispatched while .gm/prd.yml still carries open rows -- the scan is a close-out probe and has nothing to report until the PRD is empty",
+        "`residual-scan` was dispatched while .gm/prd/ still carries open rows -- the scan is a close-out probe and has nothing to report until the PRD is empty",
         Severity::Log,
     ),
     (

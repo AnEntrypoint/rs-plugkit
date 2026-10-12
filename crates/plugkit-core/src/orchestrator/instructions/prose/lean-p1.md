@@ -54,7 +54,7 @@ A row is admitted on witness, not cheapness. An unmeasured optimization claim is
 
 When an existing row's statement changes, rewrite it with `prd-add` under its existing id. The reply is `rescoped`, and the row keeps its position and dependents. Never delete and re-add a row, because that orphans its handle.
 
-State lives on disk in `.gm/prd.yml` and `.gm/mutables.yml`. A fresh session resumes the walk by reading those two files, not by replaying memory.
+State lives on disk as one file per row: `.gm/prd/<id>.yml` and `.gm/mutables/<id>.yml`, with resolved material moved into `.gm/prd-log.jsonl` and `.gm/mutables-log.jsonl`. A fresh session resumes the walk by listing those folders and reading that log, not by replaying memory.
 
 ## Mutables
 
@@ -158,7 +158,7 @@ When instruction returns a recall hit that a witnessed codesearch contradicts, p
 
 Entry is gated by G_START. The gate lean-one-task-in-flight is blocking. Its refusal names a recovery verb in next_dispatch. A repeated identical refusal escalates at gate_repeat_escalate_threshold (default 3). Dispatch the named recovery verb, never the denied transition again.
 
-Exit is `transition to=CONTRACT`, dispatched only when every row carries pre-conditions, invariants and post-conditions, every grounding unknown has a witness, every contract-kind mutable is typed, and the last expansion pass added zero rows. The exit path runs LIVEPLAN, then the G_CONTRACT gate (contract is the only durable description, advisory: it records the rule and never refuses), then UBIQ in CONTRACT. Before that transition no second durable description of the request exists. No design document is written, and no plan prose lives outside `.gm/prd.yml` and `.gm/mutables.yml`. The rows and the types are the description.
+Exit is `transition to=CONTRACT`, dispatched only when every row carries pre-conditions, invariants and post-conditions, every grounding unknown has a witness, every contract-kind mutable is typed, and the last expansion pass added zero rows. The exit path runs LIVEPLAN, then the G_CONTRACT gate (contract is the only durable description, advisory: it records the rule and never refuses), then UBIQ in CONTRACT. Before that transition no second durable description of the request exists. No design document is written, and no plan prose lives outside `.gm/prd/`, `.gm/mutables/` and their two commit logs. The rows and the types are the description.
 
 Feedback inside the phase: XYPROB routes back to JTBD, INVEST routes back to THINSLICE, and SPIKE routes back to LIVEPLAN. Each re-cuts rows in place with prd-add on existing ids, then continues the walk in this phase. EARS routes to DBC, which is a backreference into CONTRACT carrying the row id, because DBC is the earliest phase able to make the requirement falsifiable. The backreference from LIVEPLAN to G_START closes a finished task before a new plan opens.
 
