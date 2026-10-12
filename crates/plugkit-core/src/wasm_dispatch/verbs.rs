@@ -952,9 +952,12 @@ fn fs_read_directory(path: &str, body: &Value) -> u64 {
             )
         }
     };
-    let limit = body
-        .get("limit")
-        .and_then(Value::as_u64)
+    // `limit` is already spoken for: it is one of fs_read's line-range aliases, so a caller asking
+    // for five entries would be asking for five lines of a file that has none. The cap on entries
+    // therefore has its own key, and it stays capped so a wide directory cannot fill a reply.
+    let limit = ["max_entries", "entries_limit", "entry_limit"]
+        .iter()
+        .find_map(|key| body.get(*key).and_then(Value::as_u64))
         .filter(|n| *n > 0)
         .map_or(FS_READ_DIRECTORY_DEFAULT_LIMIT, |n| (n as usize).min(FS_READ_DIRECTORY_MAX_LIMIT));
     let total = entries.len();
@@ -1003,10 +1006,13 @@ fn fs_read_directory(path: &str, body: &Value) -> u64 {
             "data": listed,
             "total": total,
             "returned": returned,
-            "limit": limit,
+            "max_entries": limit,
             "has_more": has_more,
-            "next_offset": if has_more { json!(returned) } else { Value::Null },
-            "note": "fs_read reads file contents; this path is a directory, so its entries are listed instead -- fs_readdir lists names only",
+            "note": if has_more {
+                format!("fs_read reads file contents; this path is a directory, so its entries are listed instead -- {returned} of {total} shown: raise \"max_entries\" (capped at {FS_READ_DIRECTORY_MAX_LIMIT}) for more, or use fs_readdir, which pages with \"offset\"")
+            } else {
+                format!("fs_read reads file contents; this path is a directory, so its entries are listed instead -- fs_readdir lists names only; \"max_entries\" sets the cap (default {FS_READ_DIRECTORY_DEFAULT_LIMIT}, max {FS_READ_DIRECTORY_MAX_LIMIT})")
+            },
         })
         .to_string(),
     )
