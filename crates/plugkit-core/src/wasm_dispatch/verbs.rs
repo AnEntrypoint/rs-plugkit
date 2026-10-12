@@ -214,8 +214,11 @@ pub const ERR_CODE_APPEND_ONLY_REWRITE: &str = "append_only_rewrite_refused";
 
 /// Files no lane may shorten: the witness log is the (id, hash, ts) audit primitive, so a run adds
 /// one line and never rewrites the file. Measured 2026-10-10 by session orch-main-r86-witness-1:
-/// a concurrent whole-file write took `.gm/witness-log.md` from 4675 lines to 3. `prd.yml` and
-/// `mutables.yml` are absent on purpose: their verbs reconcile per row and must keep rewriting.
+/// a concurrent whole-file write took `.gm/witness-log.md` from 4675 lines to 3. `prd.yml`,
+/// `mutables.yml` and the one-file-per-row folders are absent on purpose: their verbs reconcile
+/// per row and must keep rewriting a row. The resolved-row commit logs
+/// (`.gm/prd-log.jsonl`, `.gm/mutables-log.jsonl`) are append-only by construction -- the only
+/// writer appends one line under a CAS, so they need no guard here.
 const APPEND_ONLY_PATH_SUFFIXES: &[&str] = &["/.gm/witness-log.md"];
 
 fn shared_store_contract() -> Value {
@@ -235,6 +238,10 @@ fn persisted_paths_compatibility_surface_report() -> Value {
         ".gm/turn-state.json",
         ".gm/prd.yml",
         ".gm/mutables.yml",
+        ".gm/prd/",
+        ".gm/mutables/",
+        ".gm/prd-log.jsonl",
+        ".gm/mutables-log.jsonl",
         ".gm/residual-check-fired",
         ".gm/claim-audit-fired",
         ".gm/last-instruction-ts",
@@ -913,8 +920,96 @@ fn fs_read(body: &Value) -> u64 {
                 }
             }
         }
-        None => err("fs_read", "file read failed"),
+        None => match host_abi::host_stat_is_directory(path) {
+            Some(true) => fs_read_directory(path, body),
+            _ => err("fs_read", "file read failed"),
+        },
     }
+}
+
+// A directory has no contents to read, so `host_read` returns nothing for one and the caller was
+// told only "file read failed": no reason, no listing, and no verb to turn to. Listing it here
+// answers the question the caller actually asked, bounded so a wide directory cannot fill a reply.
+const FS_READ_DIRECTORY_DEFAULT_LIMIT: usize = 100;
+const FS_READ_DIRECTORY_MAX_LIMIT: usize = 500;
+
+fn fs_read_directory(path: &str, body: &Value) -> u64 {
+    let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
+    let entries = match unpack_to_value(packed) {
+        Value::Array(entries) => entries,
+        other => {
+            return pack(
+                json!({
+                    "ok": false,
+                    "verb": "fs_read",
+                    "error": format!("{path} is a directory, so fs_read has no contents to return"),
+                    "error_code": ERR_CODE_FAILED,
+                    "is_directory": true,
+                    "next_dispatch": "fs_readdir",
+                    "listing": other,
+                })
+                .to_string(),
+            )
+        }
+    };
+    let limit = body
+        .get("limit")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+        .map_or(FS_READ_DIRECTORY_DEFAULT_LIMIT, |n| (n as usize).min(FS_READ_DIRECTORY_MAX_LIMIT));
+    let total = entries.len();
+    let base = path.trim_end_matches(|c| c == '/' || c == '\\');
+    let listed: Vec<Value> = entries
+        .into_iter()
+        .take(limit)
+        .map(|entry| {
+            let name = entry
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| {
+                    entry
+                        .get("name")
+                        .or_else(|| entry.get("path"))
+                        .or_else(|| entry.get("file"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| entry.to_string());
+            let child = if base.is_empty() || base == "." {
+                name.clone()
+            } else {
+                format!("{base}/{}", name)
+            };
+            let stat = host_abi::host_stat(&child);
+            json!({
+                "name": name,
+                "is_directory": stat.as_ref().and_then(|v| v.get("isDirectory")).and_then(Value::as_bool),
+                "size": stat.as_ref().and_then(|v| v.get("size")).and_then(Value::as_u64),
+                "mtime_ms": stat.as_ref()
+                    .and_then(|v| v.get("mtimeMs").or_else(|| v.get("mtime_ms")))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    let returned = listed.len();
+    let has_more = returned < total;
+    pack(
+        json!({
+            "ok": true,
+            "verb": "fs_read",
+            "path": path,
+            "is_directory": true,
+            "data": listed,
+            "total": total,
+            "returned": returned,
+            "limit": limit,
+            "has_more": has_more,
+            "next_offset": if has_more { json!(returned) } else { Value::Null },
+            "note": "fs_read reads file contents; this path is a directory, so its entries are listed instead -- fs_readdir lists names only",
+        })
+        .to_string(),
+    )
 }
 
 fn content_value_to_text(value: &Value) -> Option<String> {
