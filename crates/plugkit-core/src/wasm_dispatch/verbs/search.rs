@@ -343,11 +343,14 @@ pub(super) fn set_caller_budget(timeout_ms: Option<u64>) {
     CALLER_BUDGET_MS.with(|c| c.set(timeout_ms.unwrap_or(0)));
 }
 
+pub(super) fn guest_elapsed_ms() -> u64 {
+    unsafe { host_now_ms() }.saturating_sub(DISPATCH_STARTED_MS.with(|c| c.get()))
+}
+
 pub(super) fn caller_remaining_ms() -> Option<u64> {
     let budget = CALLER_BUDGET_MS.with(|c| c.get());
     if budget == 0 { return None; }
-    let elapsed = unsafe { host_now_ms() }.saturating_sub(DISPATCH_STARTED_MS.with(|c| c.get()));
-    Some(budget.saturating_sub(elapsed))
+    Some(budget.saturating_sub(guest_elapsed_ms()))
 }
 
 pub(super) const DUAL_SEARCH_RESERVE_MS: u64 = 30_000;
@@ -1329,6 +1332,7 @@ pub(super) fn codesearch_exhaustive(
         other => return ok("codesearch", other),
     };
     let partial = finish_scan_reply(&mut out, max_matches.min(u32::MAX as usize) as u32);
+    out.insert("guest_elapsed_ms".to_string(), json!(guest_elapsed_ms()));
     answer_scan("codesearch", out, partial)
 }
 

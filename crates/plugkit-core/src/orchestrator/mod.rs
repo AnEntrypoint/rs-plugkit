@@ -437,6 +437,7 @@ orchestrator_dispatch_table! {
     "task-list" => task::handle_list(content),
     "task-stop" => task::handle_stop(content),
     "task-output" => task::handle_output(content),
+    "wait-for-task" => task::handle_wait_for_task(content),
     "subagent-start" => subagent::handle_start(content),
     "subagent-end" => subagent::handle_end(content),
     "memorize-continue" => handle_memorize_continue(content),
