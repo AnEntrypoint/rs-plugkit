@@ -583,6 +583,21 @@ pub fn empty_universe_refusal(
     )
 }
 
+pub fn budget_exhausted_before_any_read_refusal(
+    root: &str,
+    scope: Option<&str>,
+    listed: usize,
+    budget_ms: u64,
+) -> String {
+    let searched = match scope {
+        Some(s) => format!("scope '{s}' under root '{}'", absolute_root_for_message(root)),
+        None => format!("root '{}'", absolute_root_for_message(root)),
+    };
+    format!(
+        "nothing was searched: {searched} listed {listed} file(s) but the {budget_ms} ms scan budget ran out before the first one was read, so an empty result here would read as \"no matches\" when it really means \"nothing scanned\" -- this is refused instead; narrow \"path\" to a subtree (a scoped scan finishes where an unscoped one does not), raise \"timeout_ms\", or re-dispatch when the box is less loaded"
+    )
+}
+
 pub fn absolute_root_for_message(root: &str) -> String {
     if crate::pkfs::is_absolute(root) {
         return root.to_string();

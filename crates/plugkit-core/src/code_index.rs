@@ -5456,6 +5456,21 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         && !glob_matched_no_files
         && glob_outside_path.is_empty()
         && !split_form_truncated;
+    if budget_exhausted && files_scanned == 0 {
+        return json!({
+            "ok": false,
+            "error": crate::scan_universe::budget_exhausted_before_any_read_refusal(
+                root,
+                scope,
+                files.len(),
+                budget_ms,
+            ),
+            "error_kind": "budget_exhausted_before_any_read",
+            "pattern": req.pattern,
+            "budget_ms": budget_ms,
+            "files_listed": files.len(),
+        });
+    }
     let unsearched_gm_state = universe
         .excluded
         .iter()
