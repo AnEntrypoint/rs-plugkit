@@ -5603,6 +5603,45 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         ));
     }
     if match_count == 0 {
+        let mut gaps: Vec<String> = Vec::new();
+        if files_truncated {
+            gaps.push(format!("the file cap cut the listing at {file_cap} files"));
+        }
+        if !universe.listing_complete {
+            gaps.push("the file listing was cut short".to_string());
+        }
+        if budget_exhausted {
+            gaps.push(format!("the {budget_ms} ms scan budget ran out"));
+        }
+        if matches_truncated {
+            gaps.push(format!("the match cap cut the reply at {max_matches} matches"));
+        }
+        if files_skipped_too_large_count > 0 {
+            gaps.push(format!("{files_skipped_too_large_count} file(s) over {} bytes were skipped", LITERAL_SCAN_MAX_FILE_BYTES));
+        }
+        if files_unreadable > 0 {
+            gaps.push(format!("{files_unreadable} file(s) could not be read"));
+        }
+        if files_skipped_binary_extension > 0 {
+            gaps.push(format!("{files_skipped_binary_extension} file(s) were skipped unopened on a binary extension"));
+        }
+        if files_skipped_binary > 0 {
+            gaps.push(format!("{files_skipped_binary} file(s) were skipped unopened as binary"));
+        }
+        if unsearched_gm_state > 0 {
+            gaps.push(format!("{unsearched_gm_state} untracked gm runtime state path(s) were excluded"));
+        }
+        if !glob_outside_path.is_empty() {
+            gaps.push(format!("{} include glob(s) reach outside the named path scope", glob_outside_path.len()));
+        }
+        let absence_claim = if gaps.is_empty() {
+            ", so this zero means that exact text is absent from the searched files".to_string()
+        } else {
+            format!(
+                "; this zero is NOT a finding: the scan did not cover its whole scope ({}), so absence is established only for the {files_scanned} file(s) actually read",
+                gaps.join("; ")
+            )
+        };
         let mut hint = if multi {
             let mut detail: Vec<String> = Vec::new();
             let mut used = 0usize;
@@ -5637,13 +5676,13 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             )
         } else if req.pattern.contains('|') {
             format!(
-                "no line matched \"{}\" in {} files scanned ({lines_scanned} lines read): mode literal matched the | as a plain character, so this zero means that exact text is absent from the searched files -- for alternation pass mode regex",
-                req.pattern, files_scanned
+                "no line matched \"{}\" in {} files scanned ({lines_scanned} lines read): mode literal matched the | as a plain character{} -- for alternation pass mode regex",
+                req.pattern, files_scanned, absence_claim
             )
         } else {
             format!(
-                "no line matched \"{}\" in {} files scanned ({lines_scanned} lines read): the pattern was matched verbatim as a substring, every character of it, punctuation included -- it was never tokenized, so this zero means the text is absent from the searched files",
-                req.pattern, files_scanned
+                "no line matched \"{}\" in {} files scanned ({lines_scanned} lines read): the pattern was matched verbatim as a substring, every character of it, punctuation included -- it was never tokenized{}",
+                req.pattern, files_scanned, absence_claim
             )
         };
         if split_form_count > 0 {
