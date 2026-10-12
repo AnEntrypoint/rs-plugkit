@@ -4,7 +4,28 @@
 
 **Not changed:** every verb body shape and every existing response field. `prd-add`, `prd-list`, `prd-resolve`, `prd-defer`, `prd-block`, `mutable-add`, `mutable-list`, `mutable-resolve` and `mutable-defer` answer as before; a resolve reply gains three new fields (`filed_to`, `filed_at`, `row_file_cleared`). The git verbs' foreign-row filter still keys on the legacy path alone, because one file per row is one owner per file and there is no whole-file rewrite left to filter. `prd-repair` still targets the legacy file. `is_prd_state_pathspec` is added for the wider path class and `is_runtime_state_path` now routes through it.
 
-**Not yet measured:** built on Actions; the running guest predates it, so the live witness waits on a CI build and a runner reload.
+**Measured:** `native-check` (run 38281523359) and `publish/release` (38281524071) both succeeded on the pushed commit. `predicates-md-drift` failed once on a checkout race -- it read gm-config before 5cfc399e landed -- and passed on rerun. Served live against `C:\dev\gm` with plugin gm 0.1.1612:
+
+```
+prd-add {id: gm-prd-rows-one-file-per-row-live-proof, ...}
+  -> added; .gm/prd/ created, .gm/prd.absorbed.json = {"legacy":{"size":232778,...}}
+     legacy .gm/prd.yml (232778 bytes) held 309 distinct row ids
+     .gm/prd/ holds 309 files; re-deriving item_stem over every legacy id: 0 without a file
+     the new row is .gm/prd/gm-prd-rows-one-file-per-row-live-proof.yml, a bare mapping, id first
+prd-list {"id":"gm-prd-rows-one-file-per-row-live-proof"} -> 1 item, store_total 310
+prd-resolve {id, witness_evidence, witness_dispatch_id}
+  -> resolved, filed_to .gm/prd-log.jsonl, filed_at 2026-10-12T17:22:02.085Z, row_file_cleared true
+     .gm/prd/<id>.yml gone; .gm/prd/ back to 309
+     .gm/prd-log.jsonl: one line with v, kind, id, status, ts, ts_ms, session_id,
+                        prev (64 zeros = genesis), sha256, file, note, material
+prd-list {"id":"gm-prd-rows-one-file-per-row-live-proof"} -> 1 item, resolved: true,
+                        resolved_at 2026-10-12T17:22:02.085Z, source .gm/prd-log.jsonl
+
+mutable-add / mutable-resolve: .gm/mutables.yml (356215 bytes, 367 ids) -> 367 files, 0 missing;
+resolved mutable moved to .gm/mutables-log.jsonl, row_file_cleared true
+```
+
+Both legacy files stay on disk, unmodified and uncommitted-away, because projects track them.
 
 ## 2026-10-12 - codeinsight: a stale-index refusal names its own remedy instead of inlining the deferred file set
 
