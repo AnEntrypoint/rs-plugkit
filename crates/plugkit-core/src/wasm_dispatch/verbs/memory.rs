@@ -497,8 +497,17 @@ pub(super) fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
     if let Some(violation) = confinement_violation(body, namespace) {
         return err("memorize", &violation);
     }
+    let kind = match body.get("kind") {
+        None => "l0",
+        Some(v) => match v.as_str() {
+            Some(s) => s,
+            None => return err("memorize", "kind must be a string naming a tier"),
+        },
+    };
+    if let Err(e) = crate::tencentdb_memory::validate_tier(kind) {
+        return err("memorize", &e);
+    }
     if crate::tencentdb_memory::namespace_is_routed(namespace) {
-        let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("l0");
         let emb = match embed_passage(text.as_str()) {
             Some(e) => e,
             None => return err("memorize", "embed failed; refusing to write a text-only memory with no vector (un-vector-recallable orphan)"),
@@ -776,6 +785,9 @@ pub(super) fn tencentdb_memory_import_gm_native_memories_reembedded_384dim(body:
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("l1");
+    if let Err(e) = crate::tencentdb_memory::validate_tier(kind) {
+        return err("tencentdb-memory-import", &e);
+    }
 
     if !crate::tencentdb_memory::namespace_is_routed(dest_namespace) {
         return err(
