@@ -678,6 +678,50 @@ pub fn automatic_replay(session_id: Option<&str>) -> Value {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub fn propose_strategy() -> Result<Value, String> {
+    let owner = session_id()?;
+    if owner.len() > 256
+        || matches!(owner.as_str(), "." | "..")
+        || !owner
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err("dream-strategy-propose requires a safe session ID".to_string());
+    }
+    let replay = automatic_replay(Some(owner.as_str()));
+    let proposed_selection = replay
+        .get("selection")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| "continue-current-exploration".to_string());
+    let path = format!(".gm/dream-rsi/{owner}/proposed-strategy.json");
+    let proposal = json!({
+        "ok": true,
+        "kind": "strategy-proposal",
+        "owner_session_id": owner,
+        "proposed_selection": proposed_selection,
+        "replay": replay,
+        "path": &path,
+    });
+    if !crate::pkfs::write(&path, &proposal.to_string()) {
+        return Err("dream-strategy-propose could not persist proposal".to_string());
+    }
+    Ok(proposal)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn handle_strategy_propose(_content: &str) -> (String, String, i32) {
+    match propose_strategy() {
+        Ok(result) => (result.to_string(), String::new(), 0),
+        Err(error) => (
+            json!({ "ok": false, "error": error }).to_string(),
+            String::new(),
+            1,
+        ),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 fn evaluator_receipt_path() -> Result<String, String> {
     session_store_path("evaluator-receipts")
 }
