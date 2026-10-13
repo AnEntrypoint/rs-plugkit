@@ -510,7 +510,12 @@ otherwise), so no commit becomes unreachable. A remote-tracking ref and a branch
 the remote are never touched, and `delete: "origin/main"` names the local branch of
 that name, which is how a stray local `origin/main` is removed. The reply carries
 `deleted`, `was` (the removed tip), `reachable_from_head` and
-`remote_tracking_containing`. `git_branch` (list) and `git_status` report
+`remote_tracking_containing`; `dry_run: true` runs every check and answers
+`would_delete` with the same fields, deleting nothing. `git_branch {rename: "<old>",
+to: "<new>"}` renames a local branch without losing a commit, which ends an
+ambiguity when delete is refused because the branch is the only holder of its
+commits; the new name must name nothing yet (`branch_name_taken`), so it cannot
+create another shadow. `git_branch` (list) and `git_status` report
 `ambiguous_ref: true` with `ambiguous_refs {name: [refs/heads/<name>,
 refs/remotes/<name>]}` while such a shadowing local branch exists.
 `git_branch_delete` keeps its own `-d`/`-D` semantics and can delete a branch on the

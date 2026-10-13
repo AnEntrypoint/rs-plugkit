@@ -6410,7 +6410,8 @@ pub(super) fn ci_status(body: &Value) -> u64 {
 
 pub(super) const GIT_BRANCH_HELP: &str = r#"git_branch lists local branches as {current, branches}, plus ambiguous_ref: true and ambiguous_refs {name: [refs/heads/<name>, refs/remotes/<name>]} when a local branch is named like a remote-tracking ref (a bare origin/main then resolves to the local branch first; delete it to end the ambiguity). git_status reports the same two fields.
   all: true | remote: true   list every branch, or only the remote-tracking ones.
-  delete: "<name>"           deletes the LOCAL branch refs/heads/<name>; a remote-tracking ref and a branch on the remote are never touched. It refuses a name with no local branch (no_such_local_branch), the current branch (current_branch_refused), a branch checked out in another worktree (branch_checked_out_elsewhere) and a branch whose tip is reachable from neither HEAD nor any remote-tracking ref (branch_tip_unreachable, with unreachable_commits), so no commit can become unreachable. The reply names the tip it removed (was) and what keeps it reachable. git_branch_delete keeps its own -d and -D semantics and can delete remote branches."#;
+  delete: "<name>"           deletes the LOCAL branch refs/heads/<name>; a remote-tracking ref and a branch on the remote are never touched. It refuses a name with no local branch (no_such_local_branch), the current branch (current_branch_refused), a branch checked out in another worktree (branch_checked_out_elsewhere) and a branch whose tip is reachable from neither HEAD nor any remote-tracking ref (branch_tip_unreachable, with unreachable_commits), so no commit can become unreachable. The reply names the tip it removed (was) and what keeps it reachable. dry_run: true runs every check and answers would_delete without deleting.
+  rename: "<old>", to: "<new>"  renames a local branch without losing a commit, which ends an ambiguity when delete is refused because the branch is the only holder of its commits. The new name must name nothing yet (branch_name_taken otherwise), so it cannot create another shadow. git_branch_delete keeps its own -d and -D semantics and can delete remote branches."#;
 
 pub(super) fn shadowed_remote_refs(cwd: Option<&str>) -> serde_json::Map<String, Value> {
     let mut found = serde_json::Map::new();
@@ -6457,7 +6458,7 @@ fn plain_branch_name(name: &str) -> bool {
     plain_ref_token(name) && !name.starts_with('.') && !name.ends_with(".lock")
 }
 
-fn git_branch_delete_guarded(cwd: Option<&str>, raw: &Value) -> u64 {
+fn git_branch_delete_guarded(cwd: Option<&str>, raw: &Value, dry_run: bool) -> u64 {
     let Some(name) = raw.as_str().map(str::trim).filter(|name| plain_branch_name(name)) else {
         return err_json(
             "git_branch",
@@ -6555,6 +6556,20 @@ fn git_branch_delete_guarded(cwd: Option<&str>, raw: &Value) -> u64 {
             }),
         );
     }
+    if dry_run {
+        return ok(
+            "git_branch",
+            json!({
+                "dry_run": true,
+                "would_delete": name,
+                "ref": full,
+                "was": tip,
+                "reachable_from_head": from_head,
+                "remote_tracking_containing": remote_refs.iter().take(5).collect::<Vec<_>>(),
+                "checks": "passed",
+            }),
+        );
+    }
     let deleted = git_call_argv(&["branch", "-D", name], cwd);
     if git_exit_code(&deleted) != 0 {
         return err_json(
@@ -6582,14 +6597,95 @@ fn git_branch_delete_guarded(cwd: Option<&str>, raw: &Value) -> u64 {
     ok("git_branch", data)
 }
 
+fn git_branch_rename(cwd: Option<&str>, body: &Value, raw: &Value) -> u64 {
+    let invalid = |field: &str| {
+        err_json(
+            "git_branch",
+            json!({
+                "error": format!("git_branch rename and to must each name one local branch (letters, digits, . _ - and / only); {field} does not"),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "field": field,
+            }),
+        )
+    };
+    let Some(from) = raw.as_str().map(str::trim).filter(|name| plain_branch_name(name)) else {
+        return invalid("rename");
+    };
+    let Some(to) = body
+        .get("to")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| plain_branch_name(name))
+    else {
+        return invalid("to");
+    };
+    let tip_probe = git_call_argv(
+        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{from}^{{commit}}")],
+        cwd,
+    );
+    let tip = tip_probe
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if git_exit_code(&tip_probe) != 0 || tip.is_empty() {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": format!("no local branch {from}"),
+                "error_code": "no_such_local_branch",
+            }),
+        );
+    }
+    let taken: Vec<String> = ref_candidates(cwd, to);
+    if !taken.is_empty() {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": format!("{to} already names {} -- a new branch name must name nothing yet, or it would be ambiguous", taken.join(", ")),
+                "error_code": "branch_name_taken",
+                "refs": taken,
+            }),
+        );
+    }
+    let renamed = git_call_argv(&["branch", "-m", from, to], cwd);
+    if git_exit_code(&renamed) != 0 {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": git_output_text(&renamed).trim(),
+                "error_code": ERR_CODE_FAILED,
+            }),
+        );
+    }
+    let mut data = json!({ "renamed": { "from": from, "to": to }, "tip": tip });
+    let remaining = ref_candidates(cwd, from);
+    if remaining.len() > 1 {
+        let mut ambiguous = serde_json::Map::new();
+        ambiguous.insert(from.to_string(), json!(remaining));
+        note_ambiguous_refs(&mut data, &ambiguous);
+    }
+    ok("git_branch", data)
+}
+
 pub(super) fn git_branch(body: &Value) -> u64 {
-    if let Some(refusal) =
-        refuse_unknown_fields("git_branch", body, &["remote", "all", "delete"])
-    {
+    if let Some(refusal) = refuse_unknown_fields(
+        "git_branch",
+        body,
+        &["remote", "all", "delete", "dry_run", "rename", "to"],
+    ) {
         return refusal;
     }
+    if let Some(raw) = body.get("rename") {
+        return git_branch_rename(body_cwd(body), body, raw);
+    }
     if let Some(raw) = body.get("delete") {
-        return git_branch_delete_guarded(body_cwd(body), raw);
+        let dry_run = match body_bool_flag(body, "dry_run", "git_branch") {
+            Ok(flag) => flag,
+            Err(detail) => return err_json("git_branch", detail),
+        };
+        return git_branch_delete_guarded(body_cwd(body), raw, dry_run);
     }
     for flag in ["remote", "all"] {
         match body.get(flag) {
