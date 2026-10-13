@@ -680,9 +680,11 @@ pub(super) fn branch_status(body: &Value) -> u64 {
     {
         let _ = exec_git_in(cwd, &format!("fetch {} {}", remote, branch));
     }
+    let tracking = format!("{remote}/{branch}");
+    let candidates = ref_candidates(cwd, &tracking);
     let counts = exec_git_in(
         cwd,
-        &format!("rev-list --left-right --count {}/{}...HEAD", remote, branch),
+        &format!("rev-list --left-right --count refs/remotes/{tracking}...HEAD"),
     );
     let counts = counts.trim();
     let mut behind: u64 = 0;
@@ -692,15 +694,18 @@ pub(super) fn branch_status(body: &Value) -> u64 {
         behind = parts[0].parse().unwrap_or(0);
         ahead = parts[1].parse().unwrap_or(0);
     }
-    ok(
-        "branch_status",
-        json!({
-            "branch": branch,
-            "ahead": ahead,
-            "behind": behind,
-            "remote": remote,
-        }),
-    )
+    let mut data = json!({
+        "branch": branch,
+        "ahead": ahead,
+        "behind": behind,
+        "remote": remote,
+    });
+    if candidates.len() > 1 {
+        let mut ambiguous = serde_json::Map::new();
+        ambiguous.insert(tracking, json!(candidates));
+        note_ambiguous_refs(&mut data, &ambiguous);
+    }
+    ok("branch_status", data)
 }
 
 pub(super) fn resolve_ref(cwd: Option<&str>, refspec: &str) -> Option<String> {
@@ -716,6 +721,99 @@ pub(super) fn resolve_ref(cwd: Option<&str>, refspec: &str) -> Option<String> {
     } else {
         Some(sha)
     }
+}
+
+pub(super) const REF_NAMESPACES: [&str; 3] = ["refs/heads/", "refs/tags/", "refs/remotes/"];
+
+pub(super) fn remote_tracking_ref(branch: &str) -> String {
+    format!("refs/remotes/origin/{branch}")
+}
+
+fn plain_ref_token(token: &str) -> bool {
+    !token.is_empty()
+        && token != "HEAD"
+        && !token.starts_with(['-', '/'])
+        && !token.ends_with('/')
+        && !token.starts_with("refs/")
+        && !token.contains("..")
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+}
+
+pub(super) fn ref_candidates(cwd: Option<&str>, token: &str) -> Vec<String> {
+    if !plain_ref_token(token) {
+        return Vec::new();
+    }
+    let patterns: Vec<String> = REF_NAMESPACES
+        .iter()
+        .map(|namespace| format!("{namespace}{token}"))
+        .collect();
+    let mut argv: Vec<&str> = vec!["for-each-ref", "--format=%(refname)"];
+    argv.extend(patterns.iter().map(String::as_str));
+    git_stdout_lines(&argv, cwd)
+        .into_iter()
+        .filter(|name| patterns.contains(name))
+        .collect()
+}
+
+pub(super) struct RefReading {
+    pub(super) spec: String,
+    pub(super) candidates: Vec<String>,
+}
+
+pub(super) fn disambiguated_ref(cwd: Option<&str>, token: &str) -> RefReading {
+    let candidates = ref_candidates(cwd, token);
+    let remote_tracking = format!("refs/remotes/{token}");
+    let spec = if candidates.len() > 1 && candidates.contains(&remote_tracking) {
+        remote_tracking
+    } else {
+        token.to_string()
+    };
+    RefReading { spec, candidates }
+}
+
+pub(super) struct RevisionReading {
+    pub(super) spec: String,
+    pub(super) ambiguous: serde_json::Map<String, Value>,
+}
+
+fn split_revision_range(revision: &str) -> (&str, &str, &str) {
+    if let Some(at) = revision.find("...") {
+        return (&revision[..at], "...", &revision[at + 3..]);
+    }
+    if let Some(at) = revision.find("..") {
+        return (&revision[..at], "..", &revision[at + 2..]);
+    }
+    (revision, "", "")
+}
+
+pub(super) fn disambiguated_revision(cwd: Option<&str>, revision: &str) -> RevisionReading {
+    let (left, dots, right) = split_revision_range(revision);
+    let mut ambiguous = serde_json::Map::new();
+    let mut read_side = |token: &str| -> String {
+        let reading = disambiguated_ref(cwd, token);
+        if reading.candidates.len() > 1 {
+            ambiguous.insert(token.to_string(), json!(reading.candidates));
+        }
+        reading.spec
+    };
+    let spec = if dots.is_empty() {
+        read_side(left)
+    } else {
+        let left_spec = read_side(left);
+        let right_spec = read_side(right);
+        format!("{left_spec}{dots}{right_spec}")
+    };
+    RevisionReading { spec, ambiguous }
+}
+
+pub(super) fn note_ambiguous_refs(data: &mut Value, ambiguous: &serde_json::Map<String, Value>) {
+    if ambiguous.is_empty() {
+        return;
+    }
+    data["ambiguous_ref"] = json!(true);
+    data["ambiguous_refs"] = Value::Object(ambiguous.clone());
 }
 
 pub(super) struct SshHttpsFallback {
@@ -967,7 +1065,7 @@ pub(super) fn git_fetch_and_resolve_remote(
             let _ = git_call_argv(&["fetch", "origin", branch], repo);
         }
     }
-    resolve_ref(repo, &format!("origin/{}", branch))
+    resolve_ref(repo, &remote_tracking_ref(branch))
 }
 
 pub(super) fn verify_push_landed(
@@ -981,7 +1079,7 @@ pub(super) fn verify_push_landed(
         Some(f) => f.call(&["fetch", "origin", branch], cwd),
         None => git_call_argv(&["fetch", "origin", branch], cwd),
     };
-    let remote_after = resolve_ref(cwd, &format!("origin/{}", branch));
+    let remote_after = resolve_ref(cwd, &remote_tracking_ref(branch));
     let remote_after = match remote_after {
         Some(s) => s,
         None => {
@@ -1342,6 +1440,42 @@ fn push_unnamed_commits(
 }
 
 pub(super) fn git_push(body: &Value) -> u64 {
+    let repo = body_cwd(body).map(String::from);
+    let branch = body
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| {
+            let current = exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD")
+                .trim()
+                .to_string();
+            if current.is_empty() || current == "HEAD" {
+                "main".to_string()
+            } else {
+                current
+            }
+        });
+    let tracking = format!("origin/{branch}");
+    let candidates = ref_candidates(repo.as_deref(), &tracking);
+    let packed = git_push_receipt(body);
+    if candidates.len() < 2 {
+        return packed;
+    }
+    let mut reply = unpack_to_value(packed);
+    if reply.get("pending").and_then(Value::as_bool) == Some(true) {
+        return pack(reply.to_string());
+    }
+    let mut ambiguous = serde_json::Map::new();
+    ambiguous.insert(tracking, json!(candidates));
+    if reply.get("data").is_some_and(Value::is_object) {
+        note_ambiguous_refs(&mut reply["data"], &ambiguous);
+    } else {
+        note_ambiguous_refs(&mut reply, &ambiguous);
+    }
+    pack(reply.to_string())
+}
+
+fn git_push_receipt(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
     let explicit_branch = body
         .get("branch")
@@ -2620,7 +2754,7 @@ pub(super) fn untracked_worktree_paths(cwd: Option<&str>) -> Vec<String> {
 }
 
 pub(super) fn incoming_changed_paths(cwd: Option<&str>, branch: &str) -> Vec<String> {
-    exec_git_in(cwd, &format!("diff --name-only HEAD...origin/{}", branch))
+    exec_git_in(cwd, &format!("diff --name-only HEAD...{}", remote_tracking_ref(branch)))
         .lines()
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
@@ -2727,7 +2861,7 @@ pub(super) fn pull_past_remote_moved(
             )
         });
     }
-    let remote_sha_before = resolve_ref(cwd, &format!("origin/{}", branch)).unwrap_or_default();
+    let remote_sha_before = resolve_ref(cwd, &remote_tracking_ref(&branch)).unwrap_or_default();
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
     let ff_body = pull_body_with_identity(cwd, &branch, true, identity);
     let ff_resp = unpack_to_value(git_pull(&ff_body));
@@ -3035,7 +3169,7 @@ pub(super) fn scope_recommit_past_remote_moved(
             local_sha
         ));
     }
-    let Some(remote_tip) = resolve_ref(cwd, &format!("origin/{}", branch)) else {
+    let Some(remote_tip) = resolve_ref(cwd, &remote_tracking_ref(&branch)) else {
         return RemoteMovedScopeFix::Failed(format!(
             "could not resolve origin/{} after fetch, so the remote tip to re-land onto is unknown",
             branch
@@ -3190,7 +3324,7 @@ pub(super) fn remote_moved_is_same_branch_advance(
     branch: &str,
     local_sha: &str,
 ) -> bool {
-    let remote_sha = match resolve_ref(repo, &format!("origin/{}", branch)) {
+    let remote_sha = match resolve_ref(repo, &remote_tracking_ref(&branch)) {
         Some(sha) => sha,
         None => return false,
     };
@@ -3371,7 +3505,7 @@ pub(super) fn pull_and_repush_remote_moved(
             }
         }
     }
-    let remote_now = resolve_ref(cwd, &format!("origin/{}", branch));
+    let remote_now = resolve_ref(cwd, &remote_tracking_ref(&branch));
     let strict_fast_forward = remote_now
         .as_deref()
         .map(|remote| {
@@ -3621,28 +3755,31 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             .to_string();
         let (ci_status_summary, ci_validated_written) =
             check_ci_status_and_write_validated_marker_if_green(cwd_ref, &source_sha);
-        return ok(
-            "git_finalize",
-            json!({
-                "committed": false,
-                "pushed": true,
-                "source_ref": source_ref,
-                "sha": source_sha,
-                "branch": push_data.get("branch").cloned().unwrap_or(Value::Null),
-                "remote_advanced": push_data.get("remote_advanced").cloned().unwrap_or(Value::Null),
-                "already_current": push_data.get("already_current").cloned().unwrap_or(Value::Null),
-                "remote_sha": push_data.get("remote_sha").cloned().unwrap_or(Value::Null),
-                "preserved_dirty_worktree": push_data.get("preserved_dirty_worktree").cloned().unwrap_or(Value::Null),
-                "pushed_commits": push_data.get("pushed_commits").cloned().unwrap_or(Value::Null),
-                "steps": [
-                    {"step": "commit", "skipped": "explicit source_ref publishes an existing commit"},
-                    {"step": "push", "branch": push_data.get("branch").cloned().unwrap_or(Value::Null)},
-                    {"step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written}
-                ],
-                "ci_validated_marker_written": ci_validated_written,
-                "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
-            }),
-        );
+        let mut published = json!({
+            "committed": false,
+            "pushed": true,
+            "source_ref": source_ref,
+            "sha": source_sha,
+            "branch": push_data.get("branch").cloned().unwrap_or(Value::Null),
+            "remote_advanced": push_data.get("remote_advanced").cloned().unwrap_or(Value::Null),
+            "already_current": push_data.get("already_current").cloned().unwrap_or(Value::Null),
+            "remote_sha": push_data.get("remote_sha").cloned().unwrap_or(Value::Null),
+            "preserved_dirty_worktree": push_data.get("preserved_dirty_worktree").cloned().unwrap_or(Value::Null),
+            "pushed_commits": push_data.get("pushed_commits").cloned().unwrap_or(Value::Null),
+            "steps": [
+                {"step": "commit", "skipped": "explicit source_ref publishes an existing commit"},
+                {"step": "push", "branch": push_data.get("branch").cloned().unwrap_or(Value::Null)},
+                {"step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written}
+            ],
+            "ci_validated_marker_written": ci_validated_written,
+            "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
+        });
+        for key in ["ambiguous_ref", "ambiguous_refs"] {
+            if let Some(value) = push_data.get(key) {
+                published[key] = value.clone();
+            }
+        }
+        return ok("git_finalize", published);
     }
     let message = body
         .get("message")
@@ -4241,6 +4378,11 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         "ci_validated_marker_written": ci_validated_written,
         "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
     });
+    for key in ["ambiguous_ref", "ambiguous_refs"] {
+        if let Some(value) = push_data.and_then(|data| data.get(key)) {
+            finalize_payload[key] = value.clone();
+        }
+    }
     if let Some(recovery) = recovery {
         finalize_payload["incoming_commits"] = recovery
             .get("incoming_commits")
@@ -4305,14 +4447,92 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
     )
 }
 
+pub(super) const GIT_LOG_ACCEPTED_FIELDS: &[&str] = &[
+    "limit",
+    "count",
+    "range",
+    "ref",
+    "rev",
+    "path",
+    "paths",
+    "files",
+    "body",
+    "include_body",
+    "grep",
+    "author",
+    "trailers",
+    "case_insensitive",
+    "oneline",
+];
+
+pub(super) const GIT_LOG_HELP: &str = r#"git_log lists commits newest first as {commits: [{sha, sha_full, subject, author: {name, email, date}, body?, trailers?}], count, truncated?}.
+  limit            commits to return (default 10; alias count). count is always present, so 0 is an answer; truncated: true says more commits matched than limit.
+  range|ref|rev    a revision or a range such as origin/main..HEAD. A bare name that matches more than one ref (a local branch named origin/main shadows the remote-tracking ref) resolves to refs/remotes/<name>; the reply then carries ambiguous_ref: true, ambiguous_refs: {name: [full ref names]} and revision_resolved.
+  path|paths|files keep only commits that touch those pathspecs.
+  body: true       (alias include_body) adds the message body, trailers included, when it is not empty.
+  grep             a regular expression, or an array of them (any match keeps the commit), against the whole message: git --grep under --extended-regexp, so ^Co-Authored-By:.*(Claude|Anthropic) works as written.
+  author           a regular expression against "Name <email>" (git --author).
+  case_insensitive: true makes grep and author ignore case.
+  oneline: true    answers commits as "<sha> <YYYY-MM-DD> <author> <subject>" strings, a fraction of the bytes; not combinable with body or trailers.
+  trailers: true   adds the commit's trailers as {Key: value} (an array when a key repeats), read by git from the final paragraph of the message (%(trailers:only=true,unfold=true)). A Co-Authored-By line above the final paragraph is not a trailer: find those with grep."#;
+
+const GIT_LOG_RECORD_END: char = '\u{1e}';
+const GIT_LOG_FIELD_SEP: char = '\u{1f}';
+const GIT_LOG_TRAILERS_FORMAT: &str = "%(trailers:only=true,unfold=true)";
+
+fn git_log_patterns(body: &Value, field: &str) -> Result<Vec<String>, Value> {
+    let invalid = || {
+        json!({
+            "error": format!("git_log {field} must be a nonempty string or an array of nonempty strings"),
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "field": field,
+        })
+    };
+    let entries: Vec<&Value> = match body.get(field) {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(items)) => items.iter().collect(),
+        Some(single) => vec![single],
+    };
+    let mut patterns = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match entry.as_str().map(str::trim).filter(|text| !text.is_empty()) {
+            Some(text) => patterns.push(text.to_string()),
+            None => return Err(invalid()),
+        }
+    }
+    Ok(patterns)
+}
+
+fn git_log_trailers(raw: &str) -> Option<Value> {
+    let mut found = serde_json::Map::new();
+    for line in raw.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        if key.is_empty() {
+            continue;
+        }
+        match found.get_mut(key) {
+            None => {
+                found.insert(key.to_string(), json!(value));
+            }
+            Some(Value::Array(values)) => values.push(json!(value)),
+            Some(first) => {
+                let earlier = first.take();
+                *first = json!([earlier, value]);
+            }
+        }
+    }
+    if found.is_empty() {
+        None
+    } else {
+        Some(Value::Object(found))
+    }
+}
+
 pub(super) fn git_log(body: &Value) -> u64 {
-    if let Some(refusal) = refuse_unknown_fields(
-        "git_log",
-        body,
-        &[
-            "limit", "count", "range", "ref", "rev", "path", "paths", "files",
-        ],
-    ) {
+    if let Some(refusal) = refuse_unknown_fields("git_log", body, GIT_LOG_ACCEPTED_FIELDS) {
         return refusal;
     }
     git_async_entry("git_log", body, |body, plan| {
@@ -4322,21 +4542,78 @@ pub(super) fn git_log(body: &Value) -> u64 {
             .and_then(|v| v.as_u64())
             .or_else(|| body.get("count").and_then(|v| v.as_u64()))
             .unwrap_or(10);
-        let nflag = format!("-{}", count);
+        let flag = |fields: &[&str]| -> Result<bool, Value> {
+            for field in fields {
+                if body.get(*field).is_some() {
+                    return body_bool_flag(body, field, "git_log");
+                }
+            }
+            Ok(false)
+        };
+        let (want_body, want_trailers, case_insensitive, oneline) = match (
+            flag(&["body", "include_body"]),
+            flag(&["trailers"]),
+            flag(&["case_insensitive"]),
+            flag(&["oneline"]),
+        ) {
+            (Ok(b), Ok(t), Ok(c), Ok(o)) => (b, t, c, o),
+            (Err(detail), ..) | (_, Err(detail), ..) | (_, _, Err(detail), _) | (_, _, _, Err(detail)) => {
+                return Ok(err_json("git_log", detail))
+            }
+        };
+        if oneline && (want_body || want_trailers) {
+            return Ok(err_json(
+                "git_log",
+                json!({
+                    "error": "git_log oneline answers one string per commit and cannot carry body or trailers",
+                    "error_code": ERR_CODE_INVALID_ARGS,
+                }),
+            ));
+        }
+        let greps = match git_log_patterns(body, "grep") {
+            Ok(patterns) => patterns,
+            Err(detail) => return Ok(err_json("git_log", detail)),
+        };
+        let authors = match git_log_patterns(body, "author") {
+            Ok(patterns) => patterns,
+            Err(detail) => return Ok(err_json("git_log", detail)),
+        };
         let range = body_revision(body);
+        let reading = disambiguated_revision(cwd, range);
         let paths = body_pathspecs(body);
-        let pretty = "--pretty=format:%h\u{1f}%H\u{1f}%an\u{1f}%ae\u{1f}%aI\u{1f}%s";
-        let mut argv: Vec<&str> = vec!["log", &nflag, pretty, "--no-color"];
-        if !range.is_empty() {
-            argv.push(range);
+        let mut format = String::from("%h\u{1f}%H\u{1f}%an\u{1f}%ae\u{1f}%aI\u{1f}%s");
+        if want_body {
+            format.push(GIT_LOG_FIELD_SEP);
+            format.push_str("%b");
+        }
+        if want_trailers {
+            format.push(GIT_LOG_FIELD_SEP);
+            format.push_str(GIT_LOG_TRAILERS_FORMAT);
+        }
+        format.push(GIT_LOG_RECORD_END);
+        let mut argv: Vec<String> = vec![
+            "log".to_string(),
+            format!("-{}", count.saturating_add(1)),
+            format!("--pretty=format:{format}"),
+            "--no-color".to_string(),
+        ];
+        if !greps.is_empty() || !authors.is_empty() {
+            argv.push("--extended-regexp".to_string());
+        }
+        if case_insensitive {
+            argv.push("--regexp-ignore-case".to_string());
+        }
+        argv.extend(greps.iter().map(|pattern| format!("--grep={pattern}")));
+        argv.extend(authors.iter().map(|pattern| format!("--author={pattern}")));
+        if !reading.spec.is_empty() {
+            argv.push(reading.spec.clone());
         }
         if !paths.is_empty() {
-            argv.push("--");
-            for p in &paths {
-                argv.push(p.as_str());
-            }
+            argv.push("--".to_string());
+            argv.extend(paths.iter().cloned());
         }
-        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let r = git_step_replayed_by_call_order(plan, &argv_refs, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
             let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
@@ -4350,26 +4627,63 @@ pub(super) fn git_log(body: &Value) -> u64 {
             ));
         }
         let out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-        let commits: Vec<Value> = out
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|l| {
-                let mut it = l.splitn(6, '\u{1f}');
-                let sha = it.next().unwrap_or("").to_string();
-                let sha_full = it.next().unwrap_or("").to_string();
-                let author_name = it.next().unwrap_or("").to_string();
-                let author_email = it.next().unwrap_or("").to_string();
-                let author_date = it.next().unwrap_or("").to_string();
-                let subject = it.next().unwrap_or("").to_string();
-                json!({
-                    "sha": sha,
-                    "sha_full": sha_full,
-                    "subject": subject,
-                    "author": { "name": author_name, "email": author_email, "date": author_date },
-                })
-            })
-            .collect();
-        Ok(ok("git_log", json!({ "commits": commits })))
+        let mut commits: Vec<Value> = Vec::new();
+        for record in out.split(GIT_LOG_RECORD_END) {
+            let record = record.trim_start_matches('\n');
+            if record.is_empty() {
+                continue;
+            }
+            let mut fields = record.split(GIT_LOG_FIELD_SEP);
+            let mut next = || fields.next().unwrap_or("").to_string();
+            let (sha, sha_full, author_name, author_email, author_date, subject) =
+                (next(), next(), next(), next(), next(), next());
+            if oneline {
+                let day = author_date.get(..10).unwrap_or(&author_date);
+                commits.push(json!(format!("{sha} {day} {author_name} {subject}")));
+                continue;
+            }
+            let mut commit = json!({
+                "sha": sha,
+                "sha_full": sha_full,
+                "subject": subject,
+                "author": { "name": author_name, "email": author_email, "date": author_date },
+            });
+            if want_body {
+                let text = next();
+                let text = text.trim_end();
+                if !text.is_empty() {
+                    commit["body"] = json!(text);
+                }
+            }
+            if want_trailers {
+                let raw = next();
+                if raw.starts_with("%(") {
+                    return Ok(err_json(
+                        "git_log",
+                        json!({
+                            "error": "this git does not understand the %(trailers:only,unfold) placeholder, so trailers cannot be parsed per commit",
+                            "error_code": ERR_CODE_UNSUPPORTED,
+                            "hint": "upgrade git to 2.22 or newer, or read the message with body:true",
+                        }),
+                    ));
+                }
+                if let Some(trailers) = git_log_trailers(&raw) {
+                    commit["trailers"] = trailers;
+                }
+            }
+            commits.push(commit);
+        }
+        let truncated = commits.len() as u64 > count;
+        commits.truncate(count as usize);
+        let mut data = json!({ "commits": commits, "count": commits.len() });
+        if truncated {
+            data["truncated"] = json!(true);
+        }
+        if !reading.ambiguous.is_empty() {
+            data["revision_resolved"] = json!(reading.spec);
+            note_ambiguous_refs(&mut data, &reading.ambiguous);
+        }
+        Ok(ok("git_log", data))
     })
 }
 
@@ -4391,6 +4705,7 @@ pub(super) fn git_diff(body: &Value) -> u64 {
             .unwrap_or(false);
         let paths = body_pathspecs(body);
         let range = body_revision(body);
+        let reading = disambiguated_revision(cwd, range);
         let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
         let mut argv: Vec<&str> = vec!["diff", "--no-color"];
         if staged {
@@ -4400,7 +4715,7 @@ pub(super) fn git_diff(body: &Value) -> u64 {
             argv.push("--stat");
         }
         if !range.is_empty() {
-            argv.push(range);
+            argv.push(reading.spec.as_str());
         }
         if !paths.is_empty() {
             argv.push("--");
@@ -4429,10 +4744,9 @@ pub(super) fn git_diff(body: &Value) -> u64 {
             let cut = (0..=60000).rev().find(|&i| diff.is_char_boundary(i)).unwrap_or(0);
             diff.truncate(cut);
         }
-        Ok(ok(
-            "git_diff",
-            json!({ "diff": diff, "truncated": truncated, "range": range, "paths": paths }),
-        ))
+        let mut data = json!({ "diff": diff, "truncated": truncated, "range": range, "paths": paths });
+        note_ambiguous_refs(&mut data, &reading.ambiguous);
+        Ok(ok("git_diff", data))
     })
 }
 
@@ -4463,9 +4777,10 @@ pub(super) fn git_show(body: &Value) -> u64 {
                 .collect()
         })
         .unwrap_or_default();
+    let reading = disambiguated_ref(cwd, refspec);
     let combined_ref = match path {
-        Some(p) => format!("{}:{}", refspec, p),
-        None => refspec.to_string(),
+        Some(p) => format!("{}:{}", reading.spec, p),
+        None => reading.spec.clone(),
     };
     let mut argv: Vec<&str> = vec!["show", "--no-color"];
     if stat {
@@ -4519,7 +4834,13 @@ pub(super) fn git_show(body: &Value) -> u64 {
         out.truncate(cut);
         truncated = true;
     }
-    ok("git_show", json!({ "output": out, "rev": refspec, "truncated": truncated }))
+    let mut data = json!({ "output": out, "rev": refspec, "truncated": truncated });
+    if reading.candidates.len() > 1 {
+        let mut ambiguous = serde_json::Map::new();
+        ambiguous.insert(refspec.to_string(), json!(reading.candidates));
+        note_ambiguous_refs(&mut data, &ambiguous);
+    }
+    ok("git_show", data)
 }
 
 fn git_show_repo_name(cwd: Option<&str>) -> String {
@@ -6254,6 +6575,7 @@ pub(super) fn git_merge(body: &Value) -> u64 {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
+    let reading = disambiguated_revision(cwd, refspec);
     let mut argv: Vec<&str> = vec!["merge", "--no-edit"];
     if ff_only {
         argv.push("--ff-only");
@@ -6262,7 +6584,7 @@ pub(super) fn git_merge(body: &Value) -> u64 {
         argv.push("-m");
         argv.push(message);
     }
-    argv.push(refspec);
+    argv.push(reading.spec.as_str());
     let r = git_call_argv(&argv, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let out = format!(
@@ -6288,17 +6610,16 @@ pub(super) fn git_merge(body: &Value) -> u64 {
         );
     }
     let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-    ok(
-        "git_merge",
-        json!({
-            "merged": refspec,
-            "head_before": head_before,
-            "head_after": head_after,
-            "already_up_to_date": head_before == head_after,
-            "fast_forward": out.lines().any(|line| line == "Fast-forward" || line.starts_with("Fast-forward (")),
-            "output": out
-        }),
-    )
+    let mut data = json!({
+        "merged": refspec,
+        "head_before": head_before,
+        "head_after": head_after,
+        "already_up_to_date": head_before == head_after,
+        "fast_forward": out.lines().any(|line| line == "Fast-forward" || line.starts_with("Fast-forward (")),
+        "output": out
+    });
+    note_ambiguous_refs(&mut data, &reading.ambiguous);
+    ok("git_merge", data)
 }
 
 pub(super) const MERGE_ABORT_SHELF_MESSAGE: &str = "gm merge-abort shelf";
