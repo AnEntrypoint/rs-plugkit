@@ -665,6 +665,7 @@ pub(super) fn git_status(body: &Value) -> u64 {
                 }
             }
         }
+        note_ambiguous_refs(&mut lists, &shadowed_remote_refs(cwd));
         Ok(ok("git_status", lists))
     })
 }
@@ -6407,9 +6408,188 @@ pub(super) fn ci_status(body: &Value) -> u64 {
     }
 }
 
+pub(super) const GIT_BRANCH_HELP: &str = r#"git_branch lists local branches as {current, branches}, plus ambiguous_ref: true and ambiguous_refs {name: [refs/heads/<name>, refs/remotes/<name>]} when a local branch is named like a remote-tracking ref (a bare origin/main then resolves to the local branch first; delete it to end the ambiguity). git_status reports the same two fields.
+  all: true | remote: true   list every branch, or only the remote-tracking ones.
+  delete: "<name>"           deletes the LOCAL branch refs/heads/<name>; a remote-tracking ref and a branch on the remote are never touched. It refuses a name with no local branch (no_such_local_branch), the current branch (current_branch_refused), a branch checked out in another worktree (branch_checked_out_elsewhere) and a branch whose tip is reachable from neither HEAD nor any remote-tracking ref (branch_tip_unreachable, with unreachable_commits), so no commit can become unreachable. The reply names the tip it removed (was) and what keeps it reachable. git_branch_delete keeps its own -d and -D semantics and can delete remote branches."#;
+
+pub(super) fn shadowed_remote_refs(cwd: Option<&str>) -> serde_json::Map<String, Value> {
+    let mut found = serde_json::Map::new();
+    let listing = git_call_argv(&["for-each-ref", "--format=%(refname)", "refs/remotes"], cwd);
+    if git_exit_code(&listing) != 0
+        || listing.get("stdout_truncated").and_then(Value::as_bool) == Some(true)
+    {
+        return found;
+    }
+    let trackers: Vec<String> = listing
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut remotes: Vec<&str> = trackers
+        .iter()
+        .filter_map(|name| name.strip_prefix("refs/remotes/"))
+        .filter_map(|rest| rest.split('/').next())
+        .collect();
+    remotes.sort_unstable();
+    remotes.dedup();
+    if remotes.is_empty() {
+        return found;
+    }
+    let patterns: Vec<String> = remotes.iter().map(|remote| format!("refs/heads/{remote}")).collect();
+    let mut argv: Vec<&str> = vec!["for-each-ref", "--format=%(refname)"];
+    argv.extend(patterns.iter().map(String::as_str));
+    for local in git_stdout_lines(&argv, cwd) {
+        let Some(name) = local.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        let tracking = format!("refs/remotes/{name}");
+        if trackers.contains(&tracking) {
+            found.insert(name.to_string(), json!([local, tracking]));
+        }
+    }
+    found
+}
+
+fn plain_branch_name(name: &str) -> bool {
+    plain_ref_token(name) && !name.starts_with('.') && !name.ends_with(".lock")
+}
+
+fn git_branch_delete_guarded(cwd: Option<&str>, raw: &Value) -> u64 {
+    let Some(name) = raw.as_str().map(str::trim).filter(|name| plain_branch_name(name)) else {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": "git_branch delete must name one local branch (letters, digits, . _ - and / only)",
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "field": "delete",
+            }),
+        );
+    };
+    let full = format!("refs/heads/{name}");
+    let tip_probe = git_call_argv(
+        &["rev-parse", "--verify", "--quiet", &format!("{full}^{{commit}}")],
+        cwd,
+    );
+    let tip = tip_probe
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if git_exit_code(&tip_probe) != 0 || tip.is_empty() {
+        let tracking = format!("refs/remotes/{name}");
+        let candidates = ref_candidates(cwd, name);
+        let remote_only = !candidates.is_empty() && !candidates.contains(&full);
+        return err_json(
+            "git_branch",
+            json!({
+                "error": format!("no local branch {name}"),
+                "error_code": "no_such_local_branch",
+                "remote_tracking_only": remote_only,
+                "hint": format!("git_branch delete removes {full} only; {tracking} is never touched"),
+            }),
+        );
+    }
+    let current = git_call_argv(&["symbolic-ref", "--quiet", "--short", "HEAD"], cwd)
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if current == name {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": format!("{name} is the current branch; check out another ref first"),
+                "error_code": "current_branch_refused",
+                "branch": name,
+            }),
+        );
+    }
+    let worktrees = git_stdout_lines(&["worktree", "list", "--porcelain"], cwd);
+    let mut holder: Option<String> = None;
+    let mut last_path = String::new();
+    for line in &worktrees {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            last_path = path.to_string();
+        } else if line.strip_prefix("branch ") == Some(full.as_str()) {
+            holder = Some(last_path.clone());
+        }
+    }
+    if let Some(path) = holder {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": format!("{name} is checked out in the worktree {path}"),
+                "error_code": "branch_checked_out_elsewhere",
+                "branch": name,
+                "worktree": path,
+            }),
+        );
+    }
+    let from_head = ref_is_ancestor(cwd, &tip, "HEAD");
+    let remote_refs: Vec<String> = git_stdout_lines(
+        &["for-each-ref", "--contains", tip.as_str(), "--format=%(refname)", "refs/remotes"],
+        cwd,
+    );
+    if !from_head && remote_refs.is_empty() {
+        let unreachable = git_call_argv(
+            &["rev-list", "--count", tip.as_str(), "--not", "HEAD", "--remotes"],
+            cwd,
+        )
+        .get("stdout")
+        .and_then(Value::as_str)
+        .and_then(|text| text.trim().parse::<u64>().ok());
+        return err_json(
+            "git_branch",
+            json!({
+                "error": format!("{name} ({tip}) is reachable from neither HEAD nor any remote-tracking ref, so deleting it would leave its commits unreachable"),
+                "error_code": "branch_tip_unreachable",
+                "branch": name,
+                "tip": tip,
+                "unreachable_commits": unreachable,
+                "hint": "merge it into HEAD or push it to a remote first",
+            }),
+        );
+    }
+    let deleted = git_call_argv(&["branch", "-D", name], cwd);
+    if git_exit_code(&deleted) != 0 {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": git_output_text(&deleted).trim(),
+                "error_code": ERR_CODE_FAILED,
+                "branch": name,
+            }),
+        );
+    }
+    let mut data = json!({
+        "deleted": name,
+        "ref": full,
+        "was": tip,
+        "reachable_from_head": from_head,
+        "remote_tracking_containing": remote_refs.iter().take(5).collect::<Vec<_>>(),
+    });
+    let remaining = ref_candidates(cwd, name);
+    if remaining.len() > 1 {
+        let mut ambiguous = serde_json::Map::new();
+        ambiguous.insert(name.to_string(), json!(remaining));
+        note_ambiguous_refs(&mut data, &ambiguous);
+    }
+    ok("git_branch", data)
+}
+
 pub(super) fn git_branch(body: &Value) -> u64 {
-    if let Some(refusal) = refuse_unknown_fields("git_branch", body, &["remote", "all"]) {
+    if let Some(refusal) =
+        refuse_unknown_fields("git_branch", body, &["remote", "all", "delete"])
+    {
         return refusal;
+    }
+    if let Some(raw) = body.get("delete") {
+        return git_branch_delete_guarded(body_cwd(body), raw);
     }
     for flag in ["remote", "all"] {
         match body.get(flag) {
@@ -6440,13 +6620,12 @@ pub(super) fn git_branch(body: &Value) -> u64 {
     let listing = exec_git_in(cwd, listing_args);
     let branches: Vec<String> = listing
         .lines()
-        .map(|l| l.trim_start_matches('*').trim().to_string())
+        .map(|l| l.trim_start_matches(['*', '+']).trim().to_string())
         .filter(|l| !l.is_empty())
         .collect();
-    ok(
-        "git_branch",
-        json!({ "current": current, "branches": branches }),
-    )
+    let mut data = json!({ "current": current, "branches": branches });
+    note_ambiguous_refs(&mut data, &shadowed_remote_refs(cwd));
+    ok("git_branch", data)
 }
 
 pub(super) fn git_remote(body: &Value) -> u64 {
