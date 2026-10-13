@@ -4,7 +4,7 @@ This is a concern of the method, not a stage of a pipeline: it is entered from w
 
 CONTRACT writes each row's contract into types, names, signatures and obligations before any implementation exists. Each row is a proof goal. Its stated pre-conditions, invariants and post-conditions become typed signatures wherever the type can express them, and each remaining obligation becomes a PROVE-kind mutable discharged by a live witness. The node replaces the former PROVE stage. It exits when every row's contract sits in its signatures, every contract-kind mutable is resolved and witnessed, and `transition to=BUILD` is dispatched.
 
-Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each H3 below carries a principle key, then the attribution exactly as fsm/graph.json labels it.
+Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each H3 below carries a principle key, then the attribution exactly as gm-config/fsm/graph.json labels it.
 
 ## Verbs
 
@@ -126,7 +126,7 @@ Core logic depends only on ports, meaning the traits or interfaces it needs, and
 
 ### COMMENTSMELL - A Comment Is a Deodorant for Bad Smells - Fowler and Beck
 
-Handover: No forward edge leaves COMMENTSMELL in fsm/graph.json, so no next node is nominated; its comment dispositions are its only output; nominated next node: none nominated; cite A Comment Is a Deodorant for Bad Smells - Fowler and Beck.
+Handover: No forward edge leaves COMMENTSMELL in gm-config/fsm/graph.json, so no next node is nominated; its comment dispositions are its only output; nominated next node: none nominated; cite A Comment Is a Deodorant for Bad Smells - Fowler and Beck.
 
 Prose written to explain code is a smell. Dispatch the gm verb `grep` with body `{"mode":"comments"}` scoped to the touched paths. Each comment is then dispositioned. A comment that states a constraint the code cannot express is kept, and it moves into a type or a precondition wherever the type can carry it. A comment that explains a mechanism is removed by renaming the mechanism. Prose needed to explain code fires the backreference to CLEANNAME. The witness is the comment sweep's output with each comment's disposition beside it.
 

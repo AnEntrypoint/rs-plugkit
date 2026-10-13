@@ -4,7 +4,7 @@ This is a concern of the method, not a stage of a pipeline: it is entered from w
 
 VERIFY attacks the built change with a verifier that has not read the implementation. It finds every way the change is false by live execution against real inputs, and discharges every SEC and RES obligation with a witness that names the kind discharged. The node exits when the eight adversarial classes each have a live witness, every SEC and RES mutable is resolved, a multi-file diff has an independent review witness, the sanitizer gate is clean, and transition to=PRESSURE is dispatched.
 
-Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each principle's attribution is the label used in fsm/graph.json, given in its heading below.
+Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each principle's attribution is the label used in gm-config/fsm/graph.json, given in its heading below.
 
 ## Verbs
 
