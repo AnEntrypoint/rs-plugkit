@@ -504,6 +504,17 @@ fn request_limit(request: &serde_json::Value) -> Result<Option<usize>, String> {
     }
 }
 
+fn request_offset(request: &serde_json::Value) -> Result<usize, String> {
+    match request.get("offset") {
+        None | Some(serde_json::Value::Null) => Ok(0),
+        Some(value) => value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+            .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
+            .ok_or_else(|| "prd-list offset must be a non-negative integer".to_string()),
+    }
+}
+
 fn fold_last_blocks(rows: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
     let mut last_index: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
@@ -535,7 +546,15 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
     };
     let store_total = rows.len();
     let wanted_ids = request_strings(&request, PRD_ROW_ID_FIELDS);
-    let wanted_statuses = request_strings(&request, PRD_ROW_STATUS_FIELDS);
+    let requested_statuses = request_strings(&request, PRD_ROW_STATUS_FIELDS);
+    let every_status = requested_statuses
+        .iter()
+        .any(|want| want.eq_ignore_ascii_case("all"));
+    let wanted_statuses: Vec<String> = if every_status {
+        Vec::new()
+    } else {
+        requested_statuses
+    };
     let selected: Vec<serde_json::Value> = fold_last_blocks(rows)
         .into_iter()
         .filter(|row| {
@@ -560,16 +579,18 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
                 selected.push(row);
             }
         }
-    } else if !wanted_statuses.is_empty() {
+    } else if every_status || !wanted_statuses.is_empty() {
         let closed = super::fsm::graph().policy.prd_closed_statuses.clone();
-        if wanted_statuses
-            .iter()
-            .any(|want| closed.iter().any(|c| c.eq_ignore_ascii_case(want)))
+        if every_status
+            || wanted_statuses
+                .iter()
+                .any(|want| closed.iter().any(|c| c.eq_ignore_ascii_case(want)))
         {
             for row in row_store::log_rows_with_status(&store, &closed) {
-                if wanted_statuses
-                    .iter()
-                    .any(|want| want.eq_ignore_ascii_case(&row_status(&row)))
+                if every_status
+                    || wanted_statuses
+                        .iter()
+                        .any(|want| want.eq_ignore_ascii_case(&row_status(&row)))
                 {
                     selected.push(row);
                 }
@@ -588,9 +609,13 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         );
     }
     let matched = selected.len();
-    let shown = limit.map_or(matched, |n| n.min(matched));
-    let truncated = shown < matched;
-    let window: Vec<serde_json::Value> = selected.into_iter().take(shown).collect();
+    let offset = match request_offset(&request) {
+        Ok(offset) => offset.min(matched),
+        Err(message) => return (String::new(), message, 1),
+    };
+    let page = limit.map_or(matched - offset, |n| n.min(matched - offset));
+    let truncated = offset + page < matched;
+    let window: Vec<serde_json::Value> = selected.into_iter().skip(offset).take(page).collect();
     let brief_flag = request_flag(&request, PRD_BRIEF_BODY_FIELDS);
     let full_flag = request_flag(&request, PRD_FULL_BODY_FIELDS);
     let want_full =
@@ -606,10 +631,12 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         "total": matched,
         "store_total": store_total,
         "limit": limit,
+        "offset": offset,
+        "next_offset": truncated.then_some(offset + page),
         "truncated": truncated,
         "brief": !want_full,
         "full": want_full,
-        "hint": "pass {\"id\":\"<row id>\"} for one full row (repeated blocks of an id fold to the last one), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), or {\"full\":true} for every full body. .gm/prd/ holds OPEN work only: a resolved row is moved to .gm/prd-log.jsonl, and an id or a closed status asked for here is answered from that log.",
+        "hint": "pass {\"id\":\"<row id>\"} for one full row (repeated blocks of an id fold to the last one), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), {\"status\":\"all\",\"limit\":<n>,\"offset\":<n>} to page every status (next_offset names the next page, null when done), or {\"full\":true} for every full body. .gm/prd/ holds OPEN work only: a resolved row is moved to .gm/prd-log.jsonl, and an id or a closed status asked for here is answered from that log.",
     });
     (reply.to_string(), String::new(), 0)
 }
