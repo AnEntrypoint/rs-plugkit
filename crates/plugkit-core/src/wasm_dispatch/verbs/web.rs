@@ -18,7 +18,7 @@ pub const WEBSEARCH_DEFAULT_LIMIT: usize = 8;
 pub const WEBSEARCH_MAX_LIMIT: usize = 25;
 pub const FETCH_SEARCH_DEFAULT_LIMIT: usize = 10;
 pub const FETCH_SEARCH_MAX_LIMIT: usize = 50;
-pub const SEARCH_MAX_BACKENDS: usize = 4;
+pub const SEARCH_MAX_BACKENDS: usize = 7;
 pub const SEARCH_ENV_BACKEND: &str = "GM_SEARCH_BACKEND";
 pub const SEARCH_BACKENDS: &[(&str, &str)] = &[
     ("duckduckgo", "https://html.duckduckgo.com/html/?q={q}"),
@@ -28,10 +28,27 @@ pub const SEARCH_BACKENDS: &[(&str, &str)] = &[
     ("brave", "https://search.brave.com/search?q={q}"),
     ("marginalia", "https://search.marginalia.nu/search?query={q}"),
 ];
+pub const SEARCH_JSON_BACKENDS: &[&str] = &["github", "hn", "wikipedia"];
+pub const GITHUB_SEARCH_API: &str = "https://api.github.com/search";
+pub const GITHUB_KIND_DEFAULT: &str = "repositories";
+pub const GITHUB_KINDS: &[(&str, &str)] = &[
+    ("repos", "repositories"),
+    ("repo", "repositories"),
+    ("repositories", "repositories"),
+    ("code", "code"),
+    ("issue", "issues"),
+    ("issues", "issues"),
+];
+pub const HN_SEARCH_API: &str = "https://hn.algolia.com/api/v1/search";
+pub const HN_ITEM_URL: &str = "https://news.ycombinator.com/item?id=";
+pub const WIKI_DEFAULT_HOST: &str = "en.wikipedia.org";
+pub const JSON_BACKEND_MAX_PER_PAGE: usize = 100;
+pub const JSON_SNIPPET_CHARS: usize = 400;
 pub const WEBSEARCH_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub const WEBSEARCH_ENGINE_DUCKDUCKGO: &str = "duckduckgo";
 pub const WEBSEARCH_USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+pub const GITHUB_ACCEPT_HEADER: &str = "application/vnd.github+json";
 
 pub const FETCH_HELP: &str = "\
 fetch {url, | query, prompt?, max_chars?, raw?, method?, headers?, body?, timeoutMs?, answer_max_chars?}.
@@ -42,12 +59,18 @@ fetch {url, | query, prompt?, max_chars?, raw?, method?, headers?, body?, timeou
   code fences and tables are kept as markdown). A body that is not HTML (JSON, plain text, CSV)
   is returned as it arrived.
   query: (aliases q, search) with no url turns the call into a web search, the discovery half of
-          this port. Backends are keyless and tried in order -- duckduckgo, mojeek, bing, searxng,
-          brave, marginalia -- until one parses into hits; at most 4 are tried per call. Pick one
-          with backend (alias engine, a name or a results-page template holding {q}) or with the
-          GM_SEARCH_BACKEND environment variable, both comma-separated lists. count (alias limit,
-          max_results, k, n) caps the hits, default 10, ceiling 50. Rows are rank, title, url, host
-          and snippet, a few KB in total; no raw HTML is ever returned unless raw:true.
+          this port. Backends are tried in order until one parses into hits; at most 7 are tried
+          per call. First come the structured JSON backends -- github, hn, wikipedia -- which
+          answer machine-readable JSON with no challenge page and no credential, then the keyless
+          html engines -- duckduckgo, mojeek, bing, searxng, brave, marginalia -- which bot-block
+          some clients. Pick one, or a comma-separated list, with backend (alias engine, a name or
+          a results-page template holding {q}) or with the GM_SEARCH_BACKEND environment variable.
+          kind selects the github endpoint: repos (the default), code or issues. user, repo and
+          stars become github qualifiers, and a qualifier written into the query (user:lanmower,
+          repo:owner/name, stars:>100) is passed through. wiki names the MediaWiki host, default
+          en.wikipedia.org. count (alias limit, max_results, k, n) caps the hits, default 10,
+          ceiling 50. Rows are rank, title, url, host, snippet and source, a few KB in total; no
+          raw HTML is ever returned unless raw:true.
   prompt: when present, the reply answers it instead of carrying the page. The answer is the set of
           passages of the converted page that best match the prompt, so it is compact and verbatim:
           gm has no outbound model dependency, and answer_mode is always \"extractive\". Pass no
@@ -65,25 +88,36 @@ content (the markdown) or prompt/answer/answer_mode/answer_chars/passages. help:
 text and sends no request.";
 
 pub const WEBSEARCH_HELP: &str = "\
-websearch {query, limit?, allowed_domains?, blocked_domains?, url?, engine?, max_chars?, prompt?, timeoutMs?}.
+websearch {query, limit?, kind?, wiki?, user?, repo?, stars?, allowed_domains?, blocked_domains?, url?, engine?, max_chars?, prompt?, timeoutMs?}.
   query: what to search for; q is an alias. Required unless url is given.
+  engine: the backend order. One call walks the structured JSON backends FIRST -- github, hn,
+       wikipedia -- because each answers machine-readable JSON with no credential and no challenge
+       page, and only then falls back to the keyless html engines -- duckduckgo, mojeek, bing,
+       searxng, brave, marginalia -- which answer a CAPTCHA or consent page to some clients. It
+       stops at the first backend that parses into hits, 7 backends at most. engine (aliases
+       backend, search_backend) and the GM_SEARCH_BACKEND variable pick one, or a comma-separated
+       list of them, and an unknown name is an error naming the known ones, never a no-op.
+  kind: the github endpoint -- repos (the default), code or issues. github answers repositories
+       with description, language and stars; code with path and matching fragments; issues with
+       title and body.
+  user, repo, stars: github qualifiers appended to the q string, and any qualifier already written
+       into the query (user:lanmower, repo:owner/name, stars:>100) is passed through untouched, so
+       both forms reach the search the same way.
+  wiki: the MediaWiki host for the wikipedia backend, default en.wikipedia.org. Any MediaWiki
+       install works, so \"wiki\": \"fr.wikipedia.org\" or a self-hosted wiki both answer.
   url: fetch this search engine results page instead of building one from query. Use it when the
        default endpoint answers with a challenge or consent page, or to point at another engine.
-  engine: \"duckduckgo\" (the default). It reads https://html.duckduckgo.com/html/, which needs no
-       credential and no API key, and answers a challenge page to some clients, so one call walks
-       the keyless backends in order -- duckduckgo, mojeek, bing, searxng -- and stops at the first
-       that parses into hits, 4 at most. engine (aliases backend, search_backend) and the
-       GM_SEARCH_BACKEND variable pick one, or a comma-separated list of them, and an unknown name
-       is an error naming the known ones, never a no-op.
+       A url answering JSON is parsed as JSON, so a results API of your own works the same way.
   limit: results returned, default 8, ceiling 25 (max_results, maxResults and k are aliases).
   allowed_domains / blocked_domains: arrays (or comma-separated strings) of host suffixes. A result
        is kept only when its host matches an allowed suffix, and dropped when it matches a blocked
-       one. \"example.com\" matches www.example.com and docs.example.com.
+       one. \"example.com\" matches www.example.com and docs.example.com. They filter every
+       backend, so a backend whose rows are all filtered out does not stop the walk.
   prompt: answered against the result titles, urls and snippets, the same extractive way fetch
        answers one, so a question returns the matching results and not the whole listing.
-  Reply fields: query, engine, endpoint, status, count, found, limit, truncated, filters, results
-  (one row per hit: title, url, host, snippet), and prompt/answer when prompt is given. help:true
-  returns this text and sends no request.";
+  Reply fields: query, engine, source, endpoint, status, count, found, limit, truncated, filters,
+  results (one row per hit: title, url, host, snippet, source) and prompt/answer when prompt is
+  given. help:true returns this text and sends no request.";
 
 const NOISE_TAGS: &[&str] = &[
     "script", "style", "noscript", "svg", "head", "nav", "footer", "header", "aside", "form",
@@ -218,18 +252,32 @@ pub fn websearch(body: &Value) -> u64 {
         if name.is_empty() || name.starts_with("http://") || name.starts_with("https://") {
             continue;
         }
-        if !SEARCH_BACKENDS.iter().any(|(known, _)| *known == name.as_str()) {
-            let known: Vec<&str> = SEARCH_BACKENDS.iter().map(|(n, _)| *n).collect();
+        if !known_backend(&name) {
+            let json: Vec<&str> = SEARCH_JSON_BACKENDS.to_vec();
+            let html: Vec<&str> = SEARCH_BACKENDS.iter().map(|(n, _)| *n).collect();
             return err_coded(
                 "websearch",
                 ERR_CODE_INVALID_ARGS,
                 &format!(
-                    "unknown engine {name:?}; the keyless backends are {}, and any other engine is reached by passing its results page as url or backend",
-                    known.join(", ")
+                    "unknown engine {name:?}; the structured backends are {}, the keyless html backends are {}, and any other engine is reached by passing its results page as url or backend",
+                    json.join(", "),
+                    html.join(", ")
                 ),
             );
         }
     }
+    let kind = match github_kind_of(body) {
+        Ok(kind) => kind,
+        Err(bad) => {
+            return err_coded(
+                "websearch",
+                ERR_CODE_INVALID_ARGS,
+                &format!(
+                    "unknown kind {bad:?}; the github kinds are repos, code and issues, and repos is the default"
+                ),
+            )
+        }
+    };
     let timeout_ms = match timeout_ms_of(body, WEBSEARCH_DEFAULT_TIMEOUT_MS, "websearch") {
         Ok(n) => n,
         Err(reply) => return reply,
@@ -262,6 +310,9 @@ pub fn websearch(body: &Value) -> u64 {
         Err(reply) => return reply,
     };
 
+    let allowed = string_list(body, &["allowed_domains", "allowedDomains"]);
+    let blocked = string_list(body, &["blocked_domains", "blockedDomains"]);
+    let wiki = wiki_host(body);
     let mut opts = json!({
         "timeoutMs": timeout_ms,
         "headers": { "User-Agent": WEBSEARCH_USER_AGENT, "Accept-Language": "en-US,en;q=0.9" },
@@ -269,10 +320,14 @@ pub fn websearch(body: &Value) -> u64 {
     if let Some(headers) = body.get("headers") {
         opts["headers"] = headers.clone();
     }
-    let candidates: Vec<(String, String)> = if using_explicit_url {
-        vec![("url".to_string(), explicit_url.clone())]
+    let candidates: Vec<Candidate> = if using_explicit_url {
+        vec![Candidate {
+            name: "url".to_string(),
+            url: explicit_url.clone(),
+            kind: BackendKind::Html,
+        }]
     } else {
-        search_backends(body)
+        search_candidates(body, &query, limit, kind)
             .into_iter()
             .take(SEARCH_MAX_BACKENDS)
             .collect()
@@ -283,30 +338,33 @@ pub fn websearch(body: &Value) -> u64 {
     } else {
         WEBSEARCH_ENGINE_DUCKDUCKGO.to_string()
     };
+    let mut source = chosen.clone();
     let mut endpoint = String::new();
     let mut html = String::new();
     let mut status = Value::Null;
-    for (name, template) in &candidates {
-        let url = if using_explicit_url {
-            template.clone()
-        } else {
-            backend_url(template, &query)
-        };
-        if let Err(reason) = validate_fetch_url(&url) {
-            attempts.push(json!({ "backend": name, "error": reason }));
+    let mut results: Vec<SearchResult> = Vec::new();
+    for candidate in &candidates {
+        let url = &candidate.url;
+        if let Err(reason) = validate_fetch_url(url) {
+            attempts.push(json!({ "backend": candidate.name, "error": reason }));
             continue;
         }
-        let v = host_fetch_value(&url, &opts);
+        let request_opts = candidate_opts(&opts, &candidate.name);
+        let v = host_fetch_value(url, &request_opts);
         let transport_ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
         let text = v.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string();
         let seen_status = v.get("status").cloned().unwrap_or(Value::Null);
-        let hits = if transport_ok {
-            parse_backend_results(&text).len()
-        } else {
-            0
-        };
+        let mut parsed: Vec<SearchResult> = Vec::new();
+        let mut parsed_source = candidate.name.clone();
+        if transport_ok {
+            let (items, detected) = parse_candidate_results(&text, url, &candidate.name, &wiki, candidate.kind);
+            parsed = items;
+            parsed_source = detected;
+        }
+        apply_domain_filters(&mut parsed, &allowed, &blocked);
+        let hits = parsed.len();
         attempts.push(json!({
-            "backend": name,
+            "backend": candidate.name,
             "url": url,
             "status": seen_status.clone(),
             "chars": text.chars().count(),
@@ -314,16 +372,19 @@ pub fn websearch(body: &Value) -> u64 {
             "transport_ok": transport_ok,
         }));
         if endpoint.is_empty() && transport_ok {
-            chosen = name.clone();
+            chosen = candidate.name.clone();
+            source = parsed_source.clone();
             endpoint = url.clone();
             html = text.clone();
             status = seen_status.clone();
         }
         if hits > 0 {
-            chosen = name.clone();
-            endpoint = url;
-            html = text;
+            chosen = candidate.name.clone();
+            source = parsed_source;
+            endpoint = url.clone();
+            html = text.clone();
             status = seen_status;
+            results = parsed;
             break;
         }
         if raw_requested && transport_ok {
@@ -342,6 +403,7 @@ pub fn websearch(body: &Value) -> u64 {
         "query": query,
         "endpoint": endpoint,
         "engine": chosen,
+        "source": source,
         "status": status,
         "body_chars": html.chars().count(),
         "attempts": attempts,
@@ -353,15 +415,6 @@ pub fn websearch(body: &Value) -> u64 {
         return ok("websearch", data);
     }
 
-    let mut results = parse_backend_results(&html);
-    let allowed = string_list(body, &["allowed_domains", "allowedDomains"]);
-    let blocked = string_list(body, &["blocked_domains", "blockedDomains"]);
-    if !allowed.is_empty() {
-        results.retain(|r| host_matches_any(&r.host, &allowed));
-    }
-    if !blocked.is_empty() {
-        results.retain(|r| !host_matches_any(&r.host, &blocked));
-    }
     let found = results.len();
     results.truncate(limit);
     data["found"] = json!(found);
@@ -369,13 +422,20 @@ pub fn websearch(body: &Value) -> u64 {
     data["limit"] = json!(limit);
     data["truncated"] = json!(found > results.len());
     data["filters"] = json!({ "allowed_domains": allowed, "blocked_domains": blocked });
-    data["results"] = json!(results
-        .iter()
-        .enumerate()
-        .map(|(rank, r)| json!({ "rank": rank + 1, "title": r.title, "url": r.url, "host": r.host, "snippet": clamp_chars(&r.snippet, 400).0 }))
-        .collect::<Vec<Value>>());
+    data["results"] = json!(result_rows(&results, &source));
     if results.is_empty() {
-        data["note"] = json!("no result parsed out of the response: the endpoint most often answers a challenge or consent page. Pass url with a results page of your own, or fetch a known url directly.");
+        let filtered = !allowed.is_empty() || !blocked.is_empty();
+        data["note"] = json!(if SEARCH_JSON_BACKENDS.contains(&source.as_str()) {
+            if filtered {
+                "the backend answered, but every row it returned was removed by allowed_domains or blocked_domains."
+            } else {
+                "the structured backend answered with no matching row, so nothing was kept. Try another kind, another backend, or a broader query."
+            }
+        } else if filtered {
+            "no result survived the domain filters: the endpoint most often answers a challenge or consent page, and what did parse was removed by allowed_domains or blocked_domains."
+        } else {
+            "no result parsed out of the response: the endpoint most often answers a challenge or consent page. Pass url with a results page of your own, or fetch a known url directly."
+        });
     }
 
     let prompt = trimmed_str(body, &["prompt"]);
@@ -1370,6 +1430,12 @@ fn percent_encode(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char)
             }
+            // A search qualifier keeps its punctuation: github reads user:lanmower,
+            // repo:owner/name and stars:>=100, and every server decodes the escaped form,
+            // so leaving them literal costs nothing and keeps the query readable.
+            b':' | b'>' | b'<' | b'=' | b'/' | b'@' | b'*' | b'!' | b'(' | b')' | b',' => {
+                out.push(b as char)
+            }
             b' ' => out.push('+'),
             _ => out.push_str(&format!("%{b:02X}")),
         }
@@ -1457,40 +1523,57 @@ fn search_reply(
     };
     let allowed = string_list(body, &["allowed_domains", "allowedDomains"]);
     let blocked = string_list(body, &["blocked_domains", "blockedDomains"]);
-    let backends = search_backends(body);
-    let tried: Vec<String> = backends
-        .iter()
+    let kind = match github_kind_of(body) {
+        Ok(kind) => kind,
+        Err(bad) => {
+            return err_coded(
+                verb,
+                ERR_CODE_INVALID_ARGS,
+                &format!(
+                    "unknown kind {bad:?}; the github kinds are repos, code and issues, and repos is the default"
+                ),
+            )
+        }
+    };
+    let wiki = wiki_host(body);
+    let candidates: Vec<Candidate> = search_candidates(body, query, limit, kind)
+        .into_iter()
         .take(SEARCH_MAX_BACKENDS)
-        .map(|(name, _)| name.clone())
         .collect();
+    let tried: Vec<String> = candidates.iter().map(|c| c.name.clone()).collect();
     let mut attempts: Vec<Value> = Vec::new();
-    for (name, template) in backends.iter().take(SEARCH_MAX_BACKENDS) {
-        let endpoint = backend_url(template, query);
+    for candidate in &candidates {
+        let endpoint = candidate.url.clone();
         if let Err(reason) = validate_fetch_url(&endpoint) {
-            attempts.push(json!({ "backend": name, "error": reason }));
+            attempts.push(json!({ "backend": candidate.name, "error": reason }));
             continue;
         }
-        let opts = json!({
-            "timeoutMs": timeout_ms,
-            "headers": { "User-Agent": WEBSEARCH_USER_AGENT, "Accept-Language": "en-US,en;q=0.9" },
-        });
+        let opts = candidate_opts(
+            &json!({
+                "timeoutMs": timeout_ms,
+                "headers": { "User-Agent": WEBSEARCH_USER_AGENT, "Accept-Language": "en-US,en;q=0.9" },
+            }),
+            &candidate.name,
+        );
         let v = host_fetch_value(&endpoint, &opts);
         let completed = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
         let status = v.get("status").cloned().unwrap_or(Value::Null);
         let html = v.get("body").and_then(|b| b.as_str()).unwrap_or("");
         if !completed || html.is_empty() {
             attempts.push(json!({
-                "backend": name,
+                "backend": candidate.name,
                 "status": status,
                 "error": v.get("error").cloned().unwrap_or_else(|| json!(format!("http status {status}"))),
             }));
             continue;
         }
+        let (parsed, source) = parse_candidate_results(html, &endpoint, &candidate.name, &wiki, candidate.kind);
         let mut data = json!({
             "ok": true,
             "mode": "search",
             "query": query,
-            "backend": name,
+            "backend": candidate.name,
+            "source": source,
             "endpoint": endpoint,
             "status": status,
             "body_chars": html.chars().count(),
@@ -1504,18 +1587,16 @@ fn search_reply(
             }
             return ok(verb, data);
         }
-        let mut results = parse_backend_results(html);
-        if !allowed.is_empty() {
-            results.retain(|r| host_matches_any(&r.host, &allowed));
-        }
-        if !blocked.is_empty() {
-            results.retain(|r| !host_matches_any(&r.host, &blocked));
-        }
+        let mut results = parsed;
+        apply_domain_filters(&mut results, &allowed, &blocked);
         if results.is_empty() {
             attempts.push(json!({
-                "backend": name,
+                "backend": candidate.name,
                 "status": status,
                 "hits": 0,
+                "chars": html.chars().count(),
+                "anchors": count_anchor_tags(html),
+                "sample_dropped": parse_backend_diagnostics(html, &endpoint),
                 "error": "no result parsed out of the response",
             }));
             continue;
@@ -1527,17 +1608,7 @@ fn search_reply(
         data["limit"] = json!(limit);
         data["truncated"] = json!(found > results.len());
         data["filters"] = json!({ "allowed_domains": allowed, "blocked_domains": blocked });
-        data["results"] = json!(results
-            .iter()
-            .enumerate()
-            .map(|(rank, r)| json!({
-                "rank": rank + 1,
-                "title": r.title,
-                "url": r.url,
-                "host": r.host,
-                "snippet": clamp_chars(&r.snippet, 400).0,
-            }))
-            .collect::<Vec<Value>>());
+        data["results"] = json!(result_rows(&results, &source));
         if !attempts.is_empty() {
             data["attempts"] = json!(attempts);
         }
@@ -1551,19 +1622,26 @@ fn search_reply(
             "mode": "search",
             "backends": tried,
             "attempts": attempts,
-            "note": "every keyless backend answered with a challenge page or nothing parseable. Pass url with a results page of your own, name a backend with backend, or fetch a known url directly.",
+            "note": "every backend answered with a challenge page, nothing parseable, or rows your domain filters removed. Pass url with a results page of your own, name a backend with backend, or fetch a known url directly.",
         }),
     )
 }
 
-fn parse_backend_results(html: &str) -> Vec<SearchResult> {
+fn parse_backend_results(html: &str, base: &str) -> Vec<SearchResult> {
     if looks_like_challenge(html) {
         return Vec::new();
     }
     if html.to_ascii_lowercase().contains("result__a") {
         return parse_results(html);
     }
-    parse_anchor_results(html)
+    scan_anchors(html, base).0
+}
+
+fn parse_backend_diagnostics(html: &str, base: &str) -> Vec<Value> {
+    if looks_like_challenge(html) || html.to_ascii_lowercase().contains("result__a") {
+        return Vec::new();
+    }
+    scan_anchors(html, base).1
 }
 
 fn looks_like_challenge(html: &str) -> bool {
@@ -1588,41 +1666,90 @@ fn looks_like_challenge(html: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-fn parse_anchor_results(html: &str) -> Vec<SearchResult> {
+fn count_anchor_tags(html: &str) -> usize {
     let lower = html.to_ascii_lowercase();
+    let mut count = 0usize;
+    let mut from = 0usize;
+    while let Some(rel) = lower[from..].find("<a") {
+        let at = from + rel;
+        from = at + 2;
+        if matches!(
+            lower.as_bytes().get(at + 2).copied(),
+            Some(b' ') | Some(b'\n') | Some(b'\r') | Some(b'\t') | Some(b'>')
+        ) {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn scan_anchors(html: &str, base: &str) -> (Vec<SearchResult>, Vec<Value>) {
+    let cleaned = strip_noise(html);
+    let lower = cleaned.to_ascii_lowercase();
     let mut out: Vec<SearchResult> = Vec::new();
+    let mut dropped: Vec<Value> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     let mut from = 0usize;
-    while let Some(rel) = lower[from..].find("<a ") {
+    while let Some(rel) = lower[from..].find("<a") {
         let at = from + rel;
-        let href_at = match lower[at..].find("href=\"") {
+        let anchor_starts_here = matches!(
+            cleaned.as_bytes().get(at + 2).copied(),
+            Some(b' ') | Some(b'\n') | Some(b'\r') | Some(b'\t') | Some(b'>')
+        );
+        if !anchor_starts_here {
+            from = at + 2;
+            continue;
+        }
+        let tag_end = match lower[at..].find('>') {
+            Some(r) => at + r,
+            None => break,
+        };
+        let href_at = match lower[at..tag_end].find("href=\"") {
             Some(r) => at + r + 6,
-            None => break,
+            None => {
+                from = tag_end + 1;
+                continue;
+            }
         };
-        let href_end = match lower[href_at..].find('"') {
+        let href_end = match lower[href_at..tag_end].find('"') {
             Some(r) => href_at + r,
+            None => {
+                from = tag_end + 1;
+                continue;
+            }
+        };
+        let close = match lower[tag_end..].find("</a>") {
+            Some(r) => tag_end + r,
             None => break,
         };
-        let gt = match html[href_end..].find('>') {
-            Some(r) => href_end + r,
-            None => break,
-        };
-        let close = match lower[gt..].find("</a>") {
-            Some(r) => gt + r,
-            None => break,
-        };
-        let url = unwrap_backend_url(&html[href_at..href_end]);
-        let title = clean_text(&html[gt + 1..close]);
-        let snippet = snippet_after(html, &lower, close + 4);
+        let url = unwrap_backend_url(&absolute_href(&cleaned[href_at..href_end], base));
+        let title = clean_text(&cleaned[tag_end + 1..close]);
+        let snippet = snippet_after(&cleaned, &lower, close + 4);
         from = close + 4;
         let host = host_of(&url);
         let key = url.split('#').next().unwrap_or(&url).to_string();
-        if !url.starts_with("http")
-            || title.chars().count() < 3
-            || host.is_empty()
-            || is_engine_host(&host)
-            || seen.contains(&key)
-        {
+        let drop = if !url.starts_with("http") {
+            "no http url"
+        } else if title.chars().count() < 3 {
+            "title shorter than 3 chars"
+        } else if host.is_empty() {
+            "no host"
+        } else if is_engine_host(&host) {
+            "search engine host"
+        } else if seen.contains(&key) {
+            "duplicate url"
+        } else {
+            ""
+        };
+        if !drop.is_empty() {
+            if dropped.len() < 3 {
+                dropped.push(json!({
+                    "url": url,
+                    "title": title.chars().take(60).collect::<String>(),
+                    "host": host,
+                    "drop": drop,
+                }));
+            }
             continue;
         }
         seen.push(key);
@@ -1636,13 +1763,13 @@ fn parse_anchor_results(html: &str) -> Vec<SearchResult> {
             break;
         }
     }
-    out
+    (out, dropped)
 }
 
 fn snippet_after(html: &str, lower: &str, from: usize) -> String {
     let limit = (from + SEARCH_SNIPPET_SCAN_CHARS).min(html.len());
     let end = lower[from..]
-        .find("<a ")
+        .find("<a")
         .map(|r| from + r)
         .unwrap_or(limit)
         .min(limit);
@@ -1663,8 +1790,27 @@ fn is_engine_host(host: &str) -> bool {
         .any(|bad| host == *bad || host.ends_with(&format!(".{bad}")))
 }
 
+fn absolute_href(href: &str, base: &str) -> String {
+    let h = decode_entities(href.trim()).trim().to_string();
+    if h.starts_with("//") {
+        return format!("https:{h}");
+    }
+    if h.starts_with("http://") || h.starts_with("https://") {
+        return h;
+    }
+    if h.starts_with('/') {
+        if let Some((scheme, rest)) = base.split_once("://") {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            if !authority.is_empty() {
+                return format!("{scheme}://{authority}{h}");
+            }
+        }
+    }
+    h
+}
+
 fn unwrap_backend_url(href: &str) -> String {
-    let mut h = href.trim().to_string();
+    let mut h = decode_entities(href.trim()).trim().to_string();
     if h.starts_with("//") {
         h = format!("https:{h}");
     }
@@ -1710,33 +1856,451 @@ fn base64_url_target(payload: &str) -> Option<String> {
     }
 }
 
-fn search_backends(body: &Value) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BackendKind {
+    Json,
+    Html,
+}
+
+struct Candidate {
+    name: String,
+    url: String,
+    kind: BackendKind,
+}
+
+fn known_backend(name: &str) -> bool {
+    SEARCH_JSON_BACKENDS.contains(&name)
+        || SEARCH_BACKENDS.iter().any(|(known, _)| *known == name)
+}
+
+fn github_kind_of(body: &Value) -> Result<&'static str, String> {
+    let raw = trimmed_str(body, &["kind", "github_kind", "type"]);
+    if raw.is_empty() {
+        return Ok(GITHUB_KIND_DEFAULT);
+    }
+    let key = raw.trim().to_ascii_lowercase();
+    match GITHUB_KINDS.iter().find(|(known, _)| *known == key.as_str()) {
+        Some((_, endpoint)) => Ok(*endpoint),
+        None => Err(key),
+    }
+}
+
+fn github_query(body: &Value, query: &str) -> String {
+    let mut q = query.trim().to_string();
+    let user = trimmed_str(body, &["user", "owner"]);
+    if !user.is_empty() && !q.contains("user:") {
+        q.push_str(&format!(" user:{user}"));
+    }
+    let repo = trimmed_str(body, &["repo", "repository"]);
+    if !repo.is_empty() && !q.contains("repo:") {
+        q.push_str(&format!(" repo:{repo}"));
+    }
+    let stars = trimmed_str(body, &["stars", "min_stars", "stars_gt"]);
+    if !stars.is_empty() && !q.contains("stars:") {
+        let bare = stars.trim_start_matches(">=").trim_start_matches('>').trim();
+        if !bare.is_empty() && bare.chars().all(|c| c.is_ascii_digit()) {
+            q.push_str(&format!(" stars:>={bare}"));
+        } else {
+            q.push_str(&format!(" stars:{stars}"));
+        }
+    }
+    q
+}
+
+fn wiki_host(body: &Value) -> String {
+    let raw = trimmed_str(body, &["wiki", "wiki_host"]);
+    if raw.is_empty() {
+        return WIKI_DEFAULT_HOST.to_string();
+    }
+    let mut host = raw.to_ascii_lowercase();
+    for prefix in ["https://", "http://"] {
+        if let Some(rest) = host.strip_prefix(prefix) {
+            host = rest.to_string();
+        }
+    }
+    if let Some(slash) = host.find('/') {
+        host = host[..slash].to_string();
+    }
+    if !host.contains('.') {
+        host = format!("{host}.wikipedia.org");
+    }
+    host
+}
+
+fn json_candidate(
+    name: &str,
+    query: &str,
+    limit: usize,
+    kind: &'static str,
+    body: &Value,
+) -> Option<Candidate> {
+    let per_page = limit.clamp(1, JSON_BACKEND_MAX_PER_PAGE);
+    let url = match name {
+        "github" => format!(
+            "{GITHUB_SEARCH_API}/{kind}?q={}&per_page={per_page}",
+            percent_encode(&github_query(body, query))
+        ),
+        "hn" => format!(
+            "{HN_SEARCH_API}?query={}&tags=story&hitsPerPage={per_page}",
+            percent_encode(query)
+        ),
+        "wikipedia" => format!(
+            "https://{}/w/api.php?action=opensearch&search={}&limit={per_page}&format=json",
+            wiki_host(body),
+            percent_encode(query)
+        ),
+        _ => return None,
+    };
+    Some(Candidate {
+        name: name.to_string(),
+        url,
+        kind: BackendKind::Json,
+    })
+}
+
+fn search_candidates(
+    body: &Value,
+    query: &str,
+    limit: usize,
+    kind: &'static str,
+) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = Vec::new();
     for raw in backend_names(body) {
         let name = raw.trim().to_ascii_lowercase();
         if name.is_empty() {
             continue;
         }
         if name.starts_with("http://") || name.starts_with("https://") {
-            out.push(("custom".to_string(), name.clone()));
+            out.push(Candidate {
+                name: "custom".to_string(),
+                url: backend_url(&name, query),
+                kind: BackendKind::Html,
+            });
             continue;
         }
-        if let Some((_, template)) = SEARCH_BACKENDS.iter().find(|(known, _)| *known == name) {
-            out.push((name.clone(), (*template).to_string()));
+        if let Some(candidate) = json_candidate(&name, query, limit, kind, body) {
+            out.push(candidate);
+            continue;
+        }
+        if let Some((_, template)) = SEARCH_BACKENDS.iter().find(|(known, _)| *known == name.as_str())
+        {
+            out.push(Candidate {
+                name: name.clone(),
+                url: backend_url(template, query),
+                kind: BackendKind::Html,
+            });
         }
     }
     if out.is_empty() {
-        return SEARCH_BACKENDS
-            .iter()
-            .map(|(name, template)| ((*name).to_string(), (*template).to_string()))
-            .collect();
+        for name in SEARCH_JSON_BACKENDS {
+            if let Some(candidate) = json_candidate(name, query, limit, kind, body) {
+                out.push(candidate);
+            }
+        }
+        for (name, template) in SEARCH_BACKENDS {
+            out.push(Candidate {
+                name: (*name).to_string(),
+                url: backend_url(template, query),
+                kind: BackendKind::Html,
+            });
+        }
+        return out;
+    }
+    for name in SEARCH_JSON_BACKENDS {
+        if out.iter().any(|chosen| chosen.name == *name) {
+            continue;
+        }
+        if let Some(candidate) = json_candidate(name, query, limit, kind, body) {
+            out.push(candidate);
+        }
     }
     for (name, template) in SEARCH_BACKENDS {
-        if !out.iter().any(|(chosen, _)| chosen == name) {
-            out.push(((*name).to_string(), (*template).to_string()));
+        if out.iter().any(|chosen| chosen.name == *name) {
+            continue;
+        }
+        out.push(Candidate {
+            name: (*name).to_string(),
+            url: backend_url(template, query),
+            kind: BackendKind::Html,
+        });
+    }
+    out
+}
+
+fn candidate_opts(base: &Value, name: &str) -> Value {
+    let mut out = base.clone();
+    if name != "github" {
+        return out;
+    }
+    if let Some(map) = out.as_object_mut() {
+        let headers = map.entry("headers").or_insert_with(|| json!({}));
+        if let Some(existing) = headers.as_object_mut() {
+            if !existing.contains_key("Accept") {
+                existing.insert("Accept".to_string(), json!(GITHUB_ACCEPT_HEADER));
+            }
         }
     }
     out
+}
+
+fn parse_candidate_results(
+    text: &str,
+    base: &str,
+    name: &str,
+    wiki: &str,
+    kind: BackendKind,
+) -> (Vec<SearchResult>, String) {
+    let trimmed = text.trim_start();
+    let looks_json = kind == BackendKind::Json
+        || trimmed.starts_with('{')
+        || trimmed.starts_with('[');
+    if looks_json {
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            let source = detect_json_source(&value, name);
+            let results = match source {
+                "github" => parse_github_results(&value),
+                "hn" => parse_hn_results(&value),
+                "wikipedia" => parse_wikipedia_results(&value, wiki),
+                _ => Vec::new(),
+            };
+            if !results.is_empty() {
+                return (results, source.to_string());
+            }
+        }
+    }
+    (parse_backend_results(text, base), name.to_string())
+}
+
+fn detect_json_source(value: &Value, name: &str) -> &'static str {
+    if SEARCH_JSON_BACKENDS.contains(&name) {
+        return match name {
+            "github" => "github",
+            "hn" => "hn",
+            _ => "wikipedia",
+        };
+    }
+    if value.get("items").and_then(Value::as_array).is_some() {
+        return "github";
+    }
+    if value.get("hits").and_then(Value::as_array).is_some() {
+        return "hn";
+    }
+    if value.as_array().is_some()
+        || value.pointer("/query/search").and_then(Value::as_array).is_some()
+    {
+        return "wikipedia";
+    }
+    ""
+}
+
+fn json_text(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn flat_text(raw: &str) -> String {
+    let collapsed = collapse_spaces(raw).trim().to_string();
+    clamp_chars(&collapsed, JSON_SNIPPET_CHARS).0
+}
+
+fn push_result(out: &mut Vec<SearchResult>, title: &str, url: &str, snippet: &str) {
+    let title = flat_text(title);
+    let url = url.trim().to_string();
+    let host = host_of(&url);
+    if title.chars().count() < 2 || !url.starts_with("http") || host.is_empty() {
+        return;
+    }
+    out.push(SearchResult {
+        title,
+        url,
+        host,
+        snippet: flat_text(snippet),
+    });
+}
+
+fn parse_github_results(value: &Value) -> Vec<SearchResult> {
+    let mut out: Vec<SearchResult> = Vec::new();
+    let items = match value.get("items").and_then(Value::as_array) {
+        Some(items) => items,
+        None => return out,
+    };
+    for item in items {
+        let url = json_text(item.get("html_url"));
+        if item.get("full_name").is_some() {
+            let mut snippet = json_text(item.get("description"));
+            let mut meta: Vec<String> = Vec::new();
+            let language = json_text(item.get("language"));
+            if !language.is_empty() {
+                meta.push(language);
+            }
+            let stars = json_text(item.get("stargazers_count"));
+            if !stars.is_empty() {
+                meta.push(format!("{stars} stars"));
+            }
+            if !meta.is_empty() {
+                if !snippet.is_empty() {
+                    snippet.push_str(" -- ");
+                }
+                snippet.push_str(&meta.join(", "));
+            }
+            push_result(&mut out, &json_text(item.get("full_name")), &url, &snippet);
+        } else if item.get("path").is_some() {
+            let path = json_text(item.get("path"));
+            let repo = json_text(item.pointer("/repository/full_name"));
+            let title = if repo.is_empty() {
+                path.clone()
+            } else {
+                format!("{path} -- {repo}")
+            };
+            let mut snippet = String::new();
+            if let Some(matches) = item.get("text_matches").and_then(Value::as_array) {
+                for fragment in matches.iter().filter_map(|m| m.get("fragment")) {
+                    let text = json_text(Some(fragment));
+                    if !text.is_empty() {
+                        if !snippet.is_empty() {
+                            snippet.push(' ');
+                        }
+                        snippet.push_str(&text);
+                    }
+                }
+            }
+            if snippet.is_empty() {
+                snippet = repo;
+            }
+            push_result(&mut out, &title, &url, &snippet);
+        } else {
+            let mut snippet = json_text(item.get("body"));
+            let repo = json_text(item.pointer("/repository/full_name"));
+            if snippet.is_empty() {
+                snippet = repo;
+            } else if !repo.is_empty() {
+                snippet = format!("{repo} -- {snippet}");
+            }
+            push_result(&mut out, &json_text(item.get("title")), &url, &snippet);
+        }
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    out
+}
+
+fn parse_hn_results(value: &Value) -> Vec<SearchResult> {
+    let mut out: Vec<SearchResult> = Vec::new();
+    let hits = match value.get("hits").and_then(Value::as_array) {
+        Some(hits) => hits,
+        None => return out,
+    };
+    for hit in hits {
+        let object_id = json_text(hit.get("objectID"));
+        let mut url = json_text(hit.get("url"));
+        if url.is_empty() && !object_id.is_empty() {
+            url = format!("{HN_ITEM_URL}{object_id}");
+        }
+        let mut title = json_text(hit.get("title"));
+        if title.is_empty() {
+            title = json_text(hit.get("story_title"));
+        }
+        if title.is_empty() {
+            title = object_id.clone();
+        }
+        let mut snippet = json_text(hit.get("story_text"));
+        if snippet.is_empty() {
+            snippet = json_text(hit.get("comment_text"));
+        }
+        if snippet.is_empty() {
+            let points = json_text(hit.get("points"));
+            let comments = json_text(hit.get("num_comments"));
+            let author = json_text(hit.get("author"));
+            let created = json_text(hit.get("created_at"));
+            let mut parts: Vec<String> = Vec::new();
+            if !points.is_empty() {
+                parts.push(format!("{points} points"));
+            }
+            if !comments.is_empty() {
+                parts.push(format!("{comments} comments"));
+            }
+            if !author.is_empty() {
+                parts.push(format!("by {author}"));
+            }
+            if !created.is_empty() {
+                parts.push(created);
+            }
+            snippet = parts.join(", ");
+        }
+        push_result(&mut out, &title, &url, &snippet);
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    out
+}
+
+fn parse_wikipedia_results(value: &Value, host: &str) -> Vec<SearchResult> {
+    let mut out: Vec<SearchResult> = Vec::new();
+    if let Some(rows) = value.as_array() {
+        if rows.len() >= 4 {
+            let titles = rows[1].as_array();
+            let descriptions = rows[2].as_array();
+            let urls = rows[3].as_array();
+            if let (Some(titles), Some(descriptions), Some(urls)) = (titles, descriptions, urls) {
+                for index in 0..titles.len().min(descriptions.len()).min(urls.len()) {
+                    let description = json_text(descriptions.get(index));
+                    push_result(
+                        &mut out,
+                        &json_text(titles.get(index)),
+                        &json_text(urls.get(index)),
+                        &clean_text(&description),
+                    );
+                    if out.len() >= 64 {
+                        return out;
+                    }
+                }
+            }
+        }
+        return out;
+    }
+    if let Some(rows) = value.pointer("/query/search").and_then(Value::as_array) {
+        for row in rows {
+            let title = json_text(row.get("title"));
+            let url = format!("https://{host}/wiki/{}", percent_encode(&title.replace(' ', "_")));
+            push_result(&mut out, &title, &url, &clean_text(&json_text(row.get("snippet"))));
+            if out.len() >= 64 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn apply_domain_filters(results: &mut Vec<SearchResult>, allowed: &[String], blocked: &[String]) {
+    if !allowed.is_empty() {
+        results.retain(|r| host_matches_any(&r.host, allowed));
+    }
+    if !blocked.is_empty() {
+        results.retain(|r| !host_matches_any(&r.host, blocked));
+    }
+}
+
+fn result_rows(results: &[SearchResult], source: &str) -> Vec<Value> {
+    results
+        .iter()
+        .enumerate()
+        .map(|(rank, r)| {
+            json!({
+                "rank": rank + 1,
+                "title": r.title,
+                "url": r.url,
+                "host": r.host,
+                "snippet": clamp_chars(&r.snippet, 400).0,
+                "source": source,
+            })
+        })
+        .collect::<Vec<Value>>()
 }
 
 fn backend_names(body: &Value) -> Vec<String> {
