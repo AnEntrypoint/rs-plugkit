@@ -2,7 +2,7 @@
 
 This is a concern of the method, not a stage of a pipeline: it is entered from whichever node the work reaches it from, and left as soon as what it asks for holds. No concern gates entry to a set of nodes.
 
-CONTRACT writes each row's contract into types, names, signatures and obligations before any implementation exists. Each row is a proof goal. Its stated pre-conditions, invariants and post-conditions become typed signatures wherever the type can express them, and each remaining obligation becomes a PROVE-kind mutable discharged by a live witness. The node replaces the former PROVE stage. It exits when every row's contract sits in its signatures, every contract-kind mutable is resolved and witnessed, and `transition to=BUILD` is dispatched.
+CONTRACT writes each row's contract into types, names, signatures and obligations before any implementation exists. Each row is a proof goal. Its stated pre-conditions, invariants and post-conditions become typed signatures wherever the type can express them, and each remaining obligation becomes a PROVE-kind mutable discharged by a live witness. The node replaces the former PROVE stage. It exits when every row's contract sits in its signatures, every contract-kind mutable is resolved and witnessed, and `transition to=TOTALITY` is dispatched.
 
 Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each H3 below carries a principle key, then the attribution exactly as gm-config/fsm/graph.json labels it.
 
@@ -16,7 +16,7 @@ Every build, subprocess and filesystem probe is an exec_js dispatch. exec_js run
 
 Resolve obligations with `mutable-resolve {"mutable_id":"<id>","witness_evidence":"<witness>"}`. For a resource-bound mutable, add `"measured_value":<number>` to the same body. Resolve rows with `prd-resolve {"id":"<row id>","witness_evidence":"<witness>","witness_dispatch_id":"<dispatch id of your own live run>"}`, with id at top level beside witness_evidence and never nested inside a string. A reply of deviation kind prd-resolve-unknown-id means the id missed. Read its hint field and re-dispatch corrected, never blind. Declare new obligations with `mutable-add {"id":"<kebab-case slug>","obligation_kind":"<kind>","depends_on":[...],"status":"unknown"}`.
 
-Reshaping is `transition to=SHAPE`, dispatched in the same turn as the discovery, with the affected rows re-cut in place through prd-add on their existing ids. Advancing is `transition to=BUILD`.
+Reshaping is `transition to=EARS`, dispatched in the same turn as the discovery, with the affected rows re-cut in place through prd-add on their existing ids. Advancing is `transition to=TOTALITY`.
 
 Write each file in the CONTRACT artifacts only through `fs_write {path, content}`, then verify it with `fs_read {path}`. The disk content is the witness, not the tool's return.
 
@@ -28,7 +28,7 @@ Every row carries its contract as a set of pre-conditions and post-conditions, w
 
 When CONTRACT discovers a domain term, a module boundary or a contract obligation with no row, `prd-add` it that moment. A need is a row now or it is not a need. The same rule applies to any new mutable.
 
-A rule the type cannot express becomes a precondition in the signature, and the row names that precondition. When a row's pre-conditions or invariants cannot be stated concretely, the row is not cut. Reshape with `transition to=SHAPE` rather than inventing the statement in CONTRACT.
+A rule the type cannot express becomes a precondition in the signature, and the row names that precondition. When a row's pre-conditions or invariants cannot be stated concretely, the row is not cut. Reshape with `transition to=EARS` rather than inventing the statement in G_CONTRACT.
 
 Pass `commit_comment` on `prd-resolve` when the resolved contract encodes a rule that deserves one line of history. The next git_commit in the repository bundles that line into the commit message under "Resolved PRD rows". Omit it for rows too granular to earn a line.
 
@@ -46,15 +46,15 @@ The resource-bound check is mechanical. `mutable-resolve` accepts `measured_valu
 
 Mutable gate: drain every pending PROVE-kind mutable before leaving the node. Loop: `mutable-resolve` each ready row. When one resolution surfaces a new unknown, `mutable-add` it immediately with its obligation_kind and depends_on, and resolve it in the same turn before advancing. When the transition refuses, the mutables-all-resolved and mutables-all-typed predicates name the blocking row and its reason. That row is resolved next.
 
-Two-pass rule: a mutable that survives two genuine resolution attempts without a witness is reclassified as a fresh, differently scoped unknown with a new id. Re-cut the affected rows, and dispatch `transition to=SHAPE`, since the reclassification shows the plan must reshape.
+Two-pass rule: a mutable that survives two genuine resolution attempts without a witness is reclassified as a fresh, differently scoped unknown with a new id. Re-cut the affected rows, and dispatch `transition to=EARS`, since the reclassification shows the plan must reshape.
 
-Always rearchitect immediately: an in-spirit architectural improvement found mid-node, clearly better and not merely different, is handled at once. Dispatch `transition to=SHAPE` in the same turn, and re-cut the affected rows with prd-add on their existing ids, which keeps handle and position. Sunk cost in the old shape never justifies shipping the worse design. The urge to write "this should be rearchitected" is the trigger for the transition. Narrating it without dispatching the transition strands the chain on a stale plan.
+Always rearchitect immediately: an in-spirit architectural improvement found mid-node, clearly better and not merely different, is handled at once. Dispatch `transition to=EARS` in the same turn, and re-cut the affected rows with prd-add on their existing ids, which keeps handle and position. Sunk cost in the old shape never justifies shipping the worse design. The urge to write "this should be rearchitected" is the trigger for the transition. Narrating it without dispatching the transition strands the chain on a stale plan.
 
 Surface divergence: a state that differs from the PRD's assumed shape is a new mutable with its witness. A broken tool that blocks a witness is a mutable whose task is to make the witness reachable: fix the tool, replace it, or drive its lower-level interface directly.
 
 ## Obligation witnesses admit no deferral
 
-A resolution whose witness says deferred, pending the next session, awaiting recovery, or waiting for a user refresh marks an open obligation as discharged. The resolution is refused, and the obligation stays open with the chain in CONTRACT. An obligation is discharged by a real answer with real evidence, or it is not discharged. A witness is written by kind, naming the kind discharged and the command and output that discharged it.
+A resolution whose witness says deferred, pending the next session, awaiting recovery, or waiting for a user refresh marks an open obligation as discharged. The resolution is refused, and the obligation stays open with the chain in G_CONTRACT. An obligation is discharged by a real answer with real evidence, or it is not discharged. A witness is written by kind, naming the kind discharged and the command and output that discharged it.
 
 ## Principles
 
@@ -158,10 +158,10 @@ Do not memorize the exec output in bulk, intermediate compiler errors, or the co
 
 ## Transition
 
-The exit is `transition to=BUILD`. The edge from ACCEPTPORT to TOTALITY carries no gate in the lean graph, so the node closes by its own rules: every PROVE-kind mutable resolved, every row's contract in its signatures, and every row's witness printed. A refusal from the compiled predicates names the blocking row, and that row is resolved next. The response's next_dispatch names the recovery verb, and that verb is dispatched next.
+The exit is `transition to=TOTALITY`. The edge from ACCEPTPORT to TOTALITY carries no gate in the lean graph, so the node closes by its own rules: every PROVE-kind mutable resolved, every row's contract in its signatures, and every row's witness printed. A refusal from the compiled predicates names the blocking row, and that row is resolved next. The response's next_dispatch names the recovery verb, and that verb is dispatched next.
 
-Feedback from BUILD returns to the node that owns the discovery. A partial function that escaped its domain fires the backreference from TOTALITY to PARSEDV, so the walk returns to PARSEDV in CONTRACT. A mixed abstraction level in a function fires the backreference from SLAP to DEEPMOD. An adapter that leaked into the core fires the backreference from ACCEPTPORT to PARNAS. Each is resolved in CONTRACT before BUILD resumes.
+Feedback from TOTALITY returns to the node that owns the discovery. A partial function that escaped its domain fires the backreference from TOTALITY to PARSEDV, so the walk returns to PARSEDV in G_CONTRACT. A mixed abstraction level in a function fires the backreference from SLAP to DEEPMOD. An adapter that leaked into the core fires the backreference from ACCEPTPORT to PARNAS. Each is resolved in G_CONTRACT before BUILD resumes.
 
-A discovery that reshapes the plan (the representation a row assumed does not exist in reality, or the rows' boundaries are wrong) is `transition to=SHAPE`. Route to the earliest capable node, and never further back than the discovery requires.
+A discovery that reshapes the plan (the representation a row assumed does not exist in reality, or the rows' boundaries are wrong) is `transition to=EARS`. Route to the earliest capable node, and never further back than the discovery requires.
 
 Every turn ends in a verb dispatch. A transition refused with a next_dispatch is dispatched next, not narrated.

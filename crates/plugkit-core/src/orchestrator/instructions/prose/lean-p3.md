@@ -2,13 +2,13 @@
 
 This is a concern of the method, not a stage of a pipeline: it is entered from whichever node the work reaches it from, and left as soon as what it asks for holds. No concern gates entry to a set of nodes.
 
-BUILD writes the source that inhabits the CONTRACT node's signatures. Every new function is total, every resource has exactly one owner, every operation replays to the same state, and every concurrent access is ordered by a sync point or provably disjoint. Each property is witnessed live. The node writes only the artifacts the PRD names, verifies each one from disk, and exits when every STATE-kind and CONC-kind mutable is resolved, the diff passes the source hygiene predicates, and `transition to=VERIFY` is dispatched through the G_INDEP gate.
+BUILD writes the source that inhabits the G_CONTRACT node's signatures. Every new function is total, every resource has exactly one owner, every operation replays to the same state, and every concurrent access is ordered by a sync point or provably disjoint. Each property is witnessed live. The node writes only the artifacts the PRD names, verifies each one from disk, and exits when every STATE-kind and CONC-kind mutable is resolved, the diff passes the source hygiene predicates, and `transition to=G_INDEP` is dispatched through the G_INDEP gate.
 
 Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each H3 below carries a principle key, then the attribution exactly as gm-config/fsm/graph.json labels it.
 
 ## Verbs
 
-Re-dispatch `instruction` at the start of each artifact and after any unfamiliar error. Every spool body carries session_id. Write only the artifacts the PRD names. `fs_write {path, content}` performs the file mutation, and each write is followed by `fs_read {path}` of the same path, so the disk content is the witness. A discrepancy between the disk and the plan sends the walk to root cause, never to a blind retry. Any divergence from the PRD's assumed shape is a new mutable and a `transition to=SHAPE`.
+Re-dispatch `instruction` at the start of each artifact and after any unfamiliar error. Every spool body carries session_id. Write only the artifacts the PRD names. `fs_write {path, content}` performs the file mutation, and each write is followed by `fs_read {path}` of the same path, so the disk content is the witness. A discrepancy between the disk and the plan sends the walk to root cause, never to a blind retry. Any divergence from the PRD's assumed shape is a new mutable and a `transition to=EARS`.
 
 Before changing a function's signature or behaviour, dispatch `callers {symbol}` to list the call sites the edit must keep valid. A caller the plan did not name is a new unknown. Use `codesearch {query}` for where a thing lives and `codeinsight {action:"outline", path}` for a file's overview. After writes, dispatch `codeinsight_index {}` so that the next callers answer reflects the change.
 
@@ -16,7 +16,7 @@ Every build, subprocess, filesystem probe and live witness is an exec_js dispatc
 
 Each sweep finding is declared as a typed mutable before it is resolved: `mutable-add {"id":"<kebab-case slug>","obligation_kind":"<kind>","depends_on":[...],"status":"unknown"}`. The kinds are the STATE kinds (totality, ownership, replay, effect-boundary) and the CONC kinds (happens-before, disjointness, contention). Resolve each with `mutable-resolve {"mutable_id":"<id>","witness_evidence":"<live witness>"}`. Resolve rows with `prd-resolve {"id":"<row id>","witness_evidence":"<witness>"}`.
 
-Write the closure narrative to `memorize-fire` and, in RECORD, to the commit message. It never goes into the response body. Advance with `transition to=VERIFY`. Reshaping goes to `transition to=SHAPE`, and a contract defect goes to `transition to=CONTRACT`.
+Write the closure narrative to `memorize-fire` and, in ADRN, to the commit message. It never goes into the response body. Advance with `transition to=G_INDEP`. Reshaping goes to `transition to=EARS`, and a contract defect goes to `transition to=G_CONTRACT`.
 
 Route every mutation through the PRD, a mutable, or a memo. The audit tuple of each accepted write is its id, its witness hash and its timestamp.
 
@@ -32,11 +32,11 @@ Pass `commit_comment` on prd-resolve for a row whose resolution deserves a line 
 
 The STATE kinds are totality, ownership, replay and effect-boundary. Each sweep below produces one or more of them. Each mutable has a dependency DAG entry, and its witness is the live exec_js run that discharges it. The state-obligations-ready predicate refuses the transition while any pending STATE-kind row is untyped or blocked, and it names the offender.
 
-The CONC kinds are happens-before, disjointness and contention. The conc-obligations-ready predicate applies the same test to them. A CONC-kind row may depend on a STATE-kind row, because a contention bound presupposes an ownership invariant that already holds. A STATE-kind row may depend on a PROVE-kind row from CONTRACT, because a replay obligation may presuppose a proven invariant.
+The CONC kinds are happens-before, disjointness and contention. The conc-obligations-ready predicate applies the same test to them. A CONC-kind row may depend on a STATE-kind row, because a contention bound presupposes an ownership invariant that already holds. A STATE-kind row may depend on a PROVE-kind row from G_CONTRACT, because a replay obligation may presuppose a proven invariant.
 
 Dependency rule: resolve in order. A mutable whose depends_on are all resolved is ready. A mutable whose dependency is pending is blocked, so resolve the dependency first. A resolution that surfaces a new unknown gets `mutable-add` in the same turn with its kind and depends_on.
 
-Two-pass rule: a mutable that survives two genuine resolution attempts without a witness is reclassified as a fresh unknown with a new id, the affected rows are re-cut, and the walk reshapes with `transition to=SHAPE`. The same discipline holds for a repair attempt that fails twice: change the approach in the next attempt, witness the result, and do not repeat the identical approach.
+Two-pass rule: a mutable that survives two genuine resolution attempts without a witness is reclassified as a fresh unknown with a new id, the affected rows are re-cut, and the walk reshapes with `transition to=EARS`. The same discipline holds for a repair attempt that fails twice: change the approach in the next attempt, witness the result, and do not repeat the identical approach.
 
 Gate-driven repair: a finding that is a code repair is an Edit followed by a disk Read of the touched path and the same live witness, all inside this node. A finding that changes the state model (the ownership or disjointness boundary is wrong) is a new STATE or CONC mutable, and the sweep repeats for the new boundary.
 
@@ -50,7 +50,7 @@ Concurrency and data layout are sized to the machine the code runs on. The commo
 
 Handover: Hands the defined results on every edge input to GUARD, so invalid inputs are rejected at the top of each function; nominated next node: GUARD; cite Total Functional Programming - David Turner.
 
-Every new function returns a defined result on every input path. Feed the edge inputs live through exec_js: zero-length input, maximum-size input, null or undefined, a wrong type where the language allows it, and a boundary-adjacent invalid value. Each run prints a defined result. Each one is a totality mutable with its printed results as witness. A partial function that escaped its domain fires the backreference to PARSEDV in CONTRACT, and the domain is repaired at its entry boundary before the function is rebuilt.
+Every new function returns a defined result on every input path. Feed the edge inputs live through exec_js: zero-length input, maximum-size input, null or undefined, a wrong type where the language allows it, and a boundary-adjacent invalid value. Each run prints a defined result. Each one is a totality mutable with its printed results as witness. A partial function that escaped its domain fires the backreference to PARSEDV in G_CONTRACT, and the domain is repaired at its entry boundary before the function is rebuilt.
 
 ### GUARD - Guard Clause - Martin Fowler
 
@@ -62,7 +62,7 @@ Invalid input is rejected at the top of the function by an early return, so the 
 
 Handover: Hands the single-level functions to STRUCTPROG, so control flow stays sequence, selection and iteration with one exit per block; nominated next node: STRUCTPROG; cite Single Level of Abstraction - Kent Beck.
 
-Every function body works at one level of abstraction. A body that mixes a domain decision with raw byte or string handling is split so each function reads at one level. The witness is the function's outline from `codeinsight {action:"outline", path}` showing each function's calls on one level only, together with the exec_js run that shows the split functions return the same output as the mixed version did. A function that mixes abstraction levels after this fires the backreference to DEEPMOD in CONTRACT.
+Every function body works at one level of abstraction. A body that mixes a domain decision with raw byte or string handling is split so each function reads at one level. The witness is the function's outline from `codeinsight {action:"outline", path}` showing each function's calls on one level only, together with the exec_js run that shows the split functions return the same output as the mixed version did. A function that mixes abstraction levels after this fires the backreference to DEEPMOD in G_CONTRACT.
 
 ### STRUCTPROG - Structured Programming - Edsger Dijkstra
 
@@ -112,10 +112,10 @@ Memorize the decisions that a subsequent task would otherwise re-derive: the sin
 
 ## Transition
 
-The exit is `transition to=VERIFY`, the lean verification node, dispatched only when every STATE-kind and CONC-kind mutable is resolved and witnessed, every row is resolved, and the three diff predicates above hold. The state-obligations-ready and conc-obligations-ready predicates name any pending row they refuse, and that row is resolved next.
+The exit is `transition to=G_INDEP`, the lean verification node, dispatched only when every STATE-kind and CONC-kind mutable is resolved and witnessed, every row is resolved, and the three diff predicates above hold. The state-obligations-ready and conc-obligations-ready predicates name any pending row they refuse, and that row is resolved next.
 
 The edge from KISS runs through the G_INDEP gate, verifier has not read the implementation. The gate predicate is advisory and never refuses, so this node enforces the rule itself: the verifier is a fresh subagent with its own session_id, given only the contract text (the PRD rows and the signatures) and no reading of the implementation. A verifier that has read the code inherits its assumptions, and its verdict is discarded.
 
-Feedback routes to the earliest capable node. A partial function that escaped its domain goes to CONTRACT through PARSEDV. A function that mixes abstraction levels goes to CONTRACT through DEEPMOD. A surplus generality goes to SHAPE through YAGNI. A reshaping discovery (the ownership or disjointness boundary is wrong, the spec assumed a shape that reality does not have) goes to `transition to=SHAPE`, with the affected rows re-cut in place by prd-add on their existing ids. A code repair stays in BUILD and is witnessed again in this node.
+Feedback routes to the earliest capable node. A partial function that escaped its domain goes to G_CONTRACT through PARSEDV. A function that mixes abstraction levels goes to G_CONTRACT through DEEPMOD. A surplus generality goes to EARS through YAGNI. A reshaping discovery (the ownership or disjointness boundary is wrong, the spec assumed a shape that reality does not have) goes to `transition to=EARS`, with the affected rows re-cut in place by prd-add on their existing ids. A code repair stays in TOTALITY and is witnessed again in this node.
 
 A transition refused with a next_dispatch is dispatched next, not narrated. Repeated identical refusals escalate at gate_repeat_escalate_threshold (default 3), and the named recovery verb is dispatched instead of the denied transition.
