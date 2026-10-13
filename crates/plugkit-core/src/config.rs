@@ -477,7 +477,7 @@ pub fn user_cache_root() -> Option<String> {
     home_dir().map(|home| join(&home, SOURCE_CACHE_REL))
 }
 
-fn home_dir() -> Option<String> {
+pub(crate) fn home_dir() -> Option<String> {
     for key in ["HOME", "USERPROFILE"] {
         if let Some(s) = env_var(key) {
             let raw = s.trim();

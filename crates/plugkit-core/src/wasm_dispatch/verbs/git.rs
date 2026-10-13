@@ -2329,6 +2329,16 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         if message.is_empty() {
             return Ok(err("git_commit", "message required"));
         }
+        let policy = match attribution::load() {
+            Ok(policy) => policy,
+            Err(reason) => return Ok(err_json("git_commit", attribution::invalid(&reason))),
+        };
+        let screened = match attribution::apply("git_commit", message, &policy) {
+            Ok(screened) => screened,
+            Err(refusal) => return Ok(err_json("git_commit", refusal)),
+        };
+        let message = screened.text.trim();
+        let mut attribution_stripped = screened.stripped.clone();
         let allow_empty = body
             .get("allow_empty")
             .and_then(|v| v.as_bool())
@@ -2601,7 +2611,14 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         }
         let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd, &commit_note_paths(cwd, scoped_paths));
         let bundled_message = bundle_prd_commit_comments(message, &commit_notes);
-        let identity = body_commit_identity(body);
+        let bundled_message = if policy.enforces() && !commit_notes.is_empty() {
+            let late = attribution::screen(&bundled_message);
+            attribution_stripped.extend(late.stripped);
+            late.text
+        } else {
+            bundled_message
+        };
+        let identity = body_commit_identity(body).or_else(|| policy.author.clone());
         let r = git_step_replayed_by_call_order(
             plan,
             &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, scoped_paths, identity.as_ref())),
@@ -2646,6 +2663,9 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         );
         record_commit_in_liqology(&summary, &head_after);
         let mut payload = json!({ "committed": true, "sha": sha, "summary": summary });
+        if !attribution_stripped.is_empty() {
+            payload["attribution_stripped"] = json!(attribution_stripped);
+        }
         if let Some(rows) = prd_own_rows.as_ref() {
             payload["prd_own_rows_only"] = json!(true);
             payload["prd_own_rows"] = json!(rows);
@@ -3787,6 +3807,16 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         .unwrap_or("")
         .trim()
         .to_string();
+    let policy = match attribution::load() {
+        Ok(policy) => policy,
+        Err(reason) => return err_json("git_finalize", attribution::invalid(&reason)),
+    };
+    let screened = match attribution::apply("git_finalize", &message, &policy) {
+        Ok(screened) => screened,
+        Err(refusal) => return err_json("git_finalize", refusal),
+    };
+    let message = screened.text.trim().to_string();
+    let mut attribution_stripped = screened.stripped;
     let paths: Vec<String> = body
         .get("paths")
         .or_else(|| body.get("files"))
@@ -3948,7 +3978,14 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         let scoped_paths: &[String] = if scoped { &paths } else { &[] };
         let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd_ref, &commit_note_paths(cwd_ref, scoped_paths));
         let bundled_message = bundle_prd_commit_comments(message.as_str(), &commit_notes);
-        let identity = body_commit_identity(body);
+        let bundled_message = if policy.enforces() && !commit_notes.is_empty() {
+            let late = attribution::screen(&bundled_message);
+            attribution_stripped.extend(late.stripped);
+            late.text
+        } else {
+            bundled_message
+        };
+        let identity = body_commit_identity(body).or_else(|| policy.author.clone());
         let cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, identity.as_ref())), cwd_ref);
         prd_own_rows = own_rows_filter.as_ref().map(|f| f.own_rows.clone());
         prd_foreign_row_count = foreign_prd_rows.len();
@@ -4004,6 +4041,13 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                 message.clone()
             };
             let bundled_message = bundle_prd_commit_comments(flush_message.as_str(), &flush_notes);
+            let bundled_message = if policy.enforces() {
+                let late = attribution::screen(&bundled_message);
+                attribution_stripped.extend(late.stripped);
+                late.text
+            } else {
+                bundled_message
+            };
             let bundled_summary = bundled_message.lines().next().unwrap_or("").to_string();
             let prd_abs = format!(
                 "{}/{}",
@@ -4039,13 +4083,22 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                     }),
                 );
             }
-            let mut commit_argv = vec![
+            let mut commit_argv: Vec<String> = Vec::new();
+            if let Some((name, email)) = body_commit_identity(body).or_else(|| policy.author.clone()) {
+                commit_argv.extend([
+                    "-c".to_string(),
+                    format!("user.name={name}"),
+                    "-c".to_string(),
+                    format!("user.email={email}"),
+                ]);
+            }
+            commit_argv.extend([
                 "commit".to_string(),
                 "--allow-empty".to_string(),
                 "-m".to_string(),
                 bundled_message,
                 "--".to_string(),
-            ];
+            ]);
             commit_argv.extend(git_pathspec_scope(&[], cwd_ref));
             let commit_argv: Vec<&str> = commit_argv.iter().map(String::as_str).collect();
             let cr = git_call_argv(&commit_argv, cwd_ref);
@@ -4378,6 +4431,9 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         "ci_validated_marker_written": ci_validated_written,
         "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
     });
+    if !attribution_stripped.is_empty() {
+        finalize_payload["attribution_stripped"] = json!(attribution_stripped);
+    }
     for key in ["ambiguous_ref", "ambiguous_refs"] {
         if let Some(value) = push_data.and_then(|data| data.get(key)) {
             finalize_payload[key] = value.clone();
@@ -4475,6 +4531,14 @@ pub(super) const GIT_LOG_HELP: &str = r#"git_log lists commits newest first as {
   case_insensitive: true makes grep and author ignore case.
   oneline: true    answers commits as "<sha> <YYYY-MM-DD> <author> <subject>" strings, a fraction of the bytes; not combinable with body or trailers.
   trailers: true   adds the commit's trailers as {Key: value} (an array when a key repeats), read by git from the final paragraph of the message (%(trailers:only=true,unfold=true)). A Co-Authored-By line above the final paragraph is not a trailer: find those with grep."#;
+
+pub(super) const GIT_COMMIT_HELP: &str = r#"git_commit, git_amend, git_finalize, git_merge and git_reword take a message. git_commit and git_amend accept message, amend, paths|files, add_all, allow_empty, allow_whole_index, allow_foreign_rows|allow_foreign_prd_rows, allow_dangling, author_name and author_email.
+Attribution policy: when a policy file exists the message is screened before git sees it. The file is .gm/attribution.json in the project (the git toplevel of the dispatch), else ~/.gm/attribution.json; no file means off.
+  {"mode": "off" | "strip" | "refuse", "author": {"name": "...", "email": "..."}}
+  strip    removes every line that is a Co-Authored-By trailer naming Claude or Anthropic, or that holds "generated with" and "claude" (case-insensitive), tidies the blank lines left behind and lists the removed lines in the receipt as attribution_stripped.
+  refuse   answers error_code attribution_refused with attribution_lines and commits nothing.
+  author   is the commit identity (user.name, user.email) when the body names no author_name and author_email; git_reword sets it as the committer.
+  A policy file that cannot be read (bad JSON, unknown key, unknown mode) refuses with attribution_policy_invalid instead of turning enforcement off. A message that holds only attribution lines is refused."#;
 
 const GIT_LOG_RECORD_END: char = '\u{1e}';
 const GIT_LOG_FIELD_SEP: char = '\u{1f}';
@@ -6575,6 +6639,15 @@ pub(super) fn git_merge(body: &Value) -> u64 {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
+    let policy = match attribution::load() {
+        Ok(policy) => policy,
+        Err(reason) => return err_json("git_merge", attribution::invalid(&reason)),
+    };
+    let screened = match attribution::apply("git_merge", message, &policy) {
+        Ok(screened) => screened,
+        Err(refusal) => return err_json("git_merge", refusal),
+    };
+    let message = screened.text.trim();
     let reading = disambiguated_revision(cwd, refspec);
     let mut argv: Vec<&str> = vec!["merge", "--no-edit"];
     if ff_only {
@@ -6618,6 +6691,9 @@ pub(super) fn git_merge(body: &Value) -> u64 {
         "fast_forward": out.lines().any(|line| line == "Fast-forward" || line.starts_with("Fast-forward (")),
         "output": out
     });
+    if !screened.stripped.is_empty() {
+        data["attribution_stripped"] = json!(screened.stripped);
+    }
     note_ambiguous_refs(&mut data, &reading.ambiguous);
     ok("git_merge", data)
 }
@@ -7110,8 +7186,18 @@ pub(super) fn write_commit_object(cwd: Option<&str>, commit: &CommitObject) -> R
     Ok(sha)
 }
 
-pub(super) fn committer_ident(cwd: Option<&str>) -> Result<String, String> {
-    let r = git_call_argv(&["var", "GIT_COMMITTER_IDENT"], cwd);
+pub(super) fn committer_ident(
+    cwd: Option<&str>,
+    identity: Option<&(String, String)>,
+) -> Result<String, String> {
+    let name_arg = identity.map(|(name, _)| format!("user.name={name}"));
+    let email_arg = identity.map(|(_, email)| format!("user.email={email}"));
+    let mut argv: Vec<&str> = Vec::new();
+    if let (Some(name), Some(email)) = (name_arg.as_deref(), email_arg.as_deref()) {
+        argv.extend(["-c", name, "-c", email]);
+    }
+    argv.extend(["var", "GIT_COMMITTER_IDENT"]);
+    let r = git_call_argv(&argv, cwd);
     let ident = r
         .get("stdout")
         .and_then(Value::as_str)
@@ -7175,6 +7261,15 @@ pub(super) fn git_reword(body: &Value) -> u64 {
     if message.is_empty() {
         return err("git_reword", "message required");
     }
+    let policy = match attribution::load() {
+        Ok(policy) => policy,
+        Err(reason) => return err_json("git_reword", attribution::invalid(&reason)),
+    };
+    let screened = match attribution::apply("git_reword", message, &policy) {
+        Ok(screened) => screened,
+        Err(refusal) => return err_json("git_reword", refusal),
+    };
+    let message = screened.text.trim();
     let refspec = ["rev", "ref", "sha", "commit"]
         .iter()
         .find_map(|k| body.get(*k).and_then(Value::as_str))
@@ -7219,7 +7314,7 @@ pub(super) fn git_reword(body: &Value) -> u64 {
     if !published.is_empty() {
         return err_json("git_reword", pushed_commit_refusal(&target, &published));
     }
-    let committer = match committer_ident(cwd) {
+    let committer = match committer_ident(cwd, policy.author.as_ref()) {
         Ok(ident) => ident,
         Err(reason) => return err("git_reword", &reason),
     };
@@ -7328,22 +7423,23 @@ pub(super) fn git_reword(body: &Value) -> u64 {
         "git_reword",
         json!({ "sub": "git", "old_sha": target, "new_sha": new_target, "old_head": old_head, "new_head": new_head }),
     );
-    ok(
-        "git_reword",
-        json!({
-            "old_sha": target,
-            "new_sha": new_target,
-            "message": new_message.trim_end(),
-            "trailers_removed": trailers_removed(cwd, &old_message, &new_message),
-            "old_head": old_head,
-            "new_head": new_head,
-            "branch": branch,
-            "rewritten": pairs,
-            "descendants_rewritten": rewritten.len() - 1,
-            "trees_verified": rewritten.len(),
-            "orig_head": old_head,
-        }),
-    )
+    let mut data = json!({
+        "old_sha": target,
+        "new_sha": new_target,
+        "message": new_message.trim_end(),
+        "trailers_removed": trailers_removed(cwd, &old_message, &new_message),
+        "old_head": old_head,
+        "new_head": new_head,
+        "branch": branch,
+        "rewritten": pairs,
+        "descendants_rewritten": rewritten.len() - 1,
+        "trees_verified": rewritten.len(),
+        "orig_head": old_head,
+    });
+    if !screened.stripped.is_empty() {
+        data["attribution_stripped"] = json!(screened.stripped);
+    }
+    ok("git_reword", data)
 }
 
 pub(super) const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &[

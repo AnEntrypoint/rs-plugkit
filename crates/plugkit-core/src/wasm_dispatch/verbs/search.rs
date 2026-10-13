@@ -1674,6 +1674,9 @@ pub(super) fn verb_help_doc(verb: &str) -> Option<&'static str> {
         "websearch" | "web_search" | "web-search" => Some(super::web::WEBSEARCH_HELP),
         "git_merge_abort" => Some(super::git::GIT_MERGE_ABORT_HELP),
         "git_log" => Some(super::git::GIT_LOG_HELP),
+        "git_commit" | "git_amend" | "git_finalize" | "git_merge" | "git_reword" => {
+            Some(super::git::GIT_COMMIT_HELP)
+        }
         "git_worktree" => Some("git_worktree {action: list} returns worktrees; {action: add, path, ref?: HEAD, detach?: true} creates a linked checkout; detach false requires an existing local branch name; {action: remove, path} removes a clean unlocked checkout without force. Unknown fields are refused per action. Repository selectors and session fields are accepted."),
         _ => None,
     }
