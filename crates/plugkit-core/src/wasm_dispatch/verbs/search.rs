@@ -1808,7 +1808,14 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
 }
 
 pub(super) fn finish_scan_reply(out: &mut serde_json::Map<String, Value>, scan_cap: u32) -> Option<String> {
-    if code_exclusion_count(out) > 0 {
+    // A rule exclusion only costs coverage while the excluded paths stay unread: once the
+    // uncovered-files pass has read them off disk, "exhaustive" keeps whatever that pass reported.
+    let uncovered_complete = out
+        .get("uncovered_scan")
+        .and_then(|v| v.get("complete"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if code_exclusion_count(out) > 0 && !uncovered_complete {
         out.insert("exhaustive".to_string(), json!(false));
     }
     let partial = scan_partial_reason(out);

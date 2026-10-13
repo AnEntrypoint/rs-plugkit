@@ -4922,6 +4922,209 @@ fn quoted_argument_runs_spelling_path_segments(
     out
 }
 
+// A scan universe built from git, or from a walk that honours .gitignore, does not hold every file
+// in the requested scope: a downloaded fixture, a vendored map body or a build output is
+// gitignored, so a zero-match reply over such a scope reads as "the text is absent" when it really
+// means "those files were never opened". scan_uncovered_files lists the same scope with the ignore
+// rules off, drops what the universe already covered and line-scans the rest with the same matcher,
+// so the reply can name how many files each mechanism read.
+const UNCOVERED_SCAN_BUDGET_MS: u64 = 8_000;
+
+const UNCOVERED_SCAN_LIST_CAP: usize = 20_000;
+
+const UNCOVERED_SCAN_MATCH_CAP: usize = 20_000;
+
+const UNCOVERED_SCAN_NOTE: &str = "the indexed cover does not hold these files (they are gitignored, untracked or dropped by a rule), so this pass read them straight from disk with the ignore rules off: files_scanned_indexed is what the indexed cover read, files_scanned_uncovered what this pass added";
+
+pub struct UncoveredScanResult {
+    pub files_listed: usize,
+    pub files_scanned: usize,
+    pub lines_scanned: usize,
+    pub files_with_matches: usize,
+    pub lines_with_matches: usize,
+    pub occurrence_count: usize,
+    pub files_skipped_binary_extension: usize,
+    pub files_skipped_too_large: usize,
+    pub files_unreadable: usize,
+    pub matches: Vec<Value>,
+    pub compact_lines: Vec<String>,
+    pub file_line_counts: Vec<(String, usize)>,
+    pub matches_truncated: bool,
+    pub complete: bool,
+    pub listing_error: Option<String>,
+}
+
+fn uncovered_path_is_out_of_scope(path: &str, cfg: &crate::ragconfig::IndexConfig) -> bool {
+    path.split('/')
+        .any(|seg| crate::scan_universe::is_own_state_name(seg) || is_dependency_noise_dir_segment(seg, cfg))
+}
+
+fn scan_uncovered_files(
+    req: &LiteralScan,
+    root: &str,
+    cfg: &crate::ragconfig::IndexConfig,
+    origin: crate::scan_universe::TargetOrigin,
+    covered: &std::collections::HashSet<&str>,
+    matcher: &LiteralMatcher,
+    admitted: &dyn Fn(&str) -> bool,
+    max_matches: usize,
+    budget_ms: u64,
+) -> UncoveredScanResult {
+    let empty = |listing_error: Option<String>| UncoveredScanResult {
+        files_listed: 0,
+        files_scanned: 0,
+        lines_scanned: 0,
+        files_with_matches: 0,
+        lines_with_matches: 0,
+        occurrence_count: 0,
+        files_skipped_binary_extension: 0,
+        files_skipped_too_large: 0,
+        files_unreadable: 0,
+        matches: Vec::new(),
+        compact_lines: Vec::new(),
+        file_line_counts: Vec::new(),
+        matches_truncated: false,
+        complete: false,
+        listing_error,
+    };
+    let wide = match crate::scan_universe::list_scan_universe(
+        root,
+        req.paths,
+        UNCOVERED_SCAN_LIST_CAP.saturating_add(1),
+        cfg,
+        origin,
+        req.refresh,
+        true,
+        true,
+    ) {
+        Ok(u) => u,
+        Err(e) => return empty(Some(e)),
+    };
+    let uncovered: Vec<&String> = wide
+        .files
+        .iter()
+        .filter(|p| !covered.contains(p.as_str()))
+        .filter(|p| admitted(p))
+        .filter(|p| !uncovered_path_is_out_of_scope(p, cfg))
+        .collect();
+    if uncovered.is_empty() {
+        return empty(None);
+    }
+    let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let budget_ms = req
+        .budget_ms
+        .unwrap_or(UNCOVERED_SCAN_BUDGET_MS)
+        .min(UNCOVERED_SCAN_BUDGET_MS)
+        .min(budget_ms);
+    let files_listed = uncovered.len();
+    let list_truncated = wide.files.len() > UNCOVERED_SCAN_LIST_CAP;
+    let match_cap = max_matches.min(UNCOVERED_SCAN_MATCH_CAP);
+    let mut result = UncoveredScanResult {
+        files_listed,
+        files_scanned: 0,
+        lines_scanned: 0,
+        files_with_matches: 0,
+        lines_with_matches: 0,
+        occurrence_count: 0,
+        files_skipped_binary_extension: 0,
+        files_skipped_too_large: 0,
+        files_unreadable: 0,
+        matches: Vec::new(),
+        compact_lines: Vec::new(),
+        file_line_counts: Vec::new(),
+        matches_truncated: false,
+        complete: wide.listing_complete && !list_truncated,
+        listing_error: None,
+    };
+    for path in uncovered.iter() {
+        if unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms) >= budget_ms {
+            result.complete = false;
+            break;
+        }
+        if has_binary_extension(path) {
+            result.files_skipped_binary_extension += 1;
+            continue;
+        }
+        let stat = host_stat(path);
+        let size = stat
+            .as_ref()
+            .and_then(|s| s.get("size").and_then(|v| v.as_u64()))
+            .unwrap_or(0);
+        if stat.is_some() && size > LITERAL_SCAN_MAX_FILE_BYTES {
+            result.files_skipped_too_large += 1;
+            continue;
+        }
+        if stat.is_some() && size == 0 {
+            result.files_scanned += 1;
+            continue;
+        }
+        let Some(content) = host_read(path) else {
+            result.files_unreadable += 1;
+            continue;
+        };
+        result.files_scanned += 1;
+        result.lines_scanned += content.lines().count();
+        let mut this_file_matched = false;
+        let mut this_file_lines = 0usize;
+        for (idx, raw_line) in content.split_inclusive('\n').enumerate() {
+            let line = raw_line.trim_end_matches(['\n', '\r']);
+            let found = matcher.find_all(line);
+            if found.is_empty() {
+                continue;
+            }
+            this_file_matched = true;
+            this_file_lines += 1;
+            result.lines_with_matches += 1;
+            result.occurrence_count += found.len();
+            if matches!(req.output, ScanOutput::Files | ScanOutput::Count) {
+                continue;
+            }
+            if req.output == ScanOutput::Compact {
+                if result.compact_lines.len() >= match_cap {
+                    result.matches_truncated = true;
+                    continue;
+                }
+                result
+                    .compact_lines
+                    .push(compact_match_line(path, idx + 1, line));
+                continue;
+            }
+            if result.matches.len() >= match_cap {
+                result.matches_truncated = true;
+                continue;
+            }
+            let (start, end) = found[0];
+            let text_truncated = line.len() > LITERAL_SCAN_MAX_LINE_BYTES;
+            let shown: String = if text_truncated {
+                line.chars().take(LITERAL_SCAN_MAX_LINE_BYTES).collect()
+            } else {
+                line.to_string()
+            };
+            let mut hit = serde_json::Map::new();
+            hit.insert("path".to_string(), json!(path));
+            hit.insert("line".to_string(), json!(idx + 1));
+            hit.insert("column".to_string(), json!(start + 1));
+            hit.insert(
+                "match".to_string(),
+                json!(line.get(start..end).unwrap_or(req.pattern)),
+            );
+            hit.insert("occurrence_count".to_string(), json!(found.len()));
+            hit.insert("text".to_string(), json!(shown.trim_end()));
+            if text_truncated {
+                hit.insert("text_truncated".to_string(), json!(true));
+            }
+            result.matches.push(Value::Object(hit));
+        }
+        if this_file_matched {
+            result.files_with_matches += 1;
+            result
+                .file_line_counts
+                .push((path.as_str().to_string(), this_file_lines));
+        }
+    }
+    result
+}
+
 pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
     if req.pattern.is_empty() {
         return json!({ "ok": false, "error": "pattern required -- an exhaustive scan needs something to match" });
@@ -5439,7 +5642,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let cache_bytes = cache.bytes;
     scan_cache_put(cache);
 
-    let listed_files_all_read_within_scope = !files_truncated
+    let mut listed_files_all_read_within_scope = !files_truncated
         && !(matches_truncated && !walk_every_file_in_scope)
         && !budget_exhausted
         && files_skipped_too_large_count == 0
@@ -5468,6 +5671,72 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         .iter()
         .filter(|e| e.rule == crate::scan_universe::OWN_STATE_RULE)
         .count();
+
+    // The universe above is what git -- or a gitignore-honouring walk -- handed over, so a
+    // gitignored subtree (a downloaded fixture, a vendored body, a build output) was never opened
+    // and a zero-match reply over such a scope would read as "absent" when it means "not
+    // searched". When the answer is empty, or partial without the listing itself having been cut,
+    // list the same scope with the ignore rules off and line-scan what the universe missed.
+    let indexed_files_scanned = files_scanned;
+    let mut uncovered_files_listed = 0usize;
+    let mut uncovered_files_scanned = 0usize;
+    let mut uncovered_files_matched = 0usize;
+    let mut uncovered_complete = false;
+    let mut uncovered_skipped_binary_extension = 0usize;
+    let mut uncovered_skipped_too_large = 0usize;
+    let mut uncovered_unreadable = 0usize;
+    let mut uncovered_listing_error: Option<String> = None;
+    if !req.comments_only
+        && !req.no_ignore
+        && (lines_with_matches == 0
+            || (!listed_files_all_read_within_scope
+                && universe.listing_complete
+                && !files_truncated
+                && !budget_exhausted))
+    {
+        let covered: std::collections::HashSet<&str> = listed.iter().map(String::as_str).collect();
+        let elapsed_ms = unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(started_ms);
+        let extra = scan_uncovered_files(
+            req,
+            root,
+            &cfg.index,
+            origin,
+            &covered,
+            &matcher,
+            &admitted,
+            max_matches,
+            budget_ms.saturating_sub(elapsed_ms),
+        );
+        uncovered_files_listed = extra.files_listed;
+        uncovered_files_scanned = extra.files_scanned;
+        uncovered_files_matched = extra.files_with_matches;
+        uncovered_skipped_binary_extension = extra.files_skipped_binary_extension;
+        uncovered_skipped_too_large = extra.files_skipped_too_large;
+        uncovered_unreadable = extra.files_unreadable;
+        uncovered_complete = extra.complete && !extra.matches_truncated;
+        uncovered_listing_error = extra.listing_error.clone();
+        files_scanned += extra.files_scanned;
+        lines_scanned += extra.lines_scanned;
+        files_with_matches += extra.files_with_matches;
+        lines_with_matches += extra.lines_with_matches;
+        occurrence_count += extra.occurrence_count;
+        file_line_counts.extend(extra.file_line_counts);
+        compact_lines.extend(extra.compact_lines);
+        let room = max_matches.saturating_sub(matches.len());
+        if extra.matches.len() > room {
+            matches_truncated = true;
+            matches.extend(extra.matches.into_iter().take(room));
+        } else {
+            matches.extend(extra.matches);
+        }
+        if extra.matches_truncated {
+            matches_truncated = true;
+        }
+        if extra.files_scanned > 0 {
+            listed_files_all_read_within_scope =
+                listed_files_all_read_within_scope && uncovered_complete;
+        }
+    }
 
     let match_count = match req.output {
         ScanOutput::Matches => matches.len(),
@@ -5741,6 +6010,46 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             out.insert("files_with_matches".to_string(), json!(files_with_matches));
             out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
         }
+    }
+    // So a zero can never be read as "not searched": name how many files the indexed cover read
+    // and how many the disk pass over its uncovered files added.
+    if uncovered_files_listed > 0 || uncovered_listing_error.is_some() {
+        out.insert(
+            "files_scanned_indexed".to_string(),
+            json!(indexed_files_scanned),
+        );
+        out.insert(
+            "files_scanned_uncovered".to_string(),
+            json!(uncovered_files_scanned),
+        );
+        let mut block = serde_json::Map::new();
+        block.insert("files_listed".to_string(), json!(uncovered_files_listed));
+        block.insert("files_scanned".to_string(), json!(uncovered_files_scanned));
+        block.insert(
+            "files_with_matches".to_string(),
+            json!(uncovered_files_matched),
+        );
+        if uncovered_skipped_binary_extension > 0 {
+            block.insert(
+                "files_skipped_binary_extension".to_string(),
+                json!(uncovered_skipped_binary_extension),
+            );
+        }
+        if uncovered_skipped_too_large > 0 {
+            block.insert(
+                "files_skipped_too_large".to_string(),
+                json!(uncovered_skipped_too_large),
+            );
+        }
+        if uncovered_unreadable > 0 {
+            block.insert("files_unreadable".to_string(), json!(uncovered_unreadable));
+        }
+        block.insert("complete".to_string(), json!(uncovered_complete));
+        if let Some(e) = &uncovered_listing_error {
+            block.insert("listing_error".to_string(), json!(e));
+        }
+        block.insert("note".to_string(), json!(UNCOVERED_SCAN_NOTE));
+        out.insert("uncovered_scan".to_string(), Value::Object(block));
     }
     out.insert("exhaustive".to_string(), json!(listed_files_all_read_within_scope));
     out.insert("lines_scanned".to_string(), json!(lines_scanned));
