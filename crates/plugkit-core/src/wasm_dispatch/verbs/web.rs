@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use super::{err, err_coded, err_json, ok, ERR_CODE_INVALID_ARGS};
 
-pub const FETCH_DEFAULT_MAX_CHARS: usize = 20_000;
+pub const FETCH_DEFAULT_MAX_CHARS: usize = 6_000;
 pub const FETCH_RAW_DEFAULT_MAX_CHARS: usize = 1_000_000;
 pub const FETCH_MAX_MAX_CHARS: usize = 4_000_000;
 pub const FETCH_DEFAULT_ANSWER_CHARS: usize = 4_000;
@@ -52,8 +52,9 @@ fetch {url, | query, prompt?, max_chars?, raw?, method?, headers?, body?, timeou
           passages of the converted page that best match the prompt, so it is compact and verbatim:
           gm has no outbound model dependency, and answer_mode is always \"extractive\". Pass no
           prompt, or raw:true, to get the page itself.
-  max_chars: cap on characters returned (default 20000, ceiling 4000000). One fetch can therefore
-             never dump a whole 280k-character page into the reply.
+  max_chars: cap on characters returned (default 6000, ceiling 4000000). One fetch can therefore
+             never dump a whole 280k-character page into the reply; the default is small enough to
+             read inline, and a clipped tail names how many characters were dropped.
   answer_max_chars: cap on the prompt answer (default 4000).
   raw: true (aliases full_response, fullResponse) returns the original body with no conversion and
        no prompt answering; its default max_chars is 1000000.
@@ -69,9 +70,11 @@ websearch {query, limit?, allowed_domains?, blocked_domains?, url?, engine?, max
   url: fetch this search engine results page instead of building one from query. Use it when the
        default endpoint answers with a challenge or consent page, or to point at another engine.
   engine: \"duckduckgo\" (the default). It reads https://html.duckduckgo.com/html/, which needs no
-       credential and no API key. Any other backend is reached by naming it in backend (or engine,
-       or GM_SEARCH_BACKEND) or by passing its results page as url; fetch {query} walks the whole
-       keyless list (duckduckgo, mojeek, bing, searxng, brave, marginalia) with fallback.
+       credential and no API key, and answers a challenge page to some clients, so one call walks
+       the keyless backends in order -- duckduckgo, mojeek, bing, searxng -- and stops at the first
+       that parses into hits, 4 at most. engine (aliases backend, search_backend) and the
+       GM_SEARCH_BACKEND variable pick one, or a comma-separated list of them, and an unknown name
+       is an error naming the known ones, never a no-op.
   limit: results returned, default 8, ceiling 25 (max_results, maxResults and k are aliases).
   allowed_domains / blocked_domains: arrays (or comma-separated strings) of host suffixes. A result
        is kept only when its host matches an allowed suffix, and dropped when it matches a blocked
@@ -209,30 +212,23 @@ pub fn websearch(body: &Value) -> u64 {
     if query.is_empty() && explicit_url.is_empty() {
         return err("websearch", "query required (or url naming a search engine results page)");
     }
-    let engine = match body.get("engine").and_then(|v| v.as_str()) {
-        Some(e) => e.trim().to_ascii_lowercase(),
-        None => WEBSEARCH_ENGINE_DUCKDUCKGO.to_string(),
-    };
     let using_explicit_url = !explicit_url.is_empty();
-    if !using_explicit_url && engine != WEBSEARCH_ENGINE_DUCKDUCKGO {
-        return err_coded(
-            "websearch",
-            ERR_CODE_INVALID_ARGS,
-            &format!(
-                "unknown engine {engine:?}; the built-in engine is {WEBSEARCH_ENGINE_DUCKDUCKGO}, and any other engine is reached by passing its results page as url"
-            ),
-        );
-    }
-    let endpoint = if using_explicit_url {
-        explicit_url.clone()
-    } else {
-        format!(
-            "https://html.duckduckgo.com/html/?q={}",
-            percent_encode(&query)
-        )
-    };
-    if let Err(reason) = validate_fetch_url(&endpoint) {
-        return err_coded("websearch", ERR_CODE_INVALID_ARGS, &reason);
+    for raw in backend_names(body) {
+        let name = raw.trim().to_ascii_lowercase();
+        if name.is_empty() || name.starts_with("http://") || name.starts_with("https://") {
+            continue;
+        }
+        if !SEARCH_BACKENDS.iter().any(|(known, _)| *known == name.as_str()) {
+            let known: Vec<&str> = SEARCH_BACKENDS.iter().map(|(n, _)| *n).collect();
+            return err_coded(
+                "websearch",
+                ERR_CODE_INVALID_ARGS,
+                &format!(
+                    "unknown engine {name:?}; the keyless backends are {}, and any other engine is reached by passing its results page as url or backend",
+                    known.join(", ")
+                ),
+            );
+        }
     }
     let timeout_ms = match timeout_ms_of(body, WEBSEARCH_DEFAULT_TIMEOUT_MS, "websearch") {
         Ok(n) => n,
@@ -273,22 +269,78 @@ pub fn websearch(body: &Value) -> u64 {
     if let Some(headers) = body.get("headers") {
         opts["headers"] = headers.clone();
     }
-    let v = host_fetch_value(&endpoint, &opts);
-    if v.is_null() {
-        return err("websearch", "host_fetch empty");
+    let candidates: Vec<(String, String)> = if using_explicit_url {
+        vec![("url".to_string(), explicit_url.clone())]
+    } else {
+        search_backends(body)
+            .into_iter()
+            .take(SEARCH_MAX_BACKENDS)
+            .collect()
+    };
+    let mut attempts: Vec<Value> = Vec::new();
+    let mut chosen = if using_explicit_url {
+        "url".to_string()
+    } else {
+        WEBSEARCH_ENGINE_DUCKDUCKGO.to_string()
+    };
+    let mut endpoint = String::new();
+    let mut html = String::new();
+    let mut status = Value::Null;
+    for (name, template) in &candidates {
+        let url = if using_explicit_url {
+            template.clone()
+        } else {
+            backend_url(template, &query)
+        };
+        if let Err(reason) = validate_fetch_url(&url) {
+            attempts.push(json!({ "backend": name, "error": reason }));
+            continue;
+        }
+        let v = host_fetch_value(&url, &opts);
+        let transport_ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+        let text = v.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string();
+        let seen_status = v.get("status").cloned().unwrap_or(Value::Null);
+        let hits = if transport_ok { parse_results(&text).len() } else { 0 };
+        attempts.push(json!({
+            "backend": name,
+            "url": url,
+            "status": seen_status.clone(),
+            "chars": text.chars().count(),
+            "hits": hits,
+            "transport_ok": transport_ok,
+        }));
+        if endpoint.is_empty() && transport_ok {
+            chosen = name.clone();
+            endpoint = url.clone();
+            html = text.clone();
+            status = seen_status;
+        }
+        if hits > 0 {
+            chosen = name.clone();
+            endpoint = url;
+            html = text;
+            status = seen_status;
+            break;
+        }
+        if raw_requested && transport_ok {
+            break;
+        }
     }
-    if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
-        return err_json("websearch", v);
+    if endpoint.is_empty() {
+        return err_json(
+            "websearch",
+            json!({ "error": "no search backend answered with a body", "query": query, "attempts": attempts }),
+        );
     }
-    let html = v.get("body").and_then(|b| b.as_str()).unwrap_or("");
 
     let mut data = json!({
         "ok": true,
         "query": query,
         "endpoint": endpoint,
-        "engine": if using_explicit_url { "url" } else { engine.as_str() },
-        "status": v.get("status").cloned().unwrap_or(Value::Null),
+        "engine": chosen,
+        "status": status,
         "body_chars": html.chars().count(),
+        "attempts": attempts,
     });
     if raw_requested {
         let (text, truncated) = clamp_chars(html, max_chars);
@@ -1501,10 +1553,35 @@ fn search_reply(
 }
 
 fn parse_backend_results(html: &str) -> Vec<SearchResult> {
+    if looks_like_challenge(html) {
+        return Vec::new();
+    }
     if html.to_ascii_lowercase().contains("result__a") {
         return parse_results(html);
     }
     parse_anchor_results(html)
+}
+
+fn looks_like_challenge(html: &str) -> bool {
+    if html.chars().count() > 20_000 {
+        return false;
+    }
+    let lower = html.to_ascii_lowercase();
+    [
+        "enable javascript",
+        "javascript is required",
+        "cf-browser-verification",
+        "checking your browser",
+        "just a moment",
+        "captcha",
+        "are you a robot",
+        "unusual traffic",
+        "verify you are human",
+        "attention required",
+        "access denied",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn parse_anchor_results(html: &str) -> Vec<SearchResult> {
