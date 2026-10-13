@@ -485,6 +485,37 @@ branch whose tracking ref its fetch refspec never creates; before, both answered
 `verification_failed` for a push that had landed. When the two URLs differ,
 `remote_before` and the `pushed_commits` delta read the push URL's branch too.
 
+`git_diff` and `git_show` accept `name_only` and `name_status` (the changed files
+as `files: [...]` and `count`, no diff text; `name_status` entries read `M path`
+or `R100 old new`) and `max_chars` (default 60000, clamped to 1000-1000000). Text
+past `max_chars` is cut at a character boundary: the reply carries
+`truncated: true`, `total_bytes` and a `spill_file` under `.gm/exec-spool/out`
+(`git_diff-*.txt`, `git_show-*.txt`, the newest 20 per verb kept) holding all of
+it, so a large commit is read by listing its files and diffing them with `paths`,
+or from the spill file. A file list longer than `max_chars` is cut at whole
+entries (`shown`, `count`, a spill file of every entry). `git_show` with a
+`<rev>:<path>` rev or `path` returns the whole blob the same way, plus
+`blob_bytes` when it spilled. The host captures at most 1 MiB from one git call;
+past that the verb answers `error_code: git_output_too_large` (`host_cap_bytes`,
+plus `blob_bytes` for a blob), never a half-read text that looks complete.
+`name_only`, `name_status` and `stat` exclude each other, and the two name modes
+exclude `path` and a `<rev>:<path>` rev.
+
+`git_branch {delete: "<name>"}` removes the local branch `refs/heads/<name>` after
+four checks: it exists (`no_such_local_branch`), it is not the current branch
+(`current_branch_refused`), no other worktree has it checked out
+(`branch_checked_out_elsewhere`) and its tip is reachable from HEAD or from a
+remote-tracking ref (`branch_tip_unreachable` with `unreachable_commits`
+otherwise), so no commit becomes unreachable. A remote-tracking ref and a branch on
+the remote are never touched, and `delete: "origin/main"` names the local branch of
+that name, which is how a stray local `origin/main` is removed. The reply carries
+`deleted`, `was` (the removed tip), `reachable_from_head` and
+`remote_tracking_containing`. `git_branch` (list) and `git_status` report
+`ambiguous_ref: true` with `ambiguous_refs {name: [refs/heads/<name>,
+refs/remotes/<name>]}` while such a shadowing local branch exists.
+`git_branch_delete` keeps its own `-d`/`-D` semantics and can delete a branch on the
+remote.
+
 `phase-status` answers the current `phase`, `last_skill`, `prd_pending_count`
 and `mutables_pending_count` (the same open-row counts `instruction` reports, a
 row held `blockedBy` external or out-of-reach not counted), `session_id`,
