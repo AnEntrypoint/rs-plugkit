@@ -2383,16 +2383,22 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 if aged_out && !deviation_refuses(kind) {
                     false
                 } else {
-                    let (reason, hint) = if aged_out {
-                        ("aged_out", "the ledger keeps only the most recent ledger_retained_entries dispatches of a project; this id is older than its oldest retained entry, so the dispatch ran but aged out of the window. Bind the witness instead: witness_exit_code 0, witness_output_sha256, witness_output_path and witness_ts do not depend on the ledger.")
+                    let searched = crate::dispatch_ledger::ledger_path(cwd);
+                    let holder = crate::dispatch_ledger::submodule_holding(cwd, dispatch_id);
+                    let (reason, hint): (&str, String) = if aged_out {
+                        ("aged_out", "the ledger keeps only the most recent ledger_retained_entries dispatches of a project; this id is older than its oldest retained entry, so the dispatch ran but aged out of the window. Bind the witness instead: witness_exit_code 0, witness_output_sha256, witness_output_path and witness_ts do not depend on the ledger.".to_string())
+                    } else if let Some(holder) = &holder {
+                        ("held_by_nested_project", format!("the dispatch is recorded in {holder}, the ledger of a nested project, not in the searched ledger {searched}. Re-run prd-resolve with that project's directory as cwd, or bind the witness with witness_exit_code, witness_output_sha256, witness_output_path and witness_ts."))
                     } else {
-                        ("not_recorded", "no dispatch with this id is in this project's .gm/exec-spool/.dispatch-ledger.json and the id is not older than the ledger's oldest entry, so the cwd may be another project or the id may be invented. Pass the dispatch_id copied from the response of the dispatch that produced the evidence, or bind the witness with witness_exit_code, witness_output_sha256, witness_output_path and witness_ts.")
+                        ("not_recorded", format!("no dispatch with this id is in the searched ledger {searched} and the id is not older than the ledger's oldest entry, so the cwd may be another project or the id may be invented. Pass the dispatch_id copied from the response of the dispatch that produced the evidence, or bind the witness with witness_exit_code, witness_output_sha256, witness_output_path and witness_ts."))
                     };
                     let body = serde_json::json!({
                         "error": format!(
-                            "prd-resolve refused: witness_dispatch_id {} is not in this project's dispatch ledger ({})",
-                            dispatch_id, reason
+                            "prd-resolve refused: witness_dispatch_id {} is not in the dispatch ledger {} ({})",
+                            dispatch_id, searched, reason
                         ),
+                        "ledger_searched": searched,
+                        "ledger_holding_dispatch": holder,
                         "deviation_kind": kind,
                         "deviation_severity": "deny",
                         "prd_id": id_target,
