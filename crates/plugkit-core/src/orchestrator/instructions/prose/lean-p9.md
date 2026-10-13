@@ -4,7 +4,7 @@ This is a concern of the method, not a stage of a pipeline: it is entered from w
 
 CONVERGENCE decides whether the sweep has reached its least fixed point. The sweep re-walks the whole artifact after the contract is recorded (G_DONE to G_SWEEP), and each sweep is checked for monotonic improvement, for regressions against earlier sweeps, for a variant that decreases, and for bounded retries. The node ends in exactly one of two lean terminals. G_FIXPOINT is reached when a sweep changed nothing. G_SURFACE is reached when the variant did not decrease, or when one condition fired twice with no new information, and the ambiguity then belongs to a person and is not swept again. The walk stops only at node COMPLETE with prd_pending of zero, reached through `transition to=COMPLETE`, and the final dispatch of the turn is `Skill(skill="gm-continue")`.
 
-Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each principle's book and attribution is the label in its H3 heading, taken from fsm/graph.json.
+Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each principle's book and attribution is the label in its H3 heading, taken from gm-config/fsm/graph.json.
 
 ## Verbs
 
@@ -100,7 +100,7 @@ The sweep's termination is not established by running it longer. It is establish
 
 ### LEHMAN - Lehman's Laws of Software Evolution - Meir Lehman
 
-Handover: none; fsm/graph.json has no forward edge from this node, only the backreference to G_START named in its prose; cite Lehman's Laws of Software Evolution - Meir Lehman.
+Handover: none; gm-config/fsm/graph.json has no forward edge from this node, only the backreference to G_START named in its prose; cite Lehman's Laws of Software Evolution - Meir Lehman.
 
 Nominated set: none (no forward edge). Backreferences: {G_START}. Incoming: HALTING (forward).
 
@@ -120,7 +120,7 @@ An optimization is admitted only by a measurement. `exec_js` with `profile:true`
 
 ### LOWERBOUND - Lower Bound Reached - information-theoretic argument
 
-Handover: none; fsm/graph.json has no forward edge from this node, only the backreference to G_FIXPOINT named in its prose; cite Lower Bound Reached - information-theoretic argument.
+Handover: none; gm-config/fsm/graph.json has no forward edge from this node, only the backreference to G_FIXPOINT named in its prose; cite Lower Bound Reached - information-theoretic argument.
 
 Nominated set: none (no forward edge). Backreferences: {G_FIXPOINT}. Incoming: KNUTHOPT (forward).
 

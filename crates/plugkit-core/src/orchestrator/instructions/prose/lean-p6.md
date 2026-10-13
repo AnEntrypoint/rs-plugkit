@@ -4,11 +4,11 @@ This is a concern of the method, not a stage of a pipeline: it is entered from w
 
 PRESSURE removes what the change did not need. It finds every superseded path, fallback, duplicate, dead function and unreachable entry point the change left behind, deletes each one only after callers, codesearch and a build check prove nothing still depends on it, and keeps the diff net-negative or records why it is not. The node exits when the deletion-completeness check and reachability analysis pass for every removed or superseded symbol, the diff budget holds, and transition to=RECORD is dispatched.
 
-Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each principle's attribution is the label used in fsm/graph.json, given in its heading below.
+Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each principle's attribution is the label used in gm-config/fsm/graph.json, given in its heading below.
 
 ## Verbs
 
-Enter from VERIFY through gate G_NET (predicate lean-net-negative), after the net-negative gate has passed; the walk then sits at state NODELETE, the node's first node in fsm/graph.json. Read the size with git_diff {"stat":true}, then each file's diff with git_diff {"path":"<file>"}, so every added line traces to a row. git_log {"path":"<file>","limit":20} shows the churn on each touched file.
+Enter from VERIFY through gate G_NET (predicate lean-net-negative), after the net-negative gate has passed; the walk then sits at state NODELETE, the node's first node in gm-config/fsm/graph.json. Read the size with git_diff {"stat":true}, then each file's diff with git_diff {"path":"<file>"}, so every added line traces to a row. git_log {"path":"<file>","limit":20} shows the churn on each touched file.
 
 For each symbol the change removed or left beside its replacement, prove removal with three checks: callers {"symbol":"<name>","limit":50} returns no edges; codesearch {"query":"<name>","mode":"literal","root":"<absolute project root>"} returns no hit outside history; codeinsight {"action":"orphans"} does not list it. For each removed file, codesearch {"query":"<file path>","mode":"filename","root":"<absolute project root>"} returns no hit.
 
