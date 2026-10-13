@@ -7,7 +7,7 @@ const MAX_ENTRIES: usize = 500;
 
 pub const RETAINED_ENTRIES: usize = MAX_ENTRIES;
 
-fn ledger_path(cwd: &str) -> String {
+pub fn ledger_path(cwd: &str) -> String {
     if cwd.is_empty() {
         ".gm/exec-spool/.dispatch-ledger.json".to_string()
     } else {
@@ -121,6 +121,21 @@ pub fn lookup(cwd: &str, dispatch_id: &str) -> Option<Value> {
     };
     list.into_iter()
         .find(|e| e.get("dispatch_id").and_then(|v| v.as_str()) == Some(dispatch_id))
+}
+
+pub fn submodule_holding(cwd: &str, dispatch_id: &str) -> Option<String> {
+    let root = cwd.trim_end_matches('/').trim_end_matches('\\');
+    let gitmodules = host_read(&format!("{}/.gitmodules", root)).unwrap_or_default();
+    gitmodules
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("path")
+                .and_then(|rest| rest.trim_start().strip_prefix('='))
+                .map(|path| format!("{}/{}", root, path.trim()))
+        })
+        .find(|sub_cwd| lookup(sub_cwd, dispatch_id).is_some())
+        .map(|sub_cwd| ledger_path(&sub_cwd))
 }
 
 pub fn window(cwd: &str) -> Option<(usize, u64)> {
