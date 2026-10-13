@@ -2155,7 +2155,25 @@ pub(super) fn staged_outside_requested(
         .collect()
 }
 
+pub(super) const GIT_COMMIT_ACCEPTED_FIELDS: &[&str] = &[
+    "message",
+    "amend",
+    "paths",
+    "files",
+    "add_all",
+    "allow_empty",
+    "allow_whole_index",
+    "allow_foreign_rows",
+    "allow_foreign_prd_rows",
+    "allow_dangling",
+    "author_name",
+    "author_email",
+];
+
 pub(super) fn git_amend(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_amend", body, GIT_COMMIT_ACCEPTED_FIELDS) {
+        return refusal;
+    }
     let mut amended = body.clone();
     if let Some(fields) = amended.as_object_mut() {
         fields.insert("amend".to_string(), json!(true));
@@ -2164,6 +2182,9 @@ pub(super) fn git_amend(body: &Value) -> u64 {
 }
 
 pub(super) fn git_commit(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_commit", body, GIT_COMMIT_ACCEPTED_FIELDS) {
+        return refusal;
+    }
     git_async_entry("git_commit", body, |body, plan| {
         let cwd = body_cwd(body);
         let message = body
@@ -2215,19 +2236,9 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             if head_probe.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) != 0 {
                 return Ok(err("git_commit", "amend requires an existing HEAD commit; this repository has no commits yet"));
             }
-            let published = git_call_argv(
-                &["for-each-ref", "--count=1", "--contains", "HEAD", "--format=%(refname)", "refs/remotes"],
-                cwd,
-            );
-            let remote_refs = published.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-            if !remote_refs.is_empty() {
-                return Ok(err_json(
-                    "git_commit",
-                    json!({
-                        "error": format!("HEAD is already reachable from a remote-tracking ref ({remote_refs}), so amending would rewrite published history; refused"),
-                        "error_code": "pushed_commit_refused",
-                    }),
-                ));
+            let published = published_refs_containing(cwd, "HEAD");
+            if !published.is_empty() {
+                return Ok(err_json("git_commit", pushed_commit_refusal("HEAD", &published)));
             }
         }
         let merge_probe = git_step_replayed_by_call_order(
@@ -2308,6 +2319,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             }
         }
         let head_before_probe = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+        let message_before_amend = if amend { commit_message_of(cwd, "HEAD") } else { String::new() };
         let dedup_key = git_commit_dedup_key(cwd, &head_before_probe, message, &paths, add_all, amend);
         if let Some(prior) = git_commit_dedup_lookup(&dedup_key, cwd) {
             let sha = prior
@@ -2513,6 +2525,10 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         if amend {
             payload["amended"] = json!(true);
             payload["replaced_sha_full"] = json!(head_before);
+            payload["old_sha"] = json!(head_before);
+            payload["new_sha"] = json!(head_after);
+            payload["message"] = json!(bundled_message);
+            payload["trailers_removed"] = json!(trailers_removed(cwd, &message_before_amend, &bundled_message));
         }
         if !force_added_ignored_paths.is_empty() {
             payload["force_added_ignored_paths"] = json!(force_added_ignored_paths);
@@ -6590,6 +6606,421 @@ pub(super) fn git_cherry_pick(body: &Value) -> u64 {
             "head_before": head_before,
             "head_after": head_after,
             "output": output
+        }),
+    )
+}
+
+pub(super) const GIT_REWORD_ACCEPTED_FIELDS: &[&str] = &["rev", "ref", "sha", "commit", "message"];
+
+pub(super) const REWRITE_IN_PROGRESS_MARKERS: &[&str] =
+    &["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD"];
+
+pub(super) const MISSING_COMMITTER_IDENTITY: &str = "git_reword needs a committer identity: set user.name and user.email in this repository or globally";
+
+pub(super) struct GitScratchFile {
+    pub(super) path: String,
+}
+
+impl GitScratchFile {
+    pub(super) fn write(tag: &str, content: &str) -> Option<Self> {
+        let stamp = unsafe { host_now_ms() };
+        let path = crate::pkfs::anchor(&format!(".gm/exec-spool/.git-scratch-{tag}-{stamp}"));
+        if !crate::pkfs::write(&path, content) {
+            return None;
+        }
+        Some(Self { path })
+    }
+}
+
+impl Drop for GitScratchFile {
+    fn drop(&mut self) {
+        let _ = crate::pkfs::remove_file(&self.path);
+    }
+}
+
+pub(super) fn message_trailers(cwd: Option<&str>, message: &str) -> Vec<String> {
+    let Some(scratch) = GitScratchFile::write("trailers", message) else {
+        return Vec::new();
+    };
+    let r = git_call_argv(&["interpret-trailers", "--parse", scratch.path.as_str()], cwd);
+    if git_exit_code(&r) != 0 {
+        return Vec::new();
+    }
+    r.get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+pub(super) fn trailers_removed(cwd: Option<&str>, before: &str, after: &str) -> Vec<String> {
+    let kept = message_trailers(cwd, after);
+    message_trailers(cwd, before)
+        .into_iter()
+        .filter(|trailer| !kept.contains(trailer))
+        .collect()
+}
+
+pub(super) fn commit_message_of(cwd: Option<&str>, rev: &str) -> String {
+    git_call_argv(&["log", "-1", "--format=%B", rev], cwd)
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+pub(super) fn published_refs_containing(cwd: Option<&str>, rev: &str) -> Vec<String> {
+    let mut refs = git_stdout_lines(
+        &["for-each-ref", "--contains", rev, "--format=%(refname)", "refs/remotes"],
+        cwd,
+    );
+    let upstream = git_call_argv(&["rev-parse", "--symbolic-full-name", "@{upstream}"], cwd);
+    if git_exit_code(&upstream) == 0 {
+        let name = upstream
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !name.is_empty() && !refs.contains(&name) && ref_is_ancestor(cwd, rev, &name) {
+            refs.push(name);
+        }
+    }
+    refs
+}
+
+pub(super) fn pushed_commit_refusal(rev: &str, published: &[String]) -> Value {
+    json!({
+        "error": format!("{rev} is already contained in {} ({}), so rewriting it would rewrite published history; refused", if published.len() == 1 { "a remote-tracking ref" } else { "remote-tracking refs" }, published.join(", ")),
+        "error_code": "pushed_commit_refused",
+        "rev": rev,
+        "published_refs": published,
+    })
+}
+
+pub(super) struct CommitObject {
+    pub(super) tree: String,
+    pub(super) parents: Vec<String>,
+    pub(super) author: String,
+    pub(super) committer: String,
+    pub(super) extra_headers: Vec<String>,
+    pub(super) message: String,
+}
+
+pub(super) fn read_commit_object(cwd: Option<&str>, sha: &str) -> Option<CommitObject> {
+    let r = git_call_argv(&["cat-file", "commit", sha], cwd);
+    if git_exit_code(&r) != 0 {
+        return None;
+    }
+    let raw = r.get("stdout").and_then(Value::as_str)?;
+    let (header_block, message) = raw.split_once("\n\n")?;
+    let mut headers: Vec<String> = Vec::new();
+    for line in header_block.split('\n') {
+        match (line.strip_prefix(' '), headers.last_mut()) {
+            (Some(continued), Some(previous)) => {
+                previous.push('\n');
+                previous.push(' ');
+                previous.push_str(continued);
+            }
+            _ => headers.push(line.to_string()),
+        }
+    }
+    let mut commit = CommitObject {
+        tree: String::new(),
+        parents: Vec::new(),
+        author: String::new(),
+        committer: String::new(),
+        extra_headers: Vec::new(),
+        message: message.to_string(),
+    };
+    for header in headers {
+        let (key, value) = header.split_once(' ').unwrap_or((header.as_str(), ""));
+        match key {
+            "tree" => commit.tree = value.to_string(),
+            "parent" => commit.parents.push(value.to_string()),
+            "author" => commit.author = value.to_string(),
+            "committer" => commit.committer = value.to_string(),
+            "gpgsig" | "gpgsig-sha256" => {}
+            _ => commit.extra_headers.push(header.clone()),
+        }
+    }
+    if commit.tree.is_empty() || commit.author.is_empty() {
+        return None;
+    }
+    Some(commit)
+}
+
+pub(super) fn commit_object_text(commit: &CommitObject) -> String {
+    let mut out = format!("tree {}\n", commit.tree);
+    for parent in &commit.parents {
+        out.push_str(&format!("parent {parent}\n"));
+    }
+    out.push_str(&format!("author {}\n", commit.author));
+    out.push_str(&format!("committer {}\n", commit.committer));
+    for header in &commit.extra_headers {
+        out.push_str(header);
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(&commit.message);
+    out
+}
+
+pub(super) fn write_commit_object(cwd: Option<&str>, commit: &CommitObject) -> Result<String, String> {
+    let Some(scratch) = GitScratchFile::write("commit", &commit_object_text(commit)) else {
+        return Err("could not write the commit object scratch file under .gm/exec-spool".to_string());
+    };
+    let r = git_call_argv(&["hash-object", "-t", "commit", "-w", scratch.path.as_str()], cwd);
+    if git_exit_code(&r) != 0 {
+        return Err(git_output_text(&r));
+    }
+    let sha = r
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if sha.len() < 40 {
+        return Err(format!("hash-object answered no object id: {}", git_output_text(&r)));
+    }
+    Ok(sha)
+}
+
+pub(super) fn committer_ident(cwd: Option<&str>) -> Result<String, String> {
+    let r = git_call_argv(&["var", "GIT_COMMITTER_IDENT"], cwd);
+    let ident = r
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if git_exit_code(&r) != 0 || ident.is_empty() {
+        return Err(MISSING_COMMITTER_IDENTITY.to_string());
+    }
+    Ok(ident)
+}
+
+pub(super) fn tree_of(cwd: Option<&str>, rev: &str) -> Option<String> {
+    let peeled = format!("{rev}^{{tree}}");
+    let r = git_call_argv(&["rev-parse", "--verify", "--quiet", peeled.as_str()], cwd);
+    if git_exit_code(&r) != 0 {
+        return None;
+    }
+    let sha = r
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
+}
+
+pub(super) fn rewrite_in_progress(cwd: Option<&str>) -> Option<&'static str> {
+    REWRITE_IN_PROGRESS_MARKERS.iter().copied().find(|marker| {
+        git_exit_code(&git_call_argv(&["rev-parse", "--verify", "--quiet", marker], cwd)) == 0
+    })
+}
+
+pub(super) fn normalized_commit_message(message: &str) -> String {
+    let mut out = String::new();
+    for line in message.trim().lines() {
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+pub(super) fn short_sha(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
+}
+
+pub(super) fn git_reword(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_reword", body, GIT_REWORD_ACCEPTED_FIELDS) {
+        return refusal;
+    }
+    let cwd = body_cwd(body);
+    let message = body
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if message.is_empty() {
+        return err("git_reword", "message required");
+    }
+    let refspec = ["rev", "ref", "sha", "commit"]
+        .iter()
+        .find_map(|k| body.get(*k).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("HEAD");
+    let Some(target) = resolve_commit(cwd, refspec) else {
+        return err_json(
+            "git_reword",
+            json!({
+                "error": format!("rev {refspec} does not resolve to a commit in this repository"),
+                "error_code": "git_reword_rev_unresolved",
+                "rev": refspec,
+            }),
+        );
+    };
+    let Some(old_head) = resolve_commit(cwd, "HEAD") else {
+        return err("git_reword", "HEAD does not resolve to a commit; nothing to reword");
+    };
+    if !ref_is_ancestor(cwd, &target, &old_head) {
+        return err_json(
+            "git_reword",
+            json!({
+                "error": format!("{target} is not reachable from HEAD ({old_head}); git_reword rewrites the current branch only"),
+                "error_code": "rev_not_reachable_from_head",
+                "rev": target,
+                "head": old_head,
+            }),
+        );
+    }
+    if let Some(marker) = rewrite_in_progress(cwd) {
+        return err_json(
+            "git_reword",
+            json!({
+                "error": format!("{marker} exists, so a merge, cherry-pick, revert or rebase is in progress; finish or abort it before rewording"),
+                "error_code": "operation_in_progress",
+                "marker": marker,
+            }),
+        );
+    }
+    let published = published_refs_containing(cwd, &target);
+    if !published.is_empty() {
+        return err_json("git_reword", pushed_commit_refusal(&target, &published));
+    }
+    let committer = match committer_ident(cwd) {
+        Ok(ident) => ident,
+        Err(reason) => return err("git_reword", &reason),
+    };
+    let Some(mut target_commit) = read_commit_object(cwd, &target) else {
+        return err("git_reword", &format!("could not read commit object {target}"));
+    };
+    let old_message = target_commit.message.clone();
+    let new_message = normalized_commit_message(message);
+    target_commit.message = new_message.clone();
+    target_commit.committer = committer.clone();
+    let new_target = match write_commit_object(cwd, &target_commit) {
+        Ok(sha) => sha,
+        Err(reason) => {
+            return err("git_reword", &format!("could not write the reworded commit: {reason}; no ref was moved"))
+        }
+    };
+    let mut rewritten: Vec<(String, String)> = vec![(target.clone(), new_target.clone())];
+    let range = format!("{target}..{old_head}");
+    for sha in git_stdout_lines(&["rev-list", "--reverse", "--topo-order", range.as_str()], cwd) {
+        let Some(mut descendant) = read_commit_object(cwd, &sha) else {
+            return err("git_reword", &format!("could not read commit object {sha}; no ref was moved"));
+        };
+        let mapped: Vec<String> = descendant
+            .parents
+            .iter()
+            .map(|parent| {
+                rewritten
+                    .iter()
+                    .find(|(old, _)| old == parent)
+                    .map(|(_, new)| new.clone())
+                    .unwrap_or_else(|| parent.clone())
+            })
+            .collect();
+        if mapped == descendant.parents {
+            continue;
+        }
+        descendant.parents = mapped;
+        descendant.committer = committer.clone();
+        match write_commit_object(cwd, &descendant) {
+            Ok(new_sha) => rewritten.push((sha, new_sha)),
+            Err(reason) => {
+                return err("git_reword", &format!("could not rewrite descendant {sha}: {reason}; no ref was moved"))
+            }
+        }
+    }
+    let Some(new_head) = rewritten
+        .iter()
+        .find(|(old, _)| *old == old_head)
+        .map(|(_, new)| new.clone())
+    else {
+        return err("git_reword", "HEAD was not rewritten although rev is its ancestor; no ref was moved");
+    };
+    for (old, new) in &rewritten {
+        let before = tree_of(cwd, old);
+        let after = tree_of(cwd, new);
+        if before.is_none() || before != after {
+            return err_json(
+                "git_reword",
+                json!({
+                    "error": format!("tree of {new} differs from tree of {old}; no ref was moved"),
+                    "error_code": "tree_mismatch",
+                    "old": old,
+                    "new": new,
+                    "old_tree": before,
+                    "new_tree": after,
+                }),
+            );
+        }
+    }
+    let symref = git_call_argv(&["symbolic-ref", "--quiet", "HEAD"], cwd);
+    let branch = if git_exit_code(&symref) == 0 {
+        symref
+            .get("stdout")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(String::from)
+    } else {
+        None
+    };
+    let reflog = format!("git_reword: {} -> {}", short_sha(&target), short_sha(&new_target));
+    let update = git_call_argv(
+        &["update-ref", "-m", reflog.as_str(), "HEAD", new_head.as_str(), old_head.as_str()],
+        cwd,
+    );
+    if git_exit_code(&update) != 0 {
+        return err_json(
+            "git_reword",
+            json!({
+                "error": format!("HEAD could not be moved from {old_head} to {new_head}: {}", git_output_text(&update).trim()),
+                "error_code": "ref_update_failed",
+                "hint": "HEAD moved while the commits were being rewritten; re-dispatch git_reword against the current HEAD",
+            }),
+        );
+    }
+    let _ = git_call_argv(&["update-ref", "ORIG_HEAD", old_head.as_str()], cwd);
+    let head_now = resolve_commit(cwd, "HEAD").unwrap_or_default();
+    if head_now != new_head {
+        return err("git_reword", &format!("update-ref reported success but HEAD is {head_now}, not {new_head}"));
+    }
+    let pairs: Vec<Value> = rewritten
+        .iter()
+        .map(|(old, new)| json!({ "old": old, "new": new }))
+        .collect();
+    emit_event(
+        "git_reword",
+        json!({ "sub": "git", "old_sha": target, "new_sha": new_target, "old_head": old_head, "new_head": new_head }),
+    );
+    ok(
+        "git_reword",
+        json!({
+            "old_sha": target,
+            "new_sha": new_target,
+            "message": new_message.trim_end(),
+            "trailers_removed": trailers_removed(cwd, &old_message, &new_message),
+            "old_head": old_head,
+            "new_head": new_head,
+            "branch": branch,
+            "rewritten": pairs,
+            "descendants_rewritten": rewritten.len() - 1,
+            "trees_verified": rewritten.len(),
+            "orig_head": old_head,
         }),
     )
 }

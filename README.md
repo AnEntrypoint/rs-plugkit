@@ -260,7 +260,7 @@ git-tracked source and a bounded `node_modules` walk), `kv`/`kv_get`/
 `kv_put`/`kv_delete`, `exec`/`exec_js`, `fetch`, `env_get`, `recall`,
 `codesearch`, `codeinsight` (symbol, call, import, complexity and duplicate queries; `callers`/`callees`/`impact` are aliases), `memorize`/`memorize-prune`, `health`, `filter`, the full git
 verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git_remote`, `git_add`,
-`git_commit`, `git_amend`, `git_finalize`, `git_push`, `git_checkout`, `git_merge`, `git_cherry_pick`, `git_fetch`,
+`git_commit`, `git_amend`, `git_reword`, `git_finalize`, `git_push`, `git_checkout`, `git_merge`, `git_cherry_pick`, `git_fetch`,
 `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`,
 `git_worktree`, `git_worktree_add`, `git_worktree_list`, `git_worktree_remove`, `git_worktree_prune`,
 `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
@@ -394,10 +394,37 @@ committing the rest of the index.
 
 `git_commit {amend:true}` and the `git_amend` alias rewrite HEAD (`git commit
 --amend`) with the same body fields; they refuse `pushed_commit_refused` when
-HEAD is reachable from a `refs/remotes/` ref and `amend requires an existing HEAD
-commit` on an unborn branch. A `paths` value that is not an array of strings is
-refused, never silently narrowed. `nothing_to_commit` answers echo
-`requested_paths`.
+HEAD is reachable from a `refs/remotes/` ref or from `@{upstream}`, and `amend
+requires an existing HEAD commit` on an unborn branch. With `paths` only those
+pathspecs are folded into HEAD; with no paths and a clean tree the message alone
+is replaced. An amend answers `old_sha`, `new_sha`, `message` and
+`trailers_removed` next to `committed`/`sha`/`amended`. A `paths` value that is
+not an array of strings is refused, never silently narrowed. `nothing_to_commit`
+answers echo `requested_paths`. `git_commit` and `git_amend` refuse any body
+field outside `message`, `amend`, `paths`/`files`, `add_all`, `allow_empty`,
+`allow_whole_index`, `allow_foreign_rows`/`allow_foreign_prd_rows`,
+`allow_dangling`, `author_name` and `author_email`, naming `unknown_fields` and
+`accepted_fields` the way `git_log`, `git_diff` and `git_show` do.
+
+`git_reword {rev?, message}` replaces the message of one commit (`rev` defaults
+to `HEAD`; `ref`, `sha` and `commit` are aliases) and rebuilds every descendant
+up to HEAD with its original tree, parents and author, through `git cat-file`
+and `git hash-object -t commit -w`, so the index and the working tree are never
+touched and a dirty checkout is no obstacle. HEAD moves only after every
+rewritten commit's tree hash was read back equal to the original
+(`error_code: tree_mismatch` otherwise, with no ref moved), through
+`git update-ref HEAD <new> <old>`, so a HEAD that moved meanwhile answers
+`ref_update_failed`; `ORIG_HEAD` keeps the previous HEAD. It refuses
+`pushed_commit_refused` when any `refs/remotes/` ref or `@{upstream}` already
+contains `rev` (pushed history is never rewritten; a later push is an ordinary
+fast-forward), `rev_not_reachable_from_head` when `rev` is not on the current
+branch, and `operation_in_progress` while `MERGE_HEAD`, `CHERRY_PICK_HEAD`,
+`REVERT_HEAD` or `REBASE_HEAD` exists. The receipt is `{old_sha, new_sha,
+message, trailers_removed, old_head, new_head, branch, rewritten: [{old, new}],
+descendants_rewritten, trees_verified, orig_head}`; `trailers_removed` lists the
+trailer lines (`git interpret-trailers --parse`) of the old message that the new
+message no longer carries. Signatures (`gpgsig`) are dropped from rewritten
+commits, as `git rebase` drops them.
 
 `git_commit` and `git_finalize` refuse before staging anything when the commit
 would reference a file that exists on disk, is untracked, is not gitignored
