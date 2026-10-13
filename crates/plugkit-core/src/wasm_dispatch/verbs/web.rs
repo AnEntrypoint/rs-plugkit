@@ -300,7 +300,11 @@ pub fn websearch(body: &Value) -> u64 {
         let transport_ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
         let text = v.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string();
         let seen_status = v.get("status").cloned().unwrap_or(Value::Null);
-        let hits = if transport_ok { parse_results(&text).len() } else { 0 };
+        let hits = if transport_ok {
+            parse_backend_results(&text).len()
+        } else {
+            0
+        };
         attempts.push(json!({
             "backend": name,
             "url": url,
@@ -313,7 +317,7 @@ pub fn websearch(body: &Value) -> u64 {
             chosen = name.clone();
             endpoint = url.clone();
             html = text.clone();
-            status = seen_status;
+            status = seen_status.clone();
         }
         if hits > 0 {
             chosen = name.clone();
@@ -343,13 +347,13 @@ pub fn websearch(body: &Value) -> u64 {
         "attempts": attempts,
     });
     if raw_requested {
-        let (text, truncated) = clamp_chars(html, max_chars);
+        let (text, truncated) = clamp_chars(&html, max_chars);
         data["body"] = json!(text);
         data["truncated"] = json!(truncated);
         return ok("websearch", data);
     }
 
-    let mut results = parse_results(html);
+    let mut results = parse_backend_results(&html);
     let allowed = string_list(body, &["allowed_domains", "allowedDomains"]);
     let blocked = string_list(body, &["blocked_domains", "blockedDomains"]);
     if !allowed.is_empty() {
