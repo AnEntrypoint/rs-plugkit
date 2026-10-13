@@ -23,7 +23,7 @@ pub const SEARCH_ENV_BACKEND: &str = "GM_SEARCH_BACKEND";
 pub const SEARCH_BACKENDS: &[(&str, &str)] = &[
     ("duckduckgo", "https://html.duckduckgo.com/html/?q={q}"),
     ("mojeek", "https://www.mojeek.com/search?q={q}"),
-    ("bing", "https://www.bing.com/search?q={q}&setlang=en"),
+    ("bing", "https://www.bing.com/search?q={q}&format=rss&count=20&setlang=en"),
     ("searxng", "https://searx.be/search?q={q}"),
     ("brave", "https://search.brave.com/search?q={q}"),
     ("marginalia", "https://search.marginalia.nu/search?query={q}"),
@@ -1631,6 +1631,9 @@ fn parse_backend_results(html: &str, base: &str) -> Vec<SearchResult> {
     if looks_like_challenge(html) {
         return Vec::new();
     }
+    if looks_like_rss(html) {
+        return parse_rss_results(html);
+    }
     if html.to_ascii_lowercase().contains("result__a") {
         return parse_results(html);
     }
@@ -1639,6 +1642,68 @@ fn parse_backend_results(html: &str, base: &str) -> Vec<SearchResult> {
         return scanned.0;
     }
     scan_anchors(html, base).0
+}
+
+fn looks_like_rss(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("<rss") || lower.contains("<channel") || lower.contains("<item>")
+}
+
+fn parse_rss_results(text: &str) -> Vec<SearchResult> {
+    let lower = text.to_ascii_lowercase();
+    let mut out: Vec<SearchResult> = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = lower[from..].find("<item") {
+        let at = from + rel;
+        let end = match lower[at..].find("</item>") {
+            Some(r) => at + r,
+            None => break,
+        };
+        let block = &text[at..end];
+        from = end + 7;
+        let url = xml_tag_text(block, "link");
+        let title = xml_tag_text(block, "title");
+        let snippet = xml_tag_text(block, "description");
+        let host = host_of(&url);
+        if !url.starts_with("http")
+            || title.chars().count() < 3
+            || host.is_empty()
+            || is_engine_host(&host)
+        {
+            continue;
+        }
+        out.push(SearchResult {
+            title,
+            url,
+            host,
+            snippet,
+        });
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    out
+}
+
+fn xml_tag_text(block: &str, tag: &str) -> String {
+    let lower = block.to_ascii_lowercase();
+    let open = format!("<{tag}");
+    let Some(rel) = lower.find(&open) else {
+        return String::new();
+    };
+    let gt = match lower[rel..].find('>') {
+        Some(g) => rel + g,
+        None => return String::new(),
+    };
+    let close = format!("</{tag}>");
+    let end = match lower[gt..].find(&close) {
+        Some(e) => gt + e,
+        None => return String::new(),
+    };
+    let raw = block[gt + 1..end]
+        .replace("<![CDATA[", "")
+        .replace("]]>", "");
+    collapse_spaces(&decode_entities(&raw))
 }
 
 fn parse_backend_diagnostics(html: &str, base: &str) -> Vec<Value> {
