@@ -426,6 +426,64 @@ trailer lines (`git interpret-trailers --parse`) of the old message that the new
 message no longer carries. Signatures (`gpgsig`) are dropped from rewritten
 commits, as `git rebase` drops them.
 
+`git_log {limit?, range|ref|rev?, path|paths|files?, body?, grep?, author?,
+trailers?, case_insensitive?, oneline?}` answers `{commits, count, truncated?}`
+(`oneline:true` makes each commit the string `<sha> <YYYY-MM-DD> <author>
+<subject>`, a fraction of the bytes, and cannot carry `body` or `trailers`). `body:true`
+(alias `include_body`) adds each commit's message body; `grep` (a string or an
+array, any match keeps the commit) and `author` are extended regular expressions
+(`git log --extended-regexp --grep --author`), made case-blind by
+`case_insensitive:true`; `trailers:true` adds each commit's trailers as
+`{Key: value}` (an array when a key repeats), read by git itself with
+`%(trailers:only=true,unfold=true)` from the final paragraph of the message, so a
+`Co-Authored-By` line above the last paragraph is found with `grep`, not
+`trailers`. `count` is always present, so a filter that matches nothing answers
+`count: 0` rather than a missing list, and `truncated:true` means more commits
+matched than `limit` (the verb asks git for one extra). Any other field is
+refused with `unknown_fields` and `accepted_fields`; `{help:true}` prints the
+field list. Records end with U+001E and fields split on U+001F, so a body can
+hold any text.
+
+A remote-tracking ref is never spelled `origin/<branch>` inside the git verbs:
+git resolves a bare `origin/main` to a local branch of that name before it looks
+at `refs/remotes/origin/main`, so one stray local `origin/main` turns every
+ahead/behind count and every push verification into an answer about the wrong
+commit. `remote_tracking_ref` returns `refs/remotes/origin/<branch>` for
+`git_push` (its landing check and its pull and re-land recovery), `git_finalize`
+and `branch_status`. A revision the
+caller types (`range`, `ref`, `rev` of `git_log`, `git_diff`, `git_show`,
+`git_merge`) goes through `disambiguated_revision`: when a bare name matches more
+than one of `refs/heads/`, `refs/tags/` and `refs/remotes/`, a name that also
+matches `refs/remotes/<name>` is rewritten to that ref, and the receipt carries
+`ambiguous_ref: true`, `ambiguous_refs: {name: [every matching full ref]}` and,
+for `git_log`, `revision_resolved`. `git_push`, `git_finalize` and
+`branch_status` report the same two fields when `refs/heads/origin/<branch>`
+exists beside the remote-tracking ref.
+
+Attribution policy. `git_commit`, `git_amend`, `git_finalize`, `git_merge` and
+`git_reword` screen their message through `wasm_dispatch/attribution.rs` before
+git sees it. The policy file is `.gm/attribution.json` in the project (the git
+toplevel of the dispatch), else `~/.gm/attribution.json`; no file means off.
+`{"mode": "off"|"strip"|"refuse", "author": {"name", "email"}}`: `strip` removes
+every line that starts with `Co-Authored-By:` and names Claude or Anthropic and
+every line holding `generated with` and `claude` (case-insensitive), collapses
+the blank lines that removal leaves, and lists the removed lines in the receipt
+as `attribution_stripped`; `refuse` answers `error_code: attribution_refused`
+with `attribution_lines` and commits nothing; `author` is the commit identity
+(`user.name`, `user.email`) when the body names no `author_name`/`author_email`,
+and the committer of a reword. A policy file that cannot be read (bad JSON, an
+unknown key, an unknown mode) answers `attribution_policy_invalid` and commits
+nothing, so enforcement is never silently off; a message that holds only
+attribution lines is refused. PRD resolution notes bundled into a commit message
+are screened too.
+
+`phase-status` answers the current `phase`, `last_skill`, `prd_pending_count`
+and `mutables_pending_count` (the same open-row counts `instruction` reports, a
+row held `blockedBy` external or out-of-reach not counted), `session_id`,
+`session_mismatch`, `session_owner_before_this_dispatch`, `updated_at_ms`, the
+newest five `phase_history` entries and `phase_history_total`, the number
+recorded in `turn-state.json`.
+
 `git_commit` and `git_finalize` refuse before staging anything when the commit
 would reference a file that exists on disk, is untracked, is not gitignored
 and is not part of this commit (`error_code: dangling_reference`, one
