@@ -260,7 +260,7 @@ git-tracked source and a bounded `node_modules` walk), `kv`/`kv_get`/
 `kv_put`/`kv_delete`, `exec`/`exec_js`, `fetch`, `env_get`, `recall`,
 `codesearch`, `codeinsight` (symbol, call, import, complexity and duplicate queries; `callers`/`callees`/`impact` are aliases), `memorize`/`memorize-prune`, `health`, `filter`, the full git
 verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git_remote`, `git_add`,
-`git_commit`, `git_amend`, `git_finalize`, `git_push`, `git_checkout`, `git_merge`, `git_cherry_pick`, `git_fetch`,
+`git_commit`, `git_amend`, `git_reword`, `git_finalize`, `git_push`, `git_checkout`, `git_merge`, `git_cherry_pick`, `git_fetch`,
 `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`,
 `git_worktree`, `git_worktree_add`, `git_worktree_list`, `git_worktree_remove`, `git_worktree_prune`,
 `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
@@ -394,10 +394,139 @@ committing the rest of the index.
 
 `git_commit {amend:true}` and the `git_amend` alias rewrite HEAD (`git commit
 --amend`) with the same body fields; they refuse `pushed_commit_refused` when
-HEAD is reachable from a `refs/remotes/` ref and `amend requires an existing HEAD
-commit` on an unborn branch. A `paths` value that is not an array of strings is
-refused, never silently narrowed. `nothing_to_commit` answers echo
-`requested_paths`.
+HEAD is reachable from a `refs/remotes/` ref or from `@{upstream}`, and `amend
+requires an existing HEAD commit` on an unborn branch. With `paths` only those
+pathspecs are folded into HEAD; with no paths and a clean tree the message alone
+is replaced. An amend answers `old_sha`, `new_sha`, `message` and
+`trailers_removed` next to `committed`/`sha`/`amended`. A `paths` value that is
+not an array of strings is refused, never silently narrowed. `nothing_to_commit`
+answers echo `requested_paths`. `git_commit` and `git_amend` refuse any body
+field outside `message`, `amend`, `paths`/`files`, `add_all`, `allow_empty`,
+`allow_whole_index`, `allow_foreign_rows`/`allow_foreign_prd_rows`,
+`allow_dangling`, `author_name` and `author_email`, naming `unknown_fields` and
+`accepted_fields` the way `git_log`, `git_diff` and `git_show` do.
+
+`git_reword {rev?, message}` replaces the message of one commit (`rev` defaults
+to `HEAD`; `ref`, `sha` and `commit` are aliases) and rebuilds every descendant
+up to HEAD with its original tree, parents and author, through `git cat-file`
+and `git hash-object -t commit -w`, so the index and the working tree are never
+touched and a dirty checkout is no obstacle. HEAD moves only after every
+rewritten commit's tree hash was read back equal to the original
+(`error_code: tree_mismatch` otherwise, with no ref moved), through
+`git update-ref HEAD <new> <old>`, so a HEAD that moved meanwhile answers
+`ref_update_failed`; `ORIG_HEAD` keeps the previous HEAD. It refuses
+`pushed_commit_refused` when any `refs/remotes/` ref or `@{upstream}` already
+contains `rev` (pushed history is never rewritten; a later push is an ordinary
+fast-forward), `rev_not_reachable_from_head` when `rev` is not on the current
+branch, and `operation_in_progress` while `MERGE_HEAD`, `CHERRY_PICK_HEAD`,
+`REVERT_HEAD` or `REBASE_HEAD` exists. The receipt is `{old_sha, new_sha,
+message, trailers_removed, old_head, new_head, branch, rewritten: [{old, new}],
+descendants_rewritten, trees_verified, orig_head}`; `trailers_removed` lists the
+trailer lines (`git interpret-trailers --parse`) of the old message that the new
+message no longer carries. Signatures (`gpgsig`) are dropped from rewritten
+commits, as `git rebase` drops them.
+
+`git_log {limit?, range|ref|rev?, path|paths|files?, body?, grep?, author?,
+trailers?, case_insensitive?, oneline?}` answers `{commits, count, truncated?}`
+(`oneline:true` makes each commit the string `<sha> <YYYY-MM-DD> <author>
+<subject>`, a fraction of the bytes, and cannot carry `body` or `trailers`). `body:true`
+(alias `include_body`) adds each commit's message body; `grep` (a string or an
+array, any match keeps the commit) and `author` are extended regular expressions
+(`git log --extended-regexp --grep --author`), made case-blind by
+`case_insensitive:true`; `trailers:true` adds each commit's trailers as
+`{Key: value}` (an array when a key repeats), read by git itself with
+`%(trailers:only=true,unfold=true)` from the final paragraph of the message, so a
+`Co-Authored-By` line above the last paragraph is found with `grep`, not
+`trailers`. `count` is always present, so a filter that matches nothing answers
+`count: 0` rather than a missing list, and `truncated:true` means more commits
+matched than `limit` (the verb asks git for one extra). Any other field is
+refused with `unknown_fields` and `accepted_fields`; `{help:true}` prints the
+field list. Records end with U+001E and fields split on U+001F, so a body can
+hold any text.
+
+A remote-tracking ref is never spelled `origin/<branch>` inside the git verbs:
+git resolves a bare `origin/main` to a local branch of that name before it looks
+at `refs/remotes/origin/main`, so one stray local `origin/main` turns every
+ahead/behind count and every push verification into an answer about the wrong
+commit. `remote_tracking_ref` returns `refs/remotes/origin/<branch>` for
+`git_push` (its landing check and its pull and re-land recovery), `git_finalize`
+and `branch_status`. A revision the
+caller types (`range`, `ref`, `rev` of `git_log`, `git_diff`, `git_show`,
+`git_merge`) goes through `disambiguated_revision`: when a bare name matches more
+than one of `refs/heads/`, `refs/tags/` and `refs/remotes/`, a name that also
+matches `refs/remotes/<name>` is rewritten to that ref, and the receipt carries
+`ambiguous_ref: true`, `ambiguous_refs: {name: [every matching full ref]}` and,
+for `git_log`, `revision_resolved`. `git_push`, `git_finalize` and
+`branch_status` report the same two fields when `refs/heads/origin/<branch>`
+exists beside the remote-tracking ref.
+
+Attribution policy. `git_commit`, `git_amend`, `git_finalize`, `git_merge` and
+`git_reword` screen their message through `wasm_dispatch/attribution.rs` before
+git sees it. The policy file is `.gm/attribution.json` in the project (the git
+toplevel of the dispatch), else `~/.gm/attribution.json`; no file means off.
+`{"mode": "off"|"strip"|"refuse", "author": {"name", "email"}}`: `strip` removes
+every line that starts with `Co-Authored-By:` and names Claude or Anthropic and
+every line holding `generated with` and `claude` (case-insensitive), collapses
+the blank lines that removal leaves, and lists the removed lines in the receipt
+as `attribution_stripped`; `refuse` answers `error_code: attribution_refused`
+with `attribution_lines` and commits nothing; `author` is the commit identity
+(`user.name`, `user.email`) when the body names no `author_name`/`author_email`,
+and the committer of a reword. A policy file that cannot be read (bad JSON, an
+unknown key, an unknown mode) answers `attribution_policy_invalid` and commits
+nothing, so enforcement is never silently off; a message that holds only
+attribution lines is refused. PRD resolution notes bundled into a commit message
+are screened too.
+
+`git_push` checks that the push landed against the commit it pushed: the
+remote-tracking ref when it equals that commit, else `git ls-remote` on the push
+URL (`pushurl` when set). A fork workflow with a split fetch and push URL
+therefore verifies where it pushed, and a single-branch clone verifies a feature
+branch whose tracking ref its fetch refspec never creates; before, both answered
+`verification_failed` for a push that had landed. When the two URLs differ,
+`remote_before` and the `pushed_commits` delta read the push URL's branch too.
+
+`git_diff` and `git_show` accept `name_only` and `name_status` (the changed files
+as `files: [...]` and `count`, no diff text; `name_status` entries read `M path`
+or `R100 old new`) and `max_chars` (default 60000, clamped to 1000-1000000). Text
+past `max_chars` is cut at a character boundary: the reply carries
+`truncated: true`, `total_bytes` and a `spill_file` under `.gm/exec-spool/out`
+(`git_diff-*.txt`, `git_show-*.txt`, the newest 20 per verb kept) holding all of
+it, so a large commit is read by listing its files and diffing them with `paths`,
+or from the spill file. A file list longer than `max_chars` is cut at whole
+entries (`shown`, `count`, a spill file of every entry). `git_show` with a
+`<rev>:<path>` rev or `path` returns the whole blob the same way, plus
+`blob_bytes` when it spilled. The host captures at most 1 MiB from one git call;
+past that the verb answers `error_code: git_output_too_large` (`host_cap_bytes`,
+plus `blob_bytes` for a blob), never a half-read text that looks complete.
+`name_only`, `name_status` and `stat` exclude each other, and the two name modes
+exclude `path` and a `<rev>:<path>` rev.
+
+`git_branch {delete: "<name>"}` removes the local branch `refs/heads/<name>` after
+four checks: it exists (`no_such_local_branch`), it is not the current branch
+(`current_branch_refused`), no other worktree has it checked out
+(`branch_checked_out_elsewhere`) and its tip is reachable from HEAD or from a
+remote-tracking ref (`branch_tip_unreachable` with `unreachable_commits`
+otherwise), so no commit becomes unreachable. A remote-tracking ref and a branch on
+the remote are never touched, and `delete: "origin/main"` names the local branch of
+that name, which is how a stray local `origin/main` is removed. The reply carries
+`deleted`, `was` (the removed tip), `reachable_from_head` and
+`remote_tracking_containing`; `dry_run: true` runs every check and answers
+`would_delete` with the same fields, deleting nothing. `git_branch {rename: "<old>",
+to: "<new>"}` renames a local branch without losing a commit, which ends an
+ambiguity when delete is refused because the branch is the only holder of its
+commits; the new name must name nothing yet (`branch_name_taken`), so it cannot
+create another shadow. `git_branch` (list) and `git_status` report
+`ambiguous_ref: true` with `ambiguous_refs {name: [refs/heads/<name>,
+refs/remotes/<name>]}` while such a shadowing local branch exists.
+`git_branch_delete` keeps its own `-d`/`-D` semantics and can delete a branch on the
+remote.
+
+`phase-status` answers the current `phase`, `last_skill`, `prd_pending_count`
+and `mutables_pending_count` (the same open-row counts `instruction` reports, a
+row held `blockedBy` external or out-of-reach not counted), `session_id`,
+`session_mismatch`, `session_owner_before_this_dispatch`, `updated_at_ms`, the
+newest five `phase_history` entries and `phase_history_total`, the number
+recorded in `turn-state.json`.
 
 `git_commit` and `git_finalize` refuse before staging anything when the commit
 would reference a file that exists on disk, is untracked, is not gitignored

@@ -841,6 +841,7 @@ pub(crate) fn collect_files_within_wall_budget(
         files: Vec::new(),
         complete: false,
         skipped_unstattable: Vec::new(),
+        source: crate::scan_universe::FileSource::Walk,
     })
 }
 
@@ -861,6 +862,9 @@ fn collect_files_impl(
     deadline_ms: Option<u64>,
 ) -> Result<FileEnumeration, String> {
     let gi = load_repo_gitignore(root);
+    if let Some(enumeration) = git_listed_enumeration(root, max_files, cfg, &gi) {
+        return Ok(enumeration);
+    }
     let entries = if checked {
         list_dir_checked(root)?
     } else {
@@ -871,39 +875,21 @@ fn collect_files_impl(
             files: Vec::new(),
             complete: true,
             skipped_unstattable: Vec::new(),
+            source: crate::scan_universe::FileSource::Walk,
         });
     }
     let has_slashes = entries.iter().any(|e| e.contains('/'));
     if has_slashes {
         let files: Vec<String> = entries
             .into_iter()
-            .filter(|p| {
-                if cfg.is_force_included(p) {
-                    return true;
-                }
-                if p.split('/').any(is_hidden_segment) {
-                    return false;
-                }
-                if is_skipped_dir_path(p, cfg) {
-                    return false;
-                }
-                let name = p.rsplit('/').next().unwrap_or(p.as_str());
-                if is_skipped_filename(name, cfg) {
-                    return false;
-                }
-                if host_paths_use_windows_syntax()
-                    && p.split('/').any(is_windows_reserved_device_name)
-                {
-                    return false;
-                }
-                !gitignore_excludes(&gi, p, false)
-            })
+            .filter(|p| index_admits(root, p, cfg, &gi))
             .take(max_files)
             .collect();
         return Ok(FileEnumeration {
             files,
             complete: true,
             skipped_unstattable: Vec::new(),
+            source: crate::scan_universe::FileSource::Walk,
         });
     }
     let mut files = Vec::new();
@@ -926,13 +912,98 @@ fn collect_files_impl(
         files,
         complete: !clock.expired,
         skipped_unstattable,
+        source: crate::scan_universe::FileSource::Walk,
     })
+}
+
+// Every enumeration of a project's files -- the ranked chunk index, the content digest that says
+// when that index is stale, the symbol index and scan_deps -- comes through this one primitive, so
+// this is the one place the file universe is decided. Git decides it, exactly as it decides the
+// universe of the literal and filename scans (`scan_universe::list_scan_universe`): tracked files
+// plus untracked files git does not ignore, with every nested repository and gitlink stopped at
+// its boundary. A raw directory walk crosses that boundary: a nested checkout inside a project
+// (5950 files under hive/PeerSpeak) sorted ahead of the project's own sources, every budgeted pass
+// churned inside it, and dual mode ranked a corpus the project's sources never reached. The walk
+// stays as the fallback for a root git cannot list.
+fn git_listed_enumeration(
+    root: &str,
+    max_files: usize,
+    cfg: &crate::ragconfig::IndexConfig,
+    gi: &Option<ignore::gitignore::Gitignore>,
+) -> Option<FileEnumeration> {
+    let universe = crate::scan_universe::list_scan_universe(
+        root,
+        &[],
+        max_files,
+        cfg,
+        crate::scan_universe::TargetOrigin::ProjectDefault,
+        false,
+        false,
+        false,
+    )
+    .ok()?;
+    if universe.source != crate::scan_universe::FileSource::Git {
+        return None;
+    }
+    let files: Vec<String> = universe
+        .files
+        .into_iter()
+        .filter(|p| index_admits(root, p, cfg, gi) && !is_gitlink_directory(p))
+        .take(max_files)
+        .collect();
+    Some(FileEnumeration {
+        files,
+        complete: universe.listing_complete,
+        skipped_unstattable: Vec::new(),
+        source: crate::scan_universe::FileSource::Git,
+    })
+}
+
+// git lists a gitlink (a nested repository recorded as one index entry) by its directory name. The
+// index reads files, so that entry is dropped. Only an extensionless name can be one, so the stat
+// runs for those alone.
+fn is_gitlink_directory(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    !name.contains('.') && crate::wasm_dispatch::host_stat_is_directory(path) == Some(true)
+}
+
+// The index's own admission rules, applied to a path git or a flattened listing already named:
+// hidden segments, noise directories, skipped suffixes and reserved device names below the root,
+// then the repository's .gitignore/.codesearchignore. A force-included path passes every rule.
+fn index_admits(
+    root: &str,
+    path: &str,
+    cfg: &crate::ragconfig::IndexConfig,
+    gi: &Option<ignore::gitignore::Gitignore>,
+) -> bool {
+    if cfg.is_force_included(path) {
+        return true;
+    }
+    let rel = path
+        .strip_prefix(root)
+        .map(|rest| rest.trim_start_matches('/'))
+        .unwrap_or(path);
+    if rel.split('/').any(is_hidden_segment) {
+        return false;
+    }
+    if is_skipped_dir_path(rel, cfg) {
+        return false;
+    }
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    if is_skipped_filename(name, cfg) {
+        return false;
+    }
+    if host_paths_use_windows_syntax() && rel.split('/').any(is_windows_reserved_device_name) {
+        return false;
+    }
+    !gitignore_excludes(gi, path, false)
 }
 
 pub(crate) struct FileEnumeration {
     pub(crate) files: Vec<String>,
     pub(crate) complete: bool,
     pub(crate) skipped_unstattable: Vec<String>,
+    pub(crate) source: crate::scan_universe::FileSource,
 }
 
 struct WalkClock {
@@ -2432,6 +2503,7 @@ fn index_cfg_impl(
         };
     let enumeration_partial_reason = (!enumeration.complete).then_some("wall_budget_exhausted");
     let files_enumerated = enumeration.files.len();
+    let file_source = enumeration.source.label();
     let skipped_unstattable = enumeration.skipped_unstattable;
     let mut full_files = enumeration.files;
     let enumeration_was_complete = enumeration.complete && full_files.len() <= enumeration_cap;
@@ -2445,9 +2517,10 @@ fn index_cfg_impl(
     at = unsafe { crate::wasm_dispatch::host_now_ms() };
     {
         let msg = format!(
-            "code_index: indexing root={} files={} libsql_ok={} manifests={}",
+            "code_index: indexing root={} files={} file_source={} libsql_ok={} manifests={}",
             r,
             files.len(),
+            file_source,
             libsql_ok,
             prior.len()
         );
@@ -3107,6 +3180,7 @@ fn index_cfg_impl(
         "enumeration_file_cap": enumeration_cap,
         "enumeration_partial_reason": enumeration_partial_reason,
         "files_enumerated": files_enumerated,
+        "file_source": file_source,
         "skipped_unstattable": skipped_unstattable,
     })
 }

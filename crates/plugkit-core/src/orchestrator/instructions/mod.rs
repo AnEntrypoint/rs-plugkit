@@ -331,6 +331,14 @@ fn prd_pending_count(items: &[serde_json::Value]) -> usize {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub(crate) fn pending_counts() -> (usize, usize) {
+    (
+        prd_pending_count(&prd_items_json()),
+        dedup_rows_by_id_keeping_last(mutables::pending_detailed()).len(),
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
 fn item_is_open(it: &serde_json::Value) -> bool {
     let status = it
         .get("status")

@@ -391,14 +391,26 @@ fn git_status_spill_listing(spill_name: &str, lines: &[String]) -> Option<String
     let mut body = lines.join("\n");
     body.push('\n');
     if crate::pkfs::write(&relative, &body) {
-        git_status_prune_spills();
+        git_spill_prune(GIT_STATUS_SPILL_PREFIX);
         Some(crate::pkfs::anchor(&relative))
     } else {
         None
     }
 }
 
-fn git_status_prune_spills() {
+fn git_spill_text(prefix: &str, text: &str) -> Option<String> {
+    let stamp = super::search::dispatch_task_id()
+        .unwrap_or_else(|| unsafe { host_now_ms() }.to_string());
+    let relative = format!("{GIT_STATUS_SPILL_DIR}/{prefix}{stamp}.txt");
+    if crate::pkfs::write(&relative, text) {
+        git_spill_prune(prefix);
+        Some(crate::pkfs::anchor(&relative))
+    } else {
+        None
+    }
+}
+
+fn git_spill_prune(prefix: &str) {
     let Some(Value::Array(entries)) = crate::pkfs::readdir(GIT_STATUS_SPILL_DIR) else {
         return;
     };
@@ -413,7 +425,7 @@ fn git_status_prune_spills() {
                 .or_else(|| entry.get("isFile"))
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
-            if !is_file || !name.starts_with(GIT_STATUS_SPILL_PREFIX) || !name.ends_with(".txt") {
+            if !is_file || !name.starts_with(prefix) || !name.ends_with(".txt") {
                 return None;
             }
             let mtime_ms = crate::pkfs::stat(&format!("{GIT_STATUS_SPILL_DIR}/{name}"))
@@ -653,6 +665,7 @@ pub(super) fn git_status(body: &Value) -> u64 {
                 }
             }
         }
+        note_ambiguous_refs(&mut lists, &shadowed_remote_refs(cwd));
         Ok(ok("git_status", lists))
     })
 }
@@ -680,9 +693,11 @@ pub(super) fn branch_status(body: &Value) -> u64 {
     {
         let _ = exec_git_in(cwd, &format!("fetch {} {}", remote, branch));
     }
+    let tracking = format!("{remote}/{branch}");
+    let candidates = ref_candidates(cwd, &tracking);
     let counts = exec_git_in(
         cwd,
-        &format!("rev-list --left-right --count {}/{}...HEAD", remote, branch),
+        &format!("rev-list --left-right --count refs/remotes/{tracking}...HEAD"),
     );
     let counts = counts.trim();
     let mut behind: u64 = 0;
@@ -692,15 +707,18 @@ pub(super) fn branch_status(body: &Value) -> u64 {
         behind = parts[0].parse().unwrap_or(0);
         ahead = parts[1].parse().unwrap_or(0);
     }
-    ok(
-        "branch_status",
-        json!({
-            "branch": branch,
-            "ahead": ahead,
-            "behind": behind,
-            "remote": remote,
-        }),
-    )
+    let mut data = json!({
+        "branch": branch,
+        "ahead": ahead,
+        "behind": behind,
+        "remote": remote,
+    });
+    if candidates.len() > 1 {
+        let mut ambiguous = serde_json::Map::new();
+        ambiguous.insert(tracking, json!(candidates));
+        note_ambiguous_refs(&mut data, &ambiguous);
+    }
+    ok("branch_status", data)
 }
 
 pub(super) fn resolve_ref(cwd: Option<&str>, refspec: &str) -> Option<String> {
@@ -716,6 +734,99 @@ pub(super) fn resolve_ref(cwd: Option<&str>, refspec: &str) -> Option<String> {
     } else {
         Some(sha)
     }
+}
+
+pub(super) const REF_NAMESPACES: [&str; 3] = ["refs/heads/", "refs/tags/", "refs/remotes/"];
+
+pub(super) fn remote_tracking_ref(branch: &str) -> String {
+    format!("refs/remotes/origin/{branch}")
+}
+
+fn plain_ref_token(token: &str) -> bool {
+    !token.is_empty()
+        && token != "HEAD"
+        && !token.starts_with(['-', '/'])
+        && !token.ends_with('/')
+        && !token.starts_with("refs/")
+        && !token.contains("..")
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+}
+
+pub(super) fn ref_candidates(cwd: Option<&str>, token: &str) -> Vec<String> {
+    if !plain_ref_token(token) {
+        return Vec::new();
+    }
+    let patterns: Vec<String> = REF_NAMESPACES
+        .iter()
+        .map(|namespace| format!("{namespace}{token}"))
+        .collect();
+    let mut argv: Vec<&str> = vec!["for-each-ref", "--format=%(refname)"];
+    argv.extend(patterns.iter().map(String::as_str));
+    git_stdout_lines(&argv, cwd)
+        .into_iter()
+        .filter(|name| patterns.contains(name))
+        .collect()
+}
+
+pub(super) struct RefReading {
+    pub(super) spec: String,
+    pub(super) candidates: Vec<String>,
+}
+
+pub(super) fn disambiguated_ref(cwd: Option<&str>, token: &str) -> RefReading {
+    let candidates = ref_candidates(cwd, token);
+    let remote_tracking = format!("refs/remotes/{token}");
+    let spec = if candidates.len() > 1 && candidates.contains(&remote_tracking) {
+        remote_tracking
+    } else {
+        token.to_string()
+    };
+    RefReading { spec, candidates }
+}
+
+pub(super) struct RevisionReading {
+    pub(super) spec: String,
+    pub(super) ambiguous: serde_json::Map<String, Value>,
+}
+
+fn split_revision_range(revision: &str) -> (&str, &str, &str) {
+    if let Some(at) = revision.find("...") {
+        return (&revision[..at], "...", &revision[at + 3..]);
+    }
+    if let Some(at) = revision.find("..") {
+        return (&revision[..at], "..", &revision[at + 2..]);
+    }
+    (revision, "", "")
+}
+
+pub(super) fn disambiguated_revision(cwd: Option<&str>, revision: &str) -> RevisionReading {
+    let (left, dots, right) = split_revision_range(revision);
+    let mut ambiguous = serde_json::Map::new();
+    let mut read_side = |token: &str| -> String {
+        let reading = disambiguated_ref(cwd, token);
+        if reading.candidates.len() > 1 {
+            ambiguous.insert(token.to_string(), json!(reading.candidates));
+        }
+        reading.spec
+    };
+    let spec = if dots.is_empty() {
+        read_side(left)
+    } else {
+        let left_spec = read_side(left);
+        let right_spec = read_side(right);
+        format!("{left_spec}{dots}{right_spec}")
+    };
+    RevisionReading { spec, ambiguous }
+}
+
+pub(super) fn note_ambiguous_refs(data: &mut Value, ambiguous: &serde_json::Map<String, Value>) {
+    if ambiguous.is_empty() {
+        return;
+    }
+    data["ambiguous_ref"] = json!(true);
+    data["ambiguous_refs"] = Value::Object(ambiguous.clone());
 }
 
 pub(super) struct SshHttpsFallback {
@@ -967,7 +1078,43 @@ pub(super) fn git_fetch_and_resolve_remote(
             let _ = git_call_argv(&["fetch", "origin", branch], repo);
         }
     }
-    resolve_ref(repo, &format!("origin/{}", branch))
+    resolve_ref(repo, &remote_tracking_ref(branch))
+}
+
+pub(super) fn split_push_url(cwd: Option<&str>) -> Option<String> {
+    let push = configured_push_url(cwd, "origin")?;
+    let fetch = git_call_argv(&["remote", "get-url", "origin"], cwd)
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    (!fetch.is_empty() && fetch != push).then_some(push)
+}
+
+pub(super) fn head_at_push_url(
+    cwd: Option<&str>,
+    push_url: &str,
+    branch: &str,
+    fallback: Option<&SshHttpsFallback>,
+) -> Option<String> {
+    let target = format!("refs/heads/{}", branch.strip_prefix("refs/heads/").unwrap_or(branch));
+    let argv = ["ls-remote", push_url, target.as_str()];
+    let reply = match fallback {
+        Some(f) => f.call(&argv, cwd),
+        None => git_call_argv(&argv, cwd),
+    };
+    if git_exit_code(&reply) != 0 {
+        return None;
+    }
+    reply
+        .get("stdout")
+        .and_then(Value::as_str)?
+        .lines()
+        .next()?
+        .split_whitespace()
+        .next()
+        .map(String::from)
 }
 
 pub(super) fn verify_push_landed(
@@ -977,28 +1124,33 @@ pub(super) fn verify_push_landed(
     remote_before: Option<&str>,
     fallback: Option<&SshHttpsFallback>,
 ) -> Result<(String, bool), String> {
-    let _ = match fallback {
-        Some(f) => f.call(&["fetch", "origin", branch], cwd),
-        None => git_call_argv(&["fetch", "origin", branch], cwd),
-    };
-    let remote_after = resolve_ref(cwd, &format!("origin/{}", branch));
-    let remote_after = match remote_after {
-        Some(s) => s,
-        None => {
-            return Err(format!(
-                "could not resolve origin/{} after push -- remote-tracking ref missing",
-                branch
-            ))
-        }
-    };
-    if remote_after != local_head {
-        return Err(format!(
-            "push claimed success but origin/{} ({}) does not match local HEAD ({}) after fetch -- remote did not actually advance to this commit",
-            branch, remote_after, local_head
-        ));
-    }
     let already_current = remote_before.map(|b| b == local_head).unwrap_or(false);
-    Ok((remote_after, already_current))
+    let split = split_push_url(cwd);
+    if split.is_none() {
+        let _ = match fallback {
+            Some(f) => f.call(&["fetch", "origin", branch], cwd),
+            None => git_call_argv(&["fetch", "origin", branch], cwd),
+        };
+        if let Some(tracked) = resolve_ref(cwd, &remote_tracking_ref(branch)) {
+            if tracked == local_head {
+                return Ok((tracked, already_current));
+            }
+        }
+    }
+    let url = split
+        .or_else(|| configured_push_url(cwd, "origin"))
+        .unwrap_or_else(|| "origin".to_string());
+    match head_at_push_url(cwd, &url, branch, fallback) {
+        Some(landed) if landed == local_head => Ok((landed, already_current)),
+        Some(landed) => Err(format!(
+            "push claimed success but {} at {} ({}) does not match local HEAD ({}) -- remote did not actually advance to this commit",
+            branch, url, landed, local_head
+        )),
+        None => Err(format!(
+            "could not read {} at {} after push -- the remote-tracking ref is missing and ls-remote answered nothing",
+            branch, url
+        )),
+    }
 }
 
 pub(super) const PUSHED_COMMITS_LIST_LIMIT: usize = 50;
@@ -1343,6 +1495,42 @@ fn push_unnamed_commits(
 
 pub(super) fn git_push(body: &Value) -> u64 {
     let repo = body_cwd(body).map(String::from);
+    let branch = body
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| {
+            let current = exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD")
+                .trim()
+                .to_string();
+            if current.is_empty() || current == "HEAD" {
+                "main".to_string()
+            } else {
+                current
+            }
+        });
+    let tracking = format!("origin/{branch}");
+    let candidates = ref_candidates(repo.as_deref(), &tracking);
+    let packed = git_push_receipt(body);
+    if candidates.len() < 2 {
+        return packed;
+    }
+    let mut reply = unpack_to_value(packed);
+    if reply.get("pending").and_then(Value::as_bool) == Some(true) {
+        return pack(reply.to_string());
+    }
+    let mut ambiguous = serde_json::Map::new();
+    ambiguous.insert(tracking, json!(candidates));
+    if reply.get("data").is_some_and(Value::is_object) {
+        note_ambiguous_refs(&mut reply["data"], &ambiguous);
+    } else {
+        note_ambiguous_refs(&mut reply, &ambiguous);
+    }
+    pack(reply.to_string())
+}
+
+fn git_push_receipt(body: &Value) -> u64 {
+    let repo = body_cwd(body).map(String::from);
     let explicit_branch = body
         .get("branch")
         .and_then(|v| v.as_str())
@@ -1446,7 +1634,10 @@ pub(super) fn git_push(body: &Value) -> u64 {
         return pack(refusal.to_string());
     }
     let mut ssh_fallback: Option<SshHttpsFallback> = None;
-    let mut remote_before = git_fetch_and_resolve_remote(repo.as_deref(), &branch, None);
+    let mut remote_before = match split_push_url(repo.as_deref()) {
+        Some(push_url) => head_at_push_url(repo.as_deref(), &push_url, &branch, None),
+        None => git_fetch_and_resolve_remote(repo.as_deref(), &branch, None),
+    };
     let allow_foreign_commits = body
         .get("allow_foreign_commits")
         .and_then(|v| v.as_bool())
@@ -2155,7 +2346,25 @@ pub(super) fn staged_outside_requested(
         .collect()
 }
 
+pub(super) const GIT_COMMIT_ACCEPTED_FIELDS: &[&str] = &[
+    "message",
+    "amend",
+    "paths",
+    "files",
+    "add_all",
+    "allow_empty",
+    "allow_whole_index",
+    "allow_foreign_rows",
+    "allow_foreign_prd_rows",
+    "allow_dangling",
+    "author_name",
+    "author_email",
+];
+
 pub(super) fn git_amend(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_amend", body, GIT_COMMIT_ACCEPTED_FIELDS) {
+        return refusal;
+    }
     let mut amended = body.clone();
     if let Some(fields) = amended.as_object_mut() {
         fields.insert("amend".to_string(), json!(true));
@@ -2164,6 +2373,9 @@ pub(super) fn git_amend(body: &Value) -> u64 {
 }
 
 pub(super) fn git_commit(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_commit", body, GIT_COMMIT_ACCEPTED_FIELDS) {
+        return refusal;
+    }
     git_async_entry("git_commit", body, |body, plan| {
         let cwd = body_cwd(body);
         let message = body
@@ -2174,6 +2386,16 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         if message.is_empty() {
             return Ok(err("git_commit", "message required"));
         }
+        let policy = match attribution::load() {
+            Ok(policy) => policy,
+            Err(reason) => return Ok(err_json("git_commit", attribution::invalid(&reason))),
+        };
+        let screened = match attribution::apply("git_commit", message, &policy) {
+            Ok(screened) => screened,
+            Err(refusal) => return Ok(err_json("git_commit", refusal)),
+        };
+        let message = screened.text.trim();
+        let mut attribution_stripped = screened.stripped.clone();
         let allow_empty = body
             .get("allow_empty")
             .and_then(|v| v.as_bool())
@@ -2215,19 +2437,9 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             if head_probe.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) != 0 {
                 return Ok(err("git_commit", "amend requires an existing HEAD commit; this repository has no commits yet"));
             }
-            let published = git_call_argv(
-                &["for-each-ref", "--count=1", "--contains", "HEAD", "--format=%(refname)", "refs/remotes"],
-                cwd,
-            );
-            let remote_refs = published.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-            if !remote_refs.is_empty() {
-                return Ok(err_json(
-                    "git_commit",
-                    json!({
-                        "error": format!("HEAD is already reachable from a remote-tracking ref ({remote_refs}), so amending would rewrite published history; refused"),
-                        "error_code": "pushed_commit_refused",
-                    }),
-                ));
+            let published = published_refs_containing(cwd, "HEAD");
+            if !published.is_empty() {
+                return Ok(err_json("git_commit", pushed_commit_refusal("HEAD", &published)));
             }
         }
         let merge_probe = git_step_replayed_by_call_order(
@@ -2308,6 +2520,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             }
         }
         let head_before_probe = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+        let message_before_amend = if amend { commit_message_of(cwd, "HEAD") } else { String::new() };
         let dedup_key = git_commit_dedup_key(cwd, &head_before_probe, message, &paths, add_all, amend);
         if let Some(prior) = git_commit_dedup_lookup(&dedup_key, cwd) {
             let sha = prior
@@ -2455,7 +2668,14 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         }
         let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd, &commit_note_paths(cwd, scoped_paths));
         let bundled_message = bundle_prd_commit_comments(message, &commit_notes);
-        let identity = body_commit_identity(body);
+        let bundled_message = if policy.enforces() && !commit_notes.is_empty() {
+            let late = attribution::screen(&bundled_message);
+            attribution_stripped.extend(late.stripped);
+            late.text
+        } else {
+            bundled_message
+        };
+        let identity = body_commit_identity(body).or_else(|| policy.author.clone());
         let r = git_step_replayed_by_call_order(
             plan,
             &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, scoped_paths, identity.as_ref())),
@@ -2500,6 +2720,9 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         );
         record_commit_in_liqology(&summary, &head_after);
         let mut payload = json!({ "committed": true, "sha": sha, "summary": summary });
+        if !attribution_stripped.is_empty() {
+            payload["attribution_stripped"] = json!(attribution_stripped);
+        }
         if let Some(rows) = prd_own_rows.as_ref() {
             payload["prd_own_rows_only"] = json!(true);
             payload["prd_own_rows"] = json!(rows);
@@ -2513,6 +2736,10 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         if amend {
             payload["amended"] = json!(true);
             payload["replaced_sha_full"] = json!(head_before);
+            payload["old_sha"] = json!(head_before);
+            payload["new_sha"] = json!(head_after);
+            payload["message"] = json!(bundled_message);
+            payload["trailers_removed"] = json!(trailers_removed(cwd, &message_before_amend, &bundled_message));
         }
         if !force_added_ignored_paths.is_empty() {
             payload["force_added_ignored_paths"] = json!(force_added_ignored_paths);
@@ -2604,7 +2831,7 @@ pub(super) fn untracked_worktree_paths(cwd: Option<&str>) -> Vec<String> {
 }
 
 pub(super) fn incoming_changed_paths(cwd: Option<&str>, branch: &str) -> Vec<String> {
-    exec_git_in(cwd, &format!("diff --name-only HEAD...origin/{}", branch))
+    exec_git_in(cwd, &format!("diff --name-only HEAD...{}", remote_tracking_ref(branch)))
         .lines()
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
@@ -2711,7 +2938,7 @@ pub(super) fn pull_past_remote_moved(
             )
         });
     }
-    let remote_sha_before = resolve_ref(cwd, &format!("origin/{}", branch)).unwrap_or_default();
+    let remote_sha_before = resolve_ref(cwd, &remote_tracking_ref(&branch)).unwrap_or_default();
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
     let ff_body = pull_body_with_identity(cwd, &branch, true, identity);
     let ff_resp = unpack_to_value(git_pull(&ff_body));
@@ -3019,7 +3246,7 @@ pub(super) fn scope_recommit_past_remote_moved(
             local_sha
         ));
     }
-    let Some(remote_tip) = resolve_ref(cwd, &format!("origin/{}", branch)) else {
+    let Some(remote_tip) = resolve_ref(cwd, &remote_tracking_ref(&branch)) else {
         return RemoteMovedScopeFix::Failed(format!(
             "could not resolve origin/{} after fetch, so the remote tip to re-land onto is unknown",
             branch
@@ -3174,7 +3401,7 @@ pub(super) fn remote_moved_is_same_branch_advance(
     branch: &str,
     local_sha: &str,
 ) -> bool {
-    let remote_sha = match resolve_ref(repo, &format!("origin/{}", branch)) {
+    let remote_sha = match resolve_ref(repo, &remote_tracking_ref(&branch)) {
         Some(sha) => sha,
         None => return false,
     };
@@ -3355,7 +3582,7 @@ pub(super) fn pull_and_repush_remote_moved(
             }
         }
     }
-    let remote_now = resolve_ref(cwd, &format!("origin/{}", branch));
+    let remote_now = resolve_ref(cwd, &remote_tracking_ref(&branch));
     let strict_fast_forward = remote_now
         .as_deref()
         .map(|remote| {
@@ -3605,28 +3832,31 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             .to_string();
         let (ci_status_summary, ci_validated_written) =
             check_ci_status_and_write_validated_marker_if_green(cwd_ref, &source_sha);
-        return ok(
-            "git_finalize",
-            json!({
-                "committed": false,
-                "pushed": true,
-                "source_ref": source_ref,
-                "sha": source_sha,
-                "branch": push_data.get("branch").cloned().unwrap_or(Value::Null),
-                "remote_advanced": push_data.get("remote_advanced").cloned().unwrap_or(Value::Null),
-                "already_current": push_data.get("already_current").cloned().unwrap_or(Value::Null),
-                "remote_sha": push_data.get("remote_sha").cloned().unwrap_or(Value::Null),
-                "preserved_dirty_worktree": push_data.get("preserved_dirty_worktree").cloned().unwrap_or(Value::Null),
-                "pushed_commits": push_data.get("pushed_commits").cloned().unwrap_or(Value::Null),
-                "steps": [
-                    {"step": "commit", "skipped": "explicit source_ref publishes an existing commit"},
-                    {"step": "push", "branch": push_data.get("branch").cloned().unwrap_or(Value::Null)},
-                    {"step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written}
-                ],
-                "ci_validated_marker_written": ci_validated_written,
-                "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
-            }),
-        );
+        let mut published = json!({
+            "committed": false,
+            "pushed": true,
+            "source_ref": source_ref,
+            "sha": source_sha,
+            "branch": push_data.get("branch").cloned().unwrap_or(Value::Null),
+            "remote_advanced": push_data.get("remote_advanced").cloned().unwrap_or(Value::Null),
+            "already_current": push_data.get("already_current").cloned().unwrap_or(Value::Null),
+            "remote_sha": push_data.get("remote_sha").cloned().unwrap_or(Value::Null),
+            "preserved_dirty_worktree": push_data.get("preserved_dirty_worktree").cloned().unwrap_or(Value::Null),
+            "pushed_commits": push_data.get("pushed_commits").cloned().unwrap_or(Value::Null),
+            "steps": [
+                {"step": "commit", "skipped": "explicit source_ref publishes an existing commit"},
+                {"step": "push", "branch": push_data.get("branch").cloned().unwrap_or(Value::Null)},
+                {"step": "ci-status-check", "result": ci_status_summary, "ci_validated_marker_written": ci_validated_written}
+            ],
+            "ci_validated_marker_written": ci_validated_written,
+            "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
+        });
+        for key in ["ambiguous_ref", "ambiguous_refs"] {
+            if let Some(value) = push_data.get(key) {
+                published[key] = value.clone();
+            }
+        }
+        return ok("git_finalize", published);
     }
     let message = body
         .get("message")
@@ -3634,6 +3864,16 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         .unwrap_or("")
         .trim()
         .to_string();
+    let policy = match attribution::load() {
+        Ok(policy) => policy,
+        Err(reason) => return err_json("git_finalize", attribution::invalid(&reason)),
+    };
+    let screened = match attribution::apply("git_finalize", &message, &policy) {
+        Ok(screened) => screened,
+        Err(refusal) => return err_json("git_finalize", refusal),
+    };
+    let message = screened.text.trim().to_string();
+    let mut attribution_stripped = screened.stripped;
     let paths: Vec<String> = body
         .get("paths")
         .or_else(|| body.get("files"))
@@ -3795,7 +4035,14 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         let scoped_paths: &[String] = if scoped { &paths } else { &[] };
         let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd_ref, &commit_note_paths(cwd_ref, scoped_paths));
         let bundled_message = bundle_prd_commit_comments(message.as_str(), &commit_notes);
-        let identity = body_commit_identity(body);
+        let bundled_message = if policy.enforces() && !commit_notes.is_empty() {
+            let late = attribution::screen(&bundled_message);
+            attribution_stripped.extend(late.stripped);
+            late.text
+        } else {
+            bundled_message
+        };
+        let identity = body_commit_identity(body).or_else(|| policy.author.clone());
         let cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, identity.as_ref())), cwd_ref);
         prd_own_rows = own_rows_filter.as_ref().map(|f| f.own_rows.clone());
         prd_foreign_row_count = foreign_prd_rows.len();
@@ -3851,6 +4098,13 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                 message.clone()
             };
             let bundled_message = bundle_prd_commit_comments(flush_message.as_str(), &flush_notes);
+            let bundled_message = if policy.enforces() {
+                let late = attribution::screen(&bundled_message);
+                attribution_stripped.extend(late.stripped);
+                late.text
+            } else {
+                bundled_message
+            };
             let bundled_summary = bundled_message.lines().next().unwrap_or("").to_string();
             let prd_abs = format!(
                 "{}/{}",
@@ -3886,13 +4140,22 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                     }),
                 );
             }
-            let mut commit_argv = vec![
+            let mut commit_argv: Vec<String> = Vec::new();
+            if let Some((name, email)) = body_commit_identity(body).or_else(|| policy.author.clone()) {
+                commit_argv.extend([
+                    "-c".to_string(),
+                    format!("user.name={name}"),
+                    "-c".to_string(),
+                    format!("user.email={email}"),
+                ]);
+            }
+            commit_argv.extend([
                 "commit".to_string(),
                 "--allow-empty".to_string(),
                 "-m".to_string(),
                 bundled_message,
                 "--".to_string(),
-            ];
+            ]);
             commit_argv.extend(git_pathspec_scope(&[], cwd_ref));
             let commit_argv: Vec<&str> = commit_argv.iter().map(String::as_str).collect();
             let cr = git_call_argv(&commit_argv, cwd_ref);
@@ -4225,6 +4488,14 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         "ci_validated_marker_written": ci_validated_written,
         "next_dispatch": if ci_validated_written { "instruction" } else { "ci-status" },
     });
+    if !attribution_stripped.is_empty() {
+        finalize_payload["attribution_stripped"] = json!(attribution_stripped);
+    }
+    for key in ["ambiguous_ref", "ambiguous_refs"] {
+        if let Some(value) = push_data.and_then(|data| data.get(key)) {
+            finalize_payload[key] = value.clone();
+        }
+    }
     if let Some(recovery) = recovery {
         finalize_payload["incoming_commits"] = recovery
             .get("incoming_commits")
@@ -4289,14 +4560,100 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
     )
 }
 
+pub(super) const GIT_LOG_ACCEPTED_FIELDS: &[&str] = &[
+    "limit",
+    "count",
+    "range",
+    "ref",
+    "rev",
+    "path",
+    "paths",
+    "files",
+    "body",
+    "include_body",
+    "grep",
+    "author",
+    "trailers",
+    "case_insensitive",
+    "oneline",
+];
+
+pub(super) const GIT_LOG_HELP: &str = r#"git_log lists commits newest first as {commits: [{sha, sha_full, subject, author: {name, email, date}, body?, trailers?}], count, truncated?}.
+  limit            commits to return (default 10; alias count). count is always present, so 0 is an answer; truncated: true says more commits matched than limit.
+  range|ref|rev    a revision or a range such as origin/main..HEAD. A bare name that matches more than one ref (a local branch named origin/main shadows the remote-tracking ref) resolves to refs/remotes/<name>; the reply then carries ambiguous_ref: true, ambiguous_refs: {name: [full ref names]} and revision_resolved.
+  path|paths|files keep only commits that touch those pathspecs.
+  body: true       (alias include_body) adds the message body, trailers included, when it is not empty.
+  grep             a regular expression, or an array of them (any match keeps the commit), against the whole message: git --grep under --extended-regexp, so ^Co-Authored-By:.*(Claude|Anthropic) works as written.
+  author           a regular expression against "Name <email>" (git --author).
+  case_insensitive: true makes grep and author ignore case.
+  oneline: true    answers commits as "<sha> <YYYY-MM-DD> <author> <subject>" strings, a fraction of the bytes; not combinable with body or trailers.
+  trailers: true   adds the commit's trailers as {Key: value} (an array when a key repeats), read by git from the final paragraph of the message (%(trailers:only=true,unfold=true)). A Co-Authored-By line above the final paragraph is not a trailer: find those with grep."#;
+
+pub(super) const GIT_COMMIT_HELP: &str = r#"git_commit, git_amend, git_finalize, git_merge and git_reword take a message. git_commit and git_amend accept message, amend, paths|files, add_all, allow_empty, allow_whole_index, allow_foreign_rows|allow_foreign_prd_rows, allow_dangling, author_name and author_email.
+Attribution policy: when a policy file exists the message is screened before git sees it. The file is .gm/attribution.json in the project (the git toplevel of the dispatch), else ~/.gm/attribution.json; no file means off.
+  {"mode": "off" | "strip" | "refuse", "author": {"name": "...", "email": "..."}}
+  strip    removes every line that is a Co-Authored-By trailer naming Claude or Anthropic, or that holds "generated with" and "claude" (case-insensitive), tidies the blank lines left behind and lists the removed lines in the receipt as attribution_stripped.
+  refuse   answers error_code attribution_refused with attribution_lines and commits nothing.
+  author   is the commit identity (user.name, user.email) when the body names no author_name and author_email; git_reword sets it as the committer.
+  A policy file that cannot be read (bad JSON, unknown key, unknown mode) refuses with attribution_policy_invalid instead of turning enforcement off. A message that holds only attribution lines is refused."#;
+
+const GIT_LOG_RECORD_END: char = '\u{1e}';
+const GIT_LOG_FIELD_SEP: char = '\u{1f}';
+const GIT_LOG_TRAILERS_FORMAT: &str = "%(trailers:only=true,unfold=true)";
+
+fn git_log_patterns(body: &Value, field: &str) -> Result<Vec<String>, Value> {
+    let invalid = || {
+        json!({
+            "error": format!("git_log {field} must be a nonempty string or an array of nonempty strings"),
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "field": field,
+        })
+    };
+    let entries: Vec<&Value> = match body.get(field) {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(items)) => items.iter().collect(),
+        Some(single) => vec![single],
+    };
+    let mut patterns = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match entry.as_str().map(str::trim).filter(|text| !text.is_empty()) {
+            Some(text) => patterns.push(text.to_string()),
+            None => return Err(invalid()),
+        }
+    }
+    Ok(patterns)
+}
+
+fn git_log_trailers(raw: &str) -> Option<Value> {
+    let mut found = serde_json::Map::new();
+    for line in raw.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        if key.is_empty() {
+            continue;
+        }
+        match found.get_mut(key) {
+            None => {
+                found.insert(key.to_string(), json!(value));
+            }
+            Some(Value::Array(values)) => values.push(json!(value)),
+            Some(first) => {
+                let earlier = first.take();
+                *first = json!([earlier, value]);
+            }
+        }
+    }
+    if found.is_empty() {
+        None
+    } else {
+        Some(Value::Object(found))
+    }
+}
+
 pub(super) fn git_log(body: &Value) -> u64 {
-    if let Some(refusal) = refuse_unknown_fields(
-        "git_log",
-        body,
-        &[
-            "limit", "count", "range", "ref", "rev", "path", "paths", "files",
-        ],
-    ) {
+    if let Some(refusal) = refuse_unknown_fields("git_log", body, GIT_LOG_ACCEPTED_FIELDS) {
         return refusal;
     }
     git_async_entry("git_log", body, |body, plan| {
@@ -4306,21 +4663,78 @@ pub(super) fn git_log(body: &Value) -> u64 {
             .and_then(|v| v.as_u64())
             .or_else(|| body.get("count").and_then(|v| v.as_u64()))
             .unwrap_or(10);
-        let nflag = format!("-{}", count);
+        let flag = |fields: &[&str]| -> Result<bool, Value> {
+            for field in fields {
+                if body.get(*field).is_some() {
+                    return body_bool_flag(body, field, "git_log");
+                }
+            }
+            Ok(false)
+        };
+        let (want_body, want_trailers, case_insensitive, oneline) = match (
+            flag(&["body", "include_body"]),
+            flag(&["trailers"]),
+            flag(&["case_insensitive"]),
+            flag(&["oneline"]),
+        ) {
+            (Ok(b), Ok(t), Ok(c), Ok(o)) => (b, t, c, o),
+            (Err(detail), ..) | (_, Err(detail), ..) | (_, _, Err(detail), _) | (_, _, _, Err(detail)) => {
+                return Ok(err_json("git_log", detail))
+            }
+        };
+        if oneline && (want_body || want_trailers) {
+            return Ok(err_json(
+                "git_log",
+                json!({
+                    "error": "git_log oneline answers one string per commit and cannot carry body or trailers",
+                    "error_code": ERR_CODE_INVALID_ARGS,
+                }),
+            ));
+        }
+        let greps = match git_log_patterns(body, "grep") {
+            Ok(patterns) => patterns,
+            Err(detail) => return Ok(err_json("git_log", detail)),
+        };
+        let authors = match git_log_patterns(body, "author") {
+            Ok(patterns) => patterns,
+            Err(detail) => return Ok(err_json("git_log", detail)),
+        };
         let range = body_revision(body);
+        let reading = disambiguated_revision(cwd, range);
         let paths = body_pathspecs(body);
-        let pretty = "--pretty=format:%h\u{1f}%H\u{1f}%an\u{1f}%ae\u{1f}%aI\u{1f}%s";
-        let mut argv: Vec<&str> = vec!["log", &nflag, pretty, "--no-color"];
-        if !range.is_empty() {
-            argv.push(range);
+        let mut format = String::from("%h\u{1f}%H\u{1f}%an\u{1f}%ae\u{1f}%aI\u{1f}%s");
+        if want_body {
+            format.push(GIT_LOG_FIELD_SEP);
+            format.push_str("%b");
+        }
+        if want_trailers {
+            format.push(GIT_LOG_FIELD_SEP);
+            format.push_str(GIT_LOG_TRAILERS_FORMAT);
+        }
+        format.push(GIT_LOG_RECORD_END);
+        let mut argv: Vec<String> = vec![
+            "log".to_string(),
+            format!("-{}", count.saturating_add(1)),
+            format!("--pretty=format:{format}"),
+            "--no-color".to_string(),
+        ];
+        if !greps.is_empty() || !authors.is_empty() {
+            argv.push("--extended-regexp".to_string());
+        }
+        if case_insensitive {
+            argv.push("--regexp-ignore-case".to_string());
+        }
+        argv.extend(greps.iter().map(|pattern| format!("--grep={pattern}")));
+        argv.extend(authors.iter().map(|pattern| format!("--author={pattern}")));
+        if !reading.spec.is_empty() {
+            argv.push(reading.spec.clone());
         }
         if !paths.is_empty() {
-            argv.push("--");
-            for p in &paths {
-                argv.push(p.as_str());
-            }
+            argv.push("--".to_string());
+            argv.extend(paths.iter().cloned());
         }
-        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let r = git_step_replayed_by_call_order(plan, &argv_refs, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
             let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
@@ -4334,27 +4748,207 @@ pub(super) fn git_log(body: &Value) -> u64 {
             ));
         }
         let out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-        let commits: Vec<Value> = out
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|l| {
-                let mut it = l.splitn(6, '\u{1f}');
-                let sha = it.next().unwrap_or("").to_string();
-                let sha_full = it.next().unwrap_or("").to_string();
-                let author_name = it.next().unwrap_or("").to_string();
-                let author_email = it.next().unwrap_or("").to_string();
-                let author_date = it.next().unwrap_or("").to_string();
-                let subject = it.next().unwrap_or("").to_string();
-                json!({
-                    "sha": sha,
-                    "sha_full": sha_full,
-                    "subject": subject,
-                    "author": { "name": author_name, "email": author_email, "date": author_date },
-                })
-            })
-            .collect();
-        Ok(ok("git_log", json!({ "commits": commits })))
+        let mut commits: Vec<Value> = Vec::new();
+        for record in out.split(GIT_LOG_RECORD_END) {
+            let record = record.trim_start_matches('\n');
+            if record.is_empty() {
+                continue;
+            }
+            let mut fields = record.split(GIT_LOG_FIELD_SEP);
+            let mut next = || fields.next().unwrap_or("").to_string();
+            let (sha, sha_full, author_name, author_email, author_date, subject) =
+                (next(), next(), next(), next(), next(), next());
+            if oneline {
+                let day = author_date.get(..10).unwrap_or(&author_date);
+                commits.push(json!(format!("{sha} {day} {author_name} {subject}")));
+                continue;
+            }
+            let mut commit = json!({
+                "sha": sha,
+                "sha_full": sha_full,
+                "subject": subject,
+                "author": { "name": author_name, "email": author_email, "date": author_date },
+            });
+            if want_body {
+                let text = next();
+                let text = text.trim_end();
+                if !text.is_empty() {
+                    commit["body"] = json!(text);
+                }
+            }
+            if want_trailers {
+                let raw = next();
+                if raw.starts_with("%(") {
+                    return Ok(err_json(
+                        "git_log",
+                        json!({
+                            "error": "this git does not understand the %(trailers:only,unfold) placeholder, so trailers cannot be parsed per commit",
+                            "error_code": ERR_CODE_UNSUPPORTED,
+                            "hint": "upgrade git to 2.22 or newer, or read the message with body:true",
+                        }),
+                    ));
+                }
+                if let Some(trailers) = git_log_trailers(&raw) {
+                    commit["trailers"] = trailers;
+                }
+            }
+            commits.push(commit);
+        }
+        let truncated = commits.len() as u64 > count;
+        commits.truncate(count as usize);
+        let mut data = json!({ "commits": commits, "count": commits.len() });
+        if truncated {
+            data["truncated"] = json!(true);
+        }
+        if !reading.ambiguous.is_empty() {
+            data["revision_resolved"] = json!(reading.spec);
+            note_ambiguous_refs(&mut data, &reading.ambiguous);
+        }
+        Ok(ok("git_log", data))
     })
+}
+
+const GIT_TEXT_INLINE_DEFAULT_CHARS: usize = 60_000;
+const GIT_TEXT_INLINE_FLOOR_CHARS: usize = 1_000;
+const GIT_TEXT_INLINE_CEILING_CHARS: usize = 1_000_000;
+
+pub(super) const GIT_DIFF_HELP: &str = r#"git_diff answers {diff, truncated, range, paths}, or {files, count, ...} with name_only or name_status.
+  range|ref|rev    a revision or range; a bare remote-qualified name that matches several refs resolves to its remote-tracking ref and the reply says ambiguous_ref: true.
+  staged: true     the index against HEAD.
+  path|paths|files limit the diff to those pathspecs.
+  stat: true       the diffstat instead of the diff.
+  name_only: true  the changed file names only, as files: [path, ...] and count, no diff text.
+  name_status: true  the changed files with their status, as files: ["M path", "R100 old new", ...] and count.
+  max_chars        inline text cap (default 60000, 1000 to 1000000). Past it the reply is cut, truncated is true, total_bytes counts what git returned and spill_file names a file under .gm/exec-spool/out holding all of it, newest 20 kept. name_only and name_status cut at whole entries the same way.
+  The host captures at most 1 MiB from one git call; a larger diff answers error_code git_output_too_large (host_cap_bytes 1048576): list the files with name_only or name_status, then diff them with paths."#;
+
+pub(super) const GIT_SHOW_HELP: &str = r#"git_show answers {output, rev, truncated}, or {files, count, rev} with name_only or name_status.
+  rev|ref|sha|commit  a revision (default HEAD). "<rev>:<path>" and path print that file's content at the revision; a bare name matching several refs resolves to its remote-tracking ref and the reply says ambiguous_ref: true.
+  stat: true       the diffstat of the commit.
+  paths|files      limit a commit's diff to those pathspecs.
+  name_only: true  the files the commit changed, as files: [path, ...] and count, no diff text.
+  name_status: true  the files with their status, as files: ["M path", ...] and count.
+  max_chars        inline text cap (default 60000, 1000 to 1000000). Past it output is cut, truncated is true, total_bytes counts what git returned and spill_file names a file under .gm/exec-spool/out holding all of it (a blob read adds blob_bytes, its size).
+  The host captures at most 1 MiB from one git call; a larger commit or blob answers error_code git_output_too_large with host_cap_bytes 1048576 (a blob read adds blob_bytes, its real size); a blob that large has to be read from a checkout.
+  name_only and name_status exclude stat, path and a "<rev>:<path>" rev."#;
+
+fn body_max_chars(body: &Value, verb: &str) -> Result<usize, Value> {
+    match body.get("max_chars") {
+        None | Some(Value::Null) => Ok(GIT_TEXT_INLINE_DEFAULT_CHARS),
+        Some(raw) => match raw.as_u64() {
+            Some(chars) if chars >= 1 => Ok((chars as usize)
+                .clamp(GIT_TEXT_INLINE_FLOOR_CHARS, GIT_TEXT_INLINE_CEILING_CHARS)),
+            _ => Err(json!({
+                "error": format!("{verb} max_chars must be a positive integer"),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "field": "max_chars",
+            })),
+        },
+    }
+}
+
+struct CappedText {
+    text: String,
+    total_bytes: usize,
+    cut: bool,
+    spill_file: Option<String>,
+}
+
+fn cap_text(prefix: &str, full: String, max_chars: usize) -> CappedText {
+    let total_bytes = full.len();
+    let cut = total_bytes > max_chars;
+    let spill_file = if cut { git_spill_text(prefix, &full) } else { None };
+    let mut text = full;
+    if cut {
+        let end = (0..=max_chars).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+        text.truncate(end);
+    }
+    CappedText { text, total_bytes, cut, spill_file }
+}
+
+fn note_capped(data: &mut Value, capped: &CappedText) {
+    if capped.cut {
+        data["total_bytes"] = json!(capped.total_bytes);
+    }
+    if let Some(file) = &capped.spill_file {
+        data["spill_file"] = json!(file);
+        data["spill_retention"] = json!(format!(
+            "newest {GIT_STATUS_SPILL_KEEP} spill files per verb are kept in {GIT_STATUS_SPILL_DIR}"
+        ));
+    }
+}
+
+fn host_capture_limit_hit(reply: &Value) -> bool {
+    ["stderr", "error"].iter().any(|key| {
+        reply
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.contains("exceeded the host capture limit"))
+    })
+}
+
+fn host_capture_limit_detail(what: &str) -> Value {
+    json!({
+        "error": format!("{what} is larger than the 1 MiB the host captures from one git call"),
+        "error_code": "git_output_too_large",
+        "host_cap_bytes": 1_048_576,
+        "hint": "list the files with name_only or name_status, read one file's change with paths, or the diffstat with stat; a blob that large has to be read from a checkout",
+    })
+}
+
+fn name_lines(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(|line| line.replace('\t', " ").trim_end().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn names_reply(prefix: &str, mut lines: Vec<String>, max_chars: usize) -> Value {
+    let count = lines.len();
+    let mut used = 0usize;
+    let mut kept = 0usize;
+    for line in &lines {
+        if kept > 0 && used + line.len() + 1 > max_chars {
+            break;
+        }
+        used += line.len() + 1;
+        kept += 1;
+    }
+    let cut = kept < count;
+    let spill_file = if cut {
+        git_spill_text(prefix, &format!("{}\n", lines.join("\n")))
+    } else {
+        None
+    };
+    lines.truncate(kept);
+    let mut data = json!({ "files": lines, "count": count });
+    if cut {
+        data["truncated"] = json!(true);
+        data["shown"] = json!(kept);
+    }
+    if let Some(file) = spill_file {
+        data["spill_file"] = json!(file);
+    }
+    data
+}
+
+fn git_text_flags(body: &Value, verb: &str, fields: &[&str]) -> Result<Vec<bool>, Value> {
+    fields
+        .iter()
+        .map(|field| body_bool_flag(body, field, verb))
+        .collect()
+}
+
+fn names_flags_conflict(verb: &str, flags: &[(&str, bool)]) -> Option<Value> {
+    let named: Vec<&str> = flags.iter().filter(|(_, set)| *set).map(|(name, _)| *name).collect();
+    if named.len() < 2 {
+        return None;
+    }
+    Some(json!({
+        "error": format!("{verb} {} exclude each other; name one", named.join(", ")),
+        "error_code": ERR_CODE_INVALID_ARGS,
+    }))
 }
 
 pub(super) fn git_diff(body: &Value) -> u64 {
@@ -4362,20 +4956,32 @@ pub(super) fn git_diff(body: &Value) -> u64 {
         "git_diff",
         body,
         &[
-            "range", "ref", "rev", "staged", "stat", "path", "paths", "files",
+            "range", "ref", "rev", "staged", "stat", "path", "paths", "files", "name_only",
+            "name_status", "max_chars",
         ],
     ) {
         return refusal;
     }
     git_async_entry("git_diff", body, |body, plan| {
         let cwd = body_cwd(body);
-        let staged = body
-            .get("staged")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let flags = match git_text_flags(body, "git_diff", &["staged", "stat", "name_only", "name_status"]) {
+            Ok(flags) => flags,
+            Err(detail) => return Ok(err_json("git_diff", detail)),
+        };
+        let (staged, stat, name_only, name_status) = (flags[0], flags[1], flags[2], flags[3]);
+        if let Some(detail) = names_flags_conflict(
+            "git_diff",
+            &[("stat", stat), ("name_only", name_only), ("name_status", name_status)],
+        ) {
+            return Ok(err_json("git_diff", detail));
+        }
+        let max_chars = match body_max_chars(body, "git_diff") {
+            Ok(chars) => chars,
+            Err(detail) => return Ok(err_json("git_diff", detail)),
+        };
         let paths = body_pathspecs(body);
         let range = body_revision(body);
-        let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
+        let reading = disambiguated_revision(cwd, range);
         let mut argv: Vec<&str> = vec!["diff", "--no-color"];
         if staged {
             argv.push("--staged");
@@ -4383,8 +4989,14 @@ pub(super) fn git_diff(body: &Value) -> u64 {
         if stat {
             argv.push("--stat");
         }
+        if name_only {
+            argv.push("--name-only");
+        }
+        if name_status {
+            argv.push("--name-status");
+        }
         if !range.is_empty() {
-            argv.push(range);
+            argv.push(reading.spec.as_str());
         }
         if !paths.is_empty() {
             argv.push("--");
@@ -4393,30 +5005,45 @@ pub(super) fn git_diff(body: &Value) -> u64 {
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
+            if host_capture_limit_hit(&r) {
+                return Ok(err_json(
+                    "git_diff",
+                    host_capture_limit_detail(&format!("the diff of {}", if range.is_empty() { "the working tree" } else { range })),
+                ));
+            }
             let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
             return Ok(err_json(
                 "git_diff",
                 json!({
                     "error": stderr,
                     "range": range,
-                    "hint": "Inspect the error for a Git failure or host execution limit; missing output is not an empty result. Narrow paths/range or use stat:true."
+                    "hint": "Inspect the error for a Git failure or host execution limit; missing output is not an empty result. Narrow paths/range or use stat:true, name_only:true or name_status:true."
                 }),
             ));
         }
-        let mut diff = r
+        let stdout = r
             .get("stdout")
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string();
-        let truncated = diff.len() > 60000;
-        if truncated {
-            let cut = (0..=60000).rev().find(|&i| diff.is_char_boundary(i)).unwrap_or(0);
-            diff.truncate(cut);
-        }
-        Ok(ok(
-            "git_diff",
-            json!({ "diff": diff, "truncated": truncated, "range": range, "paths": paths }),
-        ))
+        let mut data = if name_only || name_status {
+            let mut data = names_reply("git_diff-", name_lines(&stdout), max_chars);
+            data["range"] = json!(range);
+            data["paths"] = json!(paths);
+            data
+        } else {
+            let capped = cap_text("git_diff-", stdout, max_chars);
+            let mut data = json!({
+                "diff": capped.text,
+                "truncated": capped.cut,
+                "range": range,
+                "paths": paths,
+            });
+            note_capped(&mut data, &capped);
+            data
+        };
+        note_ambiguous_refs(&mut data, &reading.ambiguous);
+        Ok(ok("git_diff", data))
     })
 }
 
@@ -4425,7 +5052,8 @@ pub(super) fn git_show(body: &Value) -> u64 {
         "git_show",
         body,
         &[
-            "rev", "ref", "sha", "commit", "stat", "path", "paths", "files",
+            "rev", "ref", "sha", "commit", "stat", "path", "paths", "files", "name_only",
+            "name_status", "max_chars",
         ],
     ) {
         return refusal;
@@ -4435,8 +5063,32 @@ pub(super) fn git_show(body: &Value) -> u64 {
         .iter()
         .find_map(|k| body.get(*k).and_then(|v| v.as_str()))
         .unwrap_or("HEAD");
-    let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
+    let flags = match git_text_flags(body, "git_show", &["stat", "name_only", "name_status"]) {
+        Ok(flags) => flags,
+        Err(detail) => return err_json("git_show", detail),
+    };
+    let (stat, name_only, name_status) = (flags[0], flags[1], flags[2]);
+    let max_chars = match body_max_chars(body, "git_show") {
+        Ok(chars) => chars,
+        Err(detail) => return err_json("git_show", detail),
+    };
     let path = body.get("path").and_then(|v| v.as_str());
+    let blob_read = path.is_some() || refspec.contains(':');
+    if let Some(detail) = names_flags_conflict(
+        "git_show",
+        &[("stat", stat), ("name_only", name_only), ("name_status", name_status)],
+    ) {
+        return err_json("git_show", detail);
+    }
+    if (name_only || name_status) && blob_read {
+        return err_json(
+            "git_show",
+            json!({
+                "error": "git_show name_only and name_status list a commit's files and cannot be combined with path or a \"<rev>:<path>\" rev",
+                "error_code": ERR_CODE_INVALID_ARGS,
+            }),
+        );
+    }
     let paths: Vec<String> = body
         .get("paths")
         .or_else(|| body.get("files"))
@@ -4447,13 +5099,20 @@ pub(super) fn git_show(body: &Value) -> u64 {
                 .collect()
         })
         .unwrap_or_default();
+    let reading = disambiguated_ref(cwd, refspec);
     let combined_ref = match path {
-        Some(p) => format!("{}:{}", refspec, p),
-        None => refspec.to_string(),
+        Some(p) => format!("{}:{}", reading.spec, p),
+        None => reading.spec.clone(),
     };
     let mut argv: Vec<&str> = vec!["show", "--no-color"];
     if stat {
         argv.push("--stat");
+    }
+    if name_only {
+        argv.extend(["--name-only", "--pretty=format:"]);
+    }
+    if name_status {
+        argv.extend(["--name-status", "--pretty=format:"]);
     }
     argv.push(&combined_ref);
     if !paths.is_empty() {
@@ -4466,6 +5125,20 @@ pub(super) fn git_show(body: &Value) -> u64 {
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let host_ok = r.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
     if !host_ok || code != 0 {
+        if host_capture_limit_hit(&r) {
+            let mut detail = host_capture_limit_detail(&format!("the output of git_show {combined_ref}"));
+            if blob_read {
+                let size = git_call_argv(&["cat-file", "-s", combined_ref.as_str()], cwd);
+                if let Some(bytes) = size
+                    .get("stdout")
+                    .and_then(Value::as_str)
+                    .and_then(|text| text.trim().parse::<u64>().ok())
+                {
+                    detail["blob_bytes"] = json!(bytes);
+                }
+            }
+            return err_json("git_show", detail);
+        }
         let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
         let repo = git_show_repo_name(cwd);
         let detail = if stderr.is_empty() {
@@ -4489,21 +5162,41 @@ pub(super) fn git_show(body: &Value) -> u64 {
             }),
         );
     }
-    let mut out = r
+    let stdout = r
         .get("stdout")
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .to_string();
-    let mut truncated = r
-        .get("stdout_truncated")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
-    if out.len() > 60000 {
-        let cut = (0..=60000).rev().find(|&i| out.is_char_boundary(i)).unwrap_or(0);
-        out.truncate(cut);
-        truncated = true;
+    let mut data = if name_only || name_status {
+        let mut data = names_reply("git_show-", name_lines(&stdout), max_chars);
+        data["rev"] = json!(refspec);
+        data
+    } else {
+        let capped = cap_text("git_show-", stdout, max_chars);
+        let mut data = json!({
+            "output": capped.text,
+            "rev": refspec,
+            "truncated": capped.cut,
+        });
+        note_capped(&mut data, &capped);
+        if blob_read && capped.cut {
+            let size = git_call_argv(&["cat-file", "-s", combined_ref.as_str()], cwd);
+            if let Some(bytes) = size
+                .get("stdout")
+                .and_then(Value::as_str)
+                .and_then(|text| text.trim().parse::<u64>().ok())
+            {
+                data["blob_bytes"] = json!(bytes);
+            }
+        }
+        data
+    };
+    if reading.candidates.len() > 1 {
+        let mut ambiguous = serde_json::Map::new();
+        ambiguous.insert(refspec.to_string(), json!(reading.candidates));
+        note_ambiguous_refs(&mut data, &ambiguous);
     }
-    ok("git_show", json!({ "output": out, "rev": refspec, "truncated": truncated }))
+    ok("git_show", data)
 }
 
 fn git_show_repo_name(cwd: Option<&str>) -> String {
@@ -5715,9 +6408,277 @@ pub(super) fn ci_status(body: &Value) -> u64 {
     }
 }
 
+pub(super) const GIT_BRANCH_HELP: &str = r#"git_branch lists local branches as {current, branches}, plus ambiguous_ref: true and ambiguous_refs {name: [refs/heads/<name>, refs/remotes/<name>]} when a local branch is named like a remote-tracking ref (a bare origin/main then resolves to the local branch first; delete it to end the ambiguity). git_status reports the same two fields.
+  all: true | remote: true   list every branch, or only the remote-tracking ones.
+  delete: "<name>"           deletes the LOCAL branch refs/heads/<name>; a remote-tracking ref and a branch on the remote are never touched. It refuses a name with no local branch (no_such_local_branch), the current branch (current_branch_refused), a branch checked out in another worktree (branch_checked_out_elsewhere) and a branch whose tip is reachable from neither HEAD nor any remote-tracking ref (branch_tip_unreachable, with unreachable_commits), so no commit can become unreachable. The reply names the tip it removed (was) and what keeps it reachable. dry_run: true runs every check and answers would_delete without deleting.
+  rename: "<old>", to: "<new>"  renames a local branch without losing a commit, which ends an ambiguity when delete is refused because the branch is the only holder of its commits. The new name must name nothing yet (branch_name_taken otherwise), so it cannot create another shadow. git_branch_delete keeps its own -d and -D semantics and can delete remote branches."#;
+
+pub(super) fn shadowed_remote_refs(cwd: Option<&str>) -> serde_json::Map<String, Value> {
+    let mut found = serde_json::Map::new();
+    let listing = git_call_argv(
+        &["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"],
+        cwd,
+    );
+    if git_exit_code(&listing) != 0
+        || listing.get("stdout_truncated").and_then(Value::as_bool) == Some(true)
+    {
+        return found;
+    }
+    let stdout = listing.get("stdout").and_then(Value::as_str).unwrap_or("");
+    let mut tracking: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut locals: Vec<&str> = Vec::new();
+    for line in stdout.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix("refs/remotes/") {
+            tracking.insert(name);
+        } else if let Some(name) = line.strip_prefix("refs/heads/") {
+            if name.contains('/') {
+                locals.push(name);
+            }
+        }
+    }
+    for name in locals {
+        if tracking.contains(name) {
+            found.insert(
+                name.to_string(),
+                json!([format!("refs/heads/{name}"), format!("refs/remotes/{name}")]),
+            );
+        }
+    }
+    found
+}
+
+fn plain_branch_name(name: &str) -> bool {
+    plain_ref_token(name) && !name.starts_with('.') && !name.ends_with(".lock")
+}
+
+fn git_branch_delete_guarded(cwd: Option<&str>, raw: &Value, dry_run: bool) -> u64 {
+    let Some(name) = raw.as_str().map(str::trim).filter(|name| plain_branch_name(name)) else {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": "git_branch delete must name one local branch (letters, digits, . _ - and / only)",
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "field": "delete",
+            }),
+        );
+    };
+    let full = format!("refs/heads/{name}");
+    let tip_probe = git_call_argv(
+        &["rev-parse", "--verify", "--quiet", &format!("{full}^{{commit}}")],
+        cwd,
+    );
+    let tip = tip_probe
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if git_exit_code(&tip_probe) != 0 || tip.is_empty() {
+        let tracking = format!("refs/remotes/{name}");
+        let candidates = ref_candidates(cwd, name);
+        let remote_only = !candidates.is_empty() && !candidates.contains(&full);
+        return err_json(
+            "git_branch",
+            json!({
+                "error": format!("no local branch {name}"),
+                "error_code": "no_such_local_branch",
+                "remote_tracking_only": remote_only,
+                "hint": format!("git_branch delete removes {full} only; {tracking} is never touched"),
+            }),
+        );
+    }
+    let current = git_call_argv(&["symbolic-ref", "--quiet", "--short", "HEAD"], cwd)
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if current == name {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": format!("{name} is the current branch; check out another ref first"),
+                "error_code": "current_branch_refused",
+                "branch": name,
+            }),
+        );
+    }
+    let worktrees = git_stdout_lines(&["worktree", "list", "--porcelain"], cwd);
+    let mut holder: Option<String> = None;
+    let mut last_path = String::new();
+    for line in &worktrees {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            last_path = path.to_string();
+        } else if line.strip_prefix("branch ") == Some(full.as_str()) {
+            holder = Some(last_path.clone());
+        }
+    }
+    if let Some(path) = holder {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": format!("{name} is checked out in the worktree {path}"),
+                "error_code": "branch_checked_out_elsewhere",
+                "branch": name,
+                "worktree": path,
+            }),
+        );
+    }
+    let from_head = ref_is_ancestor(cwd, &tip, "HEAD");
+    let remote_refs: Vec<String> = git_stdout_lines(
+        &["for-each-ref", "--contains", tip.as_str(), "--format=%(refname)", "refs/remotes"],
+        cwd,
+    );
+    if !from_head && remote_refs.is_empty() {
+        let unreachable = git_call_argv(
+            &["rev-list", "--count", tip.as_str(), "--not", "HEAD", "--remotes"],
+            cwd,
+        )
+        .get("stdout")
+        .and_then(Value::as_str)
+        .and_then(|text| text.trim().parse::<u64>().ok());
+        return err_json(
+            "git_branch",
+            json!({
+                "error": format!("{name} ({tip}) is reachable from neither HEAD nor any remote-tracking ref, so deleting it would leave its commits unreachable"),
+                "error_code": "branch_tip_unreachable",
+                "branch": name,
+                "tip": tip,
+                "unreachable_commits": unreachable,
+                "hint": "merge it into HEAD or push it to a remote first",
+            }),
+        );
+    }
+    if dry_run {
+        return ok(
+            "git_branch",
+            json!({
+                "dry_run": true,
+                "would_delete": name,
+                "ref": full,
+                "was": tip,
+                "reachable_from_head": from_head,
+                "remote_tracking_containing": remote_refs.iter().take(5).collect::<Vec<_>>(),
+                "checks": "passed",
+            }),
+        );
+    }
+    let deleted = git_call_argv(&["branch", "-D", name], cwd);
+    if git_exit_code(&deleted) != 0 {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": git_output_text(&deleted).trim(),
+                "error_code": ERR_CODE_FAILED,
+                "branch": name,
+            }),
+        );
+    }
+    let mut data = json!({
+        "deleted": name,
+        "ref": full,
+        "was": tip,
+        "reachable_from_head": from_head,
+        "remote_tracking_containing": remote_refs.iter().take(5).collect::<Vec<_>>(),
+    });
+    let remaining = ref_candidates(cwd, name);
+    if remaining.len() > 1 {
+        let mut ambiguous = serde_json::Map::new();
+        ambiguous.insert(name.to_string(), json!(remaining));
+        note_ambiguous_refs(&mut data, &ambiguous);
+    }
+    ok("git_branch", data)
+}
+
+fn git_branch_rename(cwd: Option<&str>, body: &Value, raw: &Value) -> u64 {
+    let invalid = |field: &str| {
+        err_json(
+            "git_branch",
+            json!({
+                "error": format!("git_branch rename and to must each name one local branch (letters, digits, . _ - and / only); {field} does not"),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "field": field,
+            }),
+        )
+    };
+    let Some(from) = raw.as_str().map(str::trim).filter(|name| plain_branch_name(name)) else {
+        return invalid("rename");
+    };
+    let Some(to) = body
+        .get("to")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| plain_branch_name(name))
+    else {
+        return invalid("to");
+    };
+    let tip_probe = git_call_argv(
+        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{from}^{{commit}}")],
+        cwd,
+    );
+    let tip = tip_probe
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if git_exit_code(&tip_probe) != 0 || tip.is_empty() {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": format!("no local branch {from}"),
+                "error_code": "no_such_local_branch",
+            }),
+        );
+    }
+    let taken: Vec<String> = ref_candidates(cwd, to);
+    if !taken.is_empty() {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": format!("{to} already names {} -- a new branch name must name nothing yet, or it would be ambiguous", taken.join(", ")),
+                "error_code": "branch_name_taken",
+                "refs": taken,
+            }),
+        );
+    }
+    let renamed = git_call_argv(&["branch", "-m", from, to], cwd);
+    if git_exit_code(&renamed) != 0 {
+        return err_json(
+            "git_branch",
+            json!({
+                "error": git_output_text(&renamed).trim(),
+                "error_code": ERR_CODE_FAILED,
+            }),
+        );
+    }
+    let mut data = json!({ "renamed": { "from": from, "to": to }, "tip": tip });
+    let remaining = ref_candidates(cwd, from);
+    if remaining.len() > 1 {
+        let mut ambiguous = serde_json::Map::new();
+        ambiguous.insert(from.to_string(), json!(remaining));
+        note_ambiguous_refs(&mut data, &ambiguous);
+    }
+    ok("git_branch", data)
+}
+
 pub(super) fn git_branch(body: &Value) -> u64 {
-    if let Some(refusal) = refuse_unknown_fields("git_branch", body, &["remote", "all"]) {
+    if let Some(refusal) = refuse_unknown_fields(
+        "git_branch",
+        body,
+        &["remote", "all", "delete", "dry_run", "rename", "to"],
+    ) {
         return refusal;
+    }
+    if let Some(raw) = body.get("rename") {
+        return git_branch_rename(body_cwd(body), body, raw);
+    }
+    if let Some(raw) = body.get("delete") {
+        let dry_run = match body_bool_flag(body, "dry_run", "git_branch") {
+            Ok(flag) => flag,
+            Err(detail) => return err_json("git_branch", detail),
+        };
+        return git_branch_delete_guarded(body_cwd(body), raw, dry_run);
     }
     for flag in ["remote", "all"] {
         match body.get(flag) {
@@ -5748,13 +6709,12 @@ pub(super) fn git_branch(body: &Value) -> u64 {
     let listing = exec_git_in(cwd, listing_args);
     let branches: Vec<String> = listing
         .lines()
-        .map(|l| l.trim_start_matches('*').trim().to_string())
+        .map(|l| l.trim_start_matches(['*', '+']).trim().to_string())
         .filter(|l| !l.is_empty())
         .collect();
-    ok(
-        "git_branch",
-        json!({ "current": current, "branches": branches }),
-    )
+    let mut data = json!({ "current": current, "branches": branches });
+    note_ambiguous_refs(&mut data, &shadowed_remote_refs(cwd));
+    ok("git_branch", data)
 }
 
 pub(super) fn git_remote(body: &Value) -> u64 {
@@ -6238,6 +7198,16 @@ pub(super) fn git_merge(body: &Value) -> u64 {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
+    let policy = match attribution::load() {
+        Ok(policy) => policy,
+        Err(reason) => return err_json("git_merge", attribution::invalid(&reason)),
+    };
+    let screened = match attribution::apply("git_merge", message, &policy) {
+        Ok(screened) => screened,
+        Err(refusal) => return err_json("git_merge", refusal),
+    };
+    let message = screened.text.trim();
+    let reading = disambiguated_revision(cwd, refspec);
     let mut argv: Vec<&str> = vec!["merge", "--no-edit"];
     if ff_only {
         argv.push("--ff-only");
@@ -6246,7 +7216,7 @@ pub(super) fn git_merge(body: &Value) -> u64 {
         argv.push("-m");
         argv.push(message);
     }
-    argv.push(refspec);
+    argv.push(reading.spec.as_str());
     let r = git_call_argv(&argv, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let out = format!(
@@ -6272,17 +7242,19 @@ pub(super) fn git_merge(body: &Value) -> u64 {
         );
     }
     let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-    ok(
-        "git_merge",
-        json!({
-            "merged": refspec,
-            "head_before": head_before,
-            "head_after": head_after,
-            "already_up_to_date": head_before == head_after,
-            "fast_forward": out.lines().any(|line| line == "Fast-forward" || line.starts_with("Fast-forward (")),
-            "output": out
-        }),
-    )
+    let mut data = json!({
+        "merged": refspec,
+        "head_before": head_before,
+        "head_after": head_after,
+        "already_up_to_date": head_before == head_after,
+        "fast_forward": out.lines().any(|line| line == "Fast-forward" || line.starts_with("Fast-forward (")),
+        "output": out
+    });
+    if !screened.stripped.is_empty() {
+        data["attribution_stripped"] = json!(screened.stripped);
+    }
+    note_ambiguous_refs(&mut data, &reading.ambiguous);
+    ok("git_merge", data)
 }
 
 pub(super) const MERGE_ABORT_SHELF_MESSAGE: &str = "gm merge-abort shelf";
@@ -6592,6 +7564,441 @@ pub(super) fn git_cherry_pick(body: &Value) -> u64 {
             "output": output
         }),
     )
+}
+
+pub(super) const GIT_REWORD_ACCEPTED_FIELDS: &[&str] = &["rev", "ref", "sha", "commit", "message"];
+
+pub(super) const REWRITE_IN_PROGRESS_MARKERS: &[&str] =
+    &["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD"];
+
+pub(super) const MISSING_COMMITTER_IDENTITY: &str = "git_reword needs a committer identity: set user.name and user.email in this repository or globally";
+
+pub(super) struct GitScratchFile {
+    pub(super) path: String,
+}
+
+impl GitScratchFile {
+    pub(super) fn write(tag: &str, content: &str) -> Option<Self> {
+        let stamp = unsafe { host_now_ms() };
+        let path = crate::pkfs::anchor(&format!(".gm/exec-spool/.git-scratch-{tag}-{stamp}"));
+        if !crate::pkfs::write(&path, content) {
+            return None;
+        }
+        Some(Self { path })
+    }
+}
+
+impl Drop for GitScratchFile {
+    fn drop(&mut self) {
+        let _ = crate::pkfs::remove_file(&self.path);
+    }
+}
+
+pub(super) fn message_trailers(cwd: Option<&str>, message: &str) -> Vec<String> {
+    let Some(scratch) = GitScratchFile::write("trailers", message) else {
+        return Vec::new();
+    };
+    let r = git_call_argv(&["interpret-trailers", "--parse", scratch.path.as_str()], cwd);
+    if git_exit_code(&r) != 0 {
+        return Vec::new();
+    }
+    r.get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+pub(super) fn trailers_removed(cwd: Option<&str>, before: &str, after: &str) -> Vec<String> {
+    let kept = message_trailers(cwd, after);
+    message_trailers(cwd, before)
+        .into_iter()
+        .filter(|trailer| !kept.contains(trailer))
+        .collect()
+}
+
+pub(super) fn commit_message_of(cwd: Option<&str>, rev: &str) -> String {
+    git_call_argv(&["log", "-1", "--format=%B", rev], cwd)
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+pub(super) fn published_refs_containing(cwd: Option<&str>, rev: &str) -> Vec<String> {
+    let mut refs = git_stdout_lines(
+        &["for-each-ref", "--contains", rev, "--format=%(refname)", "refs/remotes"],
+        cwd,
+    );
+    let upstream = git_call_argv(&["rev-parse", "--symbolic-full-name", "@{upstream}"], cwd);
+    if git_exit_code(&upstream) == 0 {
+        let name = upstream
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !name.is_empty() && !refs.contains(&name) && ref_is_ancestor(cwd, rev, &name) {
+            refs.push(name);
+        }
+    }
+    refs
+}
+
+pub(super) fn pushed_commit_refusal(rev: &str, published: &[String]) -> Value {
+    json!({
+        "error": format!("{rev} is already contained in {} ({}), so rewriting it would rewrite published history; refused", if published.len() == 1 { "a remote-tracking ref" } else { "remote-tracking refs" }, published.join(", ")),
+        "error_code": "pushed_commit_refused",
+        "rev": rev,
+        "published_refs": published,
+    })
+}
+
+pub(super) struct CommitObject {
+    pub(super) tree: String,
+    pub(super) parents: Vec<String>,
+    pub(super) author: String,
+    pub(super) committer: String,
+    pub(super) extra_headers: Vec<String>,
+    pub(super) message: String,
+}
+
+pub(super) fn read_commit_object(cwd: Option<&str>, sha: &str) -> Option<CommitObject> {
+    let r = git_call_argv(&["cat-file", "commit", sha], cwd);
+    if git_exit_code(&r) != 0 {
+        return None;
+    }
+    let raw = r.get("stdout").and_then(Value::as_str)?;
+    let (header_block, message) = raw.split_once("\n\n")?;
+    let mut headers: Vec<String> = Vec::new();
+    for line in header_block.split('\n') {
+        match (line.strip_prefix(' '), headers.last_mut()) {
+            (Some(continued), Some(previous)) => {
+                previous.push('\n');
+                previous.push(' ');
+                previous.push_str(continued);
+            }
+            _ => headers.push(line.to_string()),
+        }
+    }
+    let mut commit = CommitObject {
+        tree: String::new(),
+        parents: Vec::new(),
+        author: String::new(),
+        committer: String::new(),
+        extra_headers: Vec::new(),
+        message: message.to_string(),
+    };
+    for header in headers {
+        let (key, value) = header.split_once(' ').unwrap_or((header.as_str(), ""));
+        match key {
+            "tree" => commit.tree = value.to_string(),
+            "parent" => commit.parents.push(value.to_string()),
+            "author" => commit.author = value.to_string(),
+            "committer" => commit.committer = value.to_string(),
+            "gpgsig" | "gpgsig-sha256" => {}
+            _ => commit.extra_headers.push(header.clone()),
+        }
+    }
+    if commit.tree.is_empty() || commit.author.is_empty() {
+        return None;
+    }
+    Some(commit)
+}
+
+pub(super) fn commit_object_text(commit: &CommitObject) -> String {
+    let mut out = format!("tree {}\n", commit.tree);
+    for parent in &commit.parents {
+        out.push_str(&format!("parent {parent}\n"));
+    }
+    out.push_str(&format!("author {}\n", commit.author));
+    out.push_str(&format!("committer {}\n", commit.committer));
+    for header in &commit.extra_headers {
+        out.push_str(header);
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(&commit.message);
+    out
+}
+
+pub(super) fn write_commit_object(cwd: Option<&str>, commit: &CommitObject) -> Result<String, String> {
+    let Some(scratch) = GitScratchFile::write("commit", &commit_object_text(commit)) else {
+        return Err("could not write the commit object scratch file under .gm/exec-spool".to_string());
+    };
+    let r = git_call_argv(&["hash-object", "-t", "commit", "-w", scratch.path.as_str()], cwd);
+    if git_exit_code(&r) != 0 {
+        return Err(git_output_text(&r));
+    }
+    let sha = r
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if sha.len() < 40 {
+        return Err(format!("hash-object answered no object id: {}", git_output_text(&r)));
+    }
+    Ok(sha)
+}
+
+pub(super) fn committer_ident(
+    cwd: Option<&str>,
+    identity: Option<&(String, String)>,
+) -> Result<String, String> {
+    let name_arg = identity.map(|(name, _)| format!("user.name={name}"));
+    let email_arg = identity.map(|(_, email)| format!("user.email={email}"));
+    let mut argv: Vec<&str> = Vec::new();
+    if let (Some(name), Some(email)) = (name_arg.as_deref(), email_arg.as_deref()) {
+        argv.extend(["-c", name, "-c", email]);
+    }
+    argv.extend(["var", "GIT_COMMITTER_IDENT"]);
+    let r = git_call_argv(&argv, cwd);
+    let ident = r
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if git_exit_code(&r) != 0 || ident.is_empty() {
+        return Err(MISSING_COMMITTER_IDENTITY.to_string());
+    }
+    Ok(ident)
+}
+
+pub(super) fn tree_of(cwd: Option<&str>, rev: &str) -> Option<String> {
+    let peeled = format!("{rev}^{{tree}}");
+    let r = git_call_argv(&["rev-parse", "--verify", "--quiet", peeled.as_str()], cwd);
+    if git_exit_code(&r) != 0 {
+        return None;
+    }
+    let sha = r
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
+}
+
+pub(super) fn rewrite_in_progress(cwd: Option<&str>) -> Option<&'static str> {
+    REWRITE_IN_PROGRESS_MARKERS.iter().copied().find(|marker| {
+        git_exit_code(&git_call_argv(&["rev-parse", "--verify", "--quiet", marker], cwd)) == 0
+    })
+}
+
+pub(super) fn normalized_commit_message(message: &str) -> String {
+    let mut out = String::new();
+    for line in message.trim().lines() {
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+pub(super) fn short_sha(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
+}
+
+pub(super) fn git_reword(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_reword", body, GIT_REWORD_ACCEPTED_FIELDS) {
+        return refusal;
+    }
+    let cwd = body_cwd(body);
+    let message = body
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if message.is_empty() {
+        return err("git_reword", "message required");
+    }
+    let policy = match attribution::load() {
+        Ok(policy) => policy,
+        Err(reason) => return err_json("git_reword", attribution::invalid(&reason)),
+    };
+    let screened = match attribution::apply("git_reword", message, &policy) {
+        Ok(screened) => screened,
+        Err(refusal) => return err_json("git_reword", refusal),
+    };
+    let message = screened.text.trim();
+    let refspec = ["rev", "ref", "sha", "commit"]
+        .iter()
+        .find_map(|k| body.get(*k).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("HEAD");
+    let Some(target) = resolve_commit(cwd, refspec) else {
+        return err_json(
+            "git_reword",
+            json!({
+                "error": format!("rev {refspec} does not resolve to a commit in this repository"),
+                "error_code": "git_reword_rev_unresolved",
+                "rev": refspec,
+            }),
+        );
+    };
+    let Some(old_head) = resolve_commit(cwd, "HEAD") else {
+        return err("git_reword", "HEAD does not resolve to a commit; nothing to reword");
+    };
+    if !ref_is_ancestor(cwd, &target, &old_head) {
+        return err_json(
+            "git_reword",
+            json!({
+                "error": format!("{target} is not reachable from HEAD ({old_head}); git_reword rewrites the current branch only"),
+                "error_code": "rev_not_reachable_from_head",
+                "rev": target,
+                "head": old_head,
+            }),
+        );
+    }
+    if let Some(marker) = rewrite_in_progress(cwd) {
+        return err_json(
+            "git_reword",
+            json!({
+                "error": format!("{marker} exists, so a merge, cherry-pick, revert or rebase is in progress; finish or abort it before rewording"),
+                "error_code": "operation_in_progress",
+                "marker": marker,
+            }),
+        );
+    }
+    let published = published_refs_containing(cwd, &target);
+    if !published.is_empty() {
+        return err_json("git_reword", pushed_commit_refusal(&target, &published));
+    }
+    let committer = match committer_ident(cwd, policy.author.as_ref()) {
+        Ok(ident) => ident,
+        Err(reason) => return err("git_reword", &reason),
+    };
+    let Some(mut target_commit) = read_commit_object(cwd, &target) else {
+        return err("git_reword", &format!("could not read commit object {target}"));
+    };
+    let old_message = target_commit.message.clone();
+    let new_message = normalized_commit_message(message);
+    target_commit.message = new_message.clone();
+    target_commit.committer = committer.clone();
+    let new_target = match write_commit_object(cwd, &target_commit) {
+        Ok(sha) => sha,
+        Err(reason) => {
+            return err("git_reword", &format!("could not write the reworded commit: {reason}; no ref was moved"))
+        }
+    };
+    let mut rewritten: Vec<(String, String)> = vec![(target.clone(), new_target.clone())];
+    let range = format!("{target}..{old_head}");
+    for sha in git_stdout_lines(&["rev-list", "--reverse", "--topo-order", range.as_str()], cwd) {
+        let Some(mut descendant) = read_commit_object(cwd, &sha) else {
+            return err("git_reword", &format!("could not read commit object {sha}; no ref was moved"));
+        };
+        let mapped: Vec<String> = descendant
+            .parents
+            .iter()
+            .map(|parent| {
+                rewritten
+                    .iter()
+                    .find(|(old, _)| old == parent)
+                    .map(|(_, new)| new.clone())
+                    .unwrap_or_else(|| parent.clone())
+            })
+            .collect();
+        if mapped == descendant.parents {
+            continue;
+        }
+        descendant.parents = mapped;
+        descendant.committer = committer.clone();
+        match write_commit_object(cwd, &descendant) {
+            Ok(new_sha) => rewritten.push((sha, new_sha)),
+            Err(reason) => {
+                return err("git_reword", &format!("could not rewrite descendant {sha}: {reason}; no ref was moved"))
+            }
+        }
+    }
+    let Some(new_head) = rewritten
+        .iter()
+        .find(|(old, _)| *old == old_head)
+        .map(|(_, new)| new.clone())
+    else {
+        return err("git_reword", "HEAD was not rewritten although rev is its ancestor; no ref was moved");
+    };
+    for (old, new) in &rewritten {
+        let before = tree_of(cwd, old);
+        let after = tree_of(cwd, new);
+        if before.is_none() || before != after {
+            return err_json(
+                "git_reword",
+                json!({
+                    "error": format!("tree of {new} differs from tree of {old}; no ref was moved"),
+                    "error_code": "tree_mismatch",
+                    "old": old,
+                    "new": new,
+                    "old_tree": before,
+                    "new_tree": after,
+                }),
+            );
+        }
+    }
+    let symref = git_call_argv(&["symbolic-ref", "--quiet", "HEAD"], cwd);
+    let branch = if git_exit_code(&symref) == 0 {
+        symref
+            .get("stdout")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(String::from)
+    } else {
+        None
+    };
+    let reflog = format!("git_reword: {} -> {}", short_sha(&target), short_sha(&new_target));
+    let update = git_call_argv(
+        &["update-ref", "-m", reflog.as_str(), "HEAD", new_head.as_str(), old_head.as_str()],
+        cwd,
+    );
+    if git_exit_code(&update) != 0 {
+        return err_json(
+            "git_reword",
+            json!({
+                "error": format!("HEAD could not be moved from {old_head} to {new_head}: {}", git_output_text(&update).trim()),
+                "error_code": "ref_update_failed",
+                "hint": "HEAD moved while the commits were being rewritten; re-dispatch git_reword against the current HEAD",
+            }),
+        );
+    }
+    let _ = git_call_argv(&["update-ref", "ORIG_HEAD", old_head.as_str()], cwd);
+    let head_now = resolve_commit(cwd, "HEAD").unwrap_or_default();
+    if head_now != new_head {
+        return err("git_reword", &format!("update-ref reported success but HEAD is {head_now}, not {new_head}"));
+    }
+    let pairs: Vec<Value> = rewritten
+        .iter()
+        .map(|(old, new)| json!({ "old": old, "new": new }))
+        .collect();
+    emit_event(
+        "git_reword",
+        json!({ "sub": "git", "old_sha": target, "new_sha": new_target, "old_head": old_head, "new_head": new_head }),
+    );
+    let mut data = json!({
+        "old_sha": target,
+        "new_sha": new_target,
+        "message": new_message.trim_end(),
+        "trailers_removed": trailers_removed(cwd, &old_message, &new_message),
+        "old_head": old_head,
+        "new_head": new_head,
+        "branch": branch,
+        "rewritten": pairs,
+        "descendants_rewritten": rewritten.len() - 1,
+        "trees_verified": rewritten.len(),
+        "orig_head": old_head,
+    });
+    if !screened.stripped.is_empty() {
+        data["attribution_stripped"] = json!(screened.stripped);
+    }
+    ok("git_reword", data)
 }
 
 pub(super) const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &[

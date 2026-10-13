@@ -26,7 +26,7 @@ const VERB_OWNED_RESERVED_BODY_KEYS: &[&str] = &["_plan", "_lease_sessions"];
 pub(crate) use git::GIT_PROTECTED_PATHSPECS;
 use search::*;
 pub use memory::*;
-use super::{dangling_refs, host_abi};
+use super::{attribution, dangling_refs, host_abi};
 
 pub fn plugin_ok(resp: &Value) -> bool {
     resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
@@ -3133,6 +3133,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_add" => git_add(&body),
         "git_commit" => git_commit(&body),
         "git_amend" => git_amend(&body),
+        "git_reword" => git_reword(&body),
         "git_finalize" => git_finalize(&body),
         "git_log" => git_log(&body),
         "git_diff" => git_diff(&body),

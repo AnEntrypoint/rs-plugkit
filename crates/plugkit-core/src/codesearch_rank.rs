@@ -519,6 +519,22 @@ pub fn compact_dual(query: &str, raw: &Value, opts: &RankOptions) -> Value {
     if let Some(files_scanned) = raw.get("files_scanned") {
         out.insert("files_scanned".into(), files_scanned.clone());
     }
+    // A pass that pruned files from the index inside this dispatch says so on the compact shape: a
+    // reply ranked right after foreign rows (a nested repository, an ignored path, a deleted file)
+    // left the corpus must not look like any other reply.
+    if let Some(pass) = raw.get("index_pass").filter(|v| v.is_object()) {
+        out.insert("index_pass".into(), pass.clone());
+        let removed = pass.get("removed_files").and_then(|v| v.as_u64()).unwrap_or(0);
+        if removed > 0 {
+            let source = pass.get("file_source").and_then(|v| v.as_str()).unwrap_or("enumerated");
+            out.insert(
+                "index_note".into(),
+                json!(format!(
+                    "{removed} previously indexed file(s) lie outside this root's {source}-listed universe (a nested repository, an ignored path or a deleted file) and were pruned from the ranked index before this reply"
+                )),
+            );
+        }
+    }
     out.insert("count".into(), json!(total));
     // The applied scope rides the compact shape too: without it a scoped reply is indistinguishable
     // from an unscoped one, so a caller cannot tell that the scope was honoured.
