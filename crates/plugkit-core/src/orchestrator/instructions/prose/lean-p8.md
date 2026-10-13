@@ -4,7 +4,7 @@ This is a concern of the method, not a stage of a pipeline: it is entered from w
 
 TENSIONS are the costs this method accepts on purpose: comments that carry what code cannot, knowledge that stays tacit, consumers relying on behaviour nobody promised, evidence trails that git must hold, the measured cost of agent-written code, descriptions that drift from the code, and whole-repository context. Each tension is a standing check. It is not a problem the method solves. The node's job is to find where a tension has fired in the current artifact and convert it when the artifact allows, or take a local exception and record its reason when it does not. Reversing the method to remove a tension is not an option. The exit condition is that every tension that fired has either been converted (a comment became code, a constraint became a recorded decision, a consumer's reliance became a promised contract, a second description was removed) or carries a recorded exception with its reason, and the sweep shows no tension firing without one of those two outcomes.
 
-Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each principle's book and attribution is the label in its H3 heading, taken from fsm/graph.json.
+Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each principle's book and attribution is the label in its H3 heading, taken from gm-config/fsm/graph.json.
 
 ## Verbs
 
@@ -50,7 +50,7 @@ The team's theory of why the code is shaped this way must be written where a res
 
 ### TACIT - Tacit Knowledge Resists Specification
 
-Handover: its exit is the backreference to ADRN (fsm/graph.json TACIT -> ADRN, backreference) by design, taken for each irreversible fork found; cite Tacit Knowledge Resists Specification.
+Handover: its exit is the backreference to ADRN (gm-config/fsm/graph.json TACIT -> ADRN, backreference) by design, taken for each irreversible fork found; cite Tacit Knowledge Resists Specification.
 
 Fan-out: one subagent per candidate constraint, each with its own session id (goal-s1-d8-tacit-N), decides signature-or-ADR for that candidate; candidates are independent and run in parallel. Canary: a candidate with no signature or ADR outcome is a slice that did not run; an ADR written for a reversible choice, or a subagent that edits unrelated code, is off-task. Standing tension: the exit is a backreference by design, so the nominated destination set is {ADRN (backreference)} and it is taken for each irreversible fork found.
 
@@ -90,7 +90,7 @@ The descriptions of the system are the README, AGENTS.md, the documentation unde
 
 ### CTXEXPLODE - Context Explosion in Whole-Repo Reasoning - Grabowski
 
-Handover: its exit is the backreference to PROGDISC (fsm/graph.json CTXEXPLODE -> PROGDISC, backreference) by design, taken when a sweep cannot be scoped; cite Context Explosion in Whole-Repo Reasoning - Grabowski.
+Handover: its exit is the backreference to PROGDISC (gm-config/fsm/graph.json CTXEXPLODE -> PROGDISC, backreference) by design, taken when a sweep cannot be scoped; cite Context Explosion in Whole-Repo Reasoning - Grabowski.
 
 Fan-out: none. The touched set is one list computed once from `git_diff` plus the `callers` replies, and every search in the sweep depends on it, so no independent slice exists and the sweep runs single-session. Canary: a search in the sweep with no recorded path scope, or a `Read` outside the touched set plus the located paths, shows the scope was not held. Standing tension: the exit is a backreference by design, so the nominated destination set is {PROGDISC (backreference, the agent must read the whole repository)}, taken when a sweep cannot be scoped.
 
