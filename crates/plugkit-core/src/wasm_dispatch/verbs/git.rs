@@ -6415,40 +6415,33 @@ pub(super) const GIT_BRANCH_HELP: &str = r#"git_branch lists local branches as {
 
 pub(super) fn shadowed_remote_refs(cwd: Option<&str>) -> serde_json::Map<String, Value> {
     let mut found = serde_json::Map::new();
-    let listing = git_call_argv(&["for-each-ref", "--format=%(refname)", "refs/remotes"], cwd);
+    let listing = git_call_argv(
+        &["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"],
+        cwd,
+    );
     if git_exit_code(&listing) != 0
         || listing.get("stdout_truncated").and_then(Value::as_bool) == Some(true)
     {
         return found;
     }
-    let trackers: Vec<String> = listing
-        .get("stdout")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
-        .collect();
-    let mut remotes: Vec<&str> = trackers
-        .iter()
-        .filter_map(|name| name.strip_prefix("refs/remotes/"))
-        .filter_map(|rest| rest.split('/').next())
-        .collect();
-    remotes.sort_unstable();
-    remotes.dedup();
-    if remotes.is_empty() {
-        return found;
+    let stdout = listing.get("stdout").and_then(Value::as_str).unwrap_or("");
+    let mut tracking: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut locals: Vec<&str> = Vec::new();
+    for line in stdout.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix("refs/remotes/") {
+            tracking.insert(name);
+        } else if let Some(name) = line.strip_prefix("refs/heads/") {
+            if name.contains('/') {
+                locals.push(name);
+            }
+        }
     }
-    let patterns: Vec<String> = remotes.iter().map(|remote| format!("refs/heads/{remote}")).collect();
-    let mut argv: Vec<&str> = vec!["for-each-ref", "--format=%(refname)"];
-    argv.extend(patterns.iter().map(String::as_str));
-    for local in git_stdout_lines(&argv, cwd) {
-        let Some(name) = local.strip_prefix("refs/heads/") else {
-            continue;
-        };
-        let tracking = format!("refs/remotes/{name}");
-        if trackers.contains(&tracking) {
-            found.insert(name.to_string(), json!([local, tracking]));
+    for name in locals {
+        if tracking.contains(name) {
+            found.insert(
+                name.to_string(),
+                json!([format!("refs/heads/{name}"), format!("refs/remotes/{name}")]),
+            );
         }
     }
     found
