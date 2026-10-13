@@ -366,9 +366,16 @@ pub(super) fn index_progress_of(result: &Value) -> Value {
     json!({
         "files_indexed": result.get("files_indexed").and_then(|v| v.as_u64()).unwrap_or(0),
         "files_deferred": result.get("deferred_files").and_then(|v| v.as_u64()).unwrap_or(0),
+        "files_enumerated": result.get("files_enumerated").and_then(|v| v.as_u64()).unwrap_or(0),
+        "file_source": result.get("file_source").cloned().unwrap_or(Value::Null),
+        "removed_files": result.get("removed_files").and_then(|v| v.as_u64()).unwrap_or(0),
         "chunks": result.get("chunks").and_then(|v| v.as_u64()).unwrap_or(0),
         "complete": result.get("complete").and_then(|v| v.as_bool()).unwrap_or(false),
-        "pass_ms": result.get("pass_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+        // The pass reports `pass_ms` as a per-stage object whose `total` is the whole pass.
+        "pass_ms": result
+            .get("pass_ms")
+            .and_then(|v| v.as_u64().or_else(|| v.get("total").and_then(|t| t.as_u64())))
+            .unwrap_or(0),
     })
 }
 
@@ -770,6 +777,12 @@ pub(super) fn codesearch_at_root(
         "stage_ms": sum_stage_ms(prior_stage_ms, stage_ms),
         "degraded": degraded,
     });
+    // An index pass that ran inside this dispatch rides the reply: its `removed_files` says how many
+    // previously indexed files fell outside this root's universe and were pruned before the corpus
+    // above was ranked.
+    if let Some(pass) = body.get("index_progress").filter(|v| v.is_object()) {
+        raw["index_pass"] = pass.clone();
+    }
     if let Some(scope) = scope.as_ref() {
         apply_scope_echo(&mut raw, scope, &[&vector_hits, &bm25_hits]);
     }
@@ -2680,6 +2693,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         if let Some(obj) = retry.as_object_mut() {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
             obj.insert("rebuild".to_string(), Value::Bool(false));
+            obj.insert("index_progress".to_string(), index_progress_of(&pass));
         }
         return codesearch_dispatch(&retry);
     }
@@ -2715,6 +2729,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
+                obj.insert("index_progress".to_string(), index_progress_of(&pass));
             }
             return codesearch_dispatch(&retry);
         }
@@ -2818,6 +2833,12 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
                     "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
                     "commits": commits,
                 });
+        // An index pass that ran inside this dispatch rides the reply: its `removed_files` says
+        // how many previously indexed files fell outside this project's universe and were pruned
+        // before the corpus above was ranked.
+        if let Some(pass) = body.get("index_progress").filter(|v| v.is_object()) {
+            raw["index_pass"] = pass.clone();
+        }
         if let Some(scope) = scope.as_ref() {
             apply_scope_echo(&mut raw, scope, &[&vector_ranked, &bm25_ranked_response]);
         }
@@ -2840,7 +2861,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     {
-        let _ = crate::code_index::index_topup(
+        let pass = crate::code_index::index_topup(
             ".",
             cfg.index.prune_pass_file_limit_ceiling,
             COLD_INDEX_PASS_BUDGET_MS,
@@ -2848,6 +2869,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         let mut retry = body.clone();
         if let Some(obj) = retry.as_object_mut() {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
+            obj.insert("index_progress".to_string(), index_progress_of(&pass));
         }
         return codesearch_dispatch(&retry);
     }
@@ -2885,6 +2907,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
                 "phrase_hits": phrase_hits,
                 "phrase_hits_total": phrase_total,
                 "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
+                "index_pass": body.get("index_progress").cloned().unwrap_or(Value::Null),
             }),
         ),
     )
