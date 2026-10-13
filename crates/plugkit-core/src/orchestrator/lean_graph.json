@@ -48,7 +48,7 @@
       "key": "G_SURFACE",
       "prose_key": "g_surface",
       "label": "variant did not decrease",
-      "kind": "gate"
+      "kind": "terminal"
     },
     {
       "key": "COMPLETE",
