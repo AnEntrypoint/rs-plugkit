@@ -313,7 +313,7 @@ pub fn websearch(body: &Value) -> u64 {
             chosen = name.clone();
             endpoint = url.clone();
             html = text.clone();
-            status = seen_status;
+            status = seen_status.clone();
         }
         if hits > 0 {
             chosen = name.clone();
@@ -343,13 +343,13 @@ pub fn websearch(body: &Value) -> u64 {
         "attempts": attempts,
     });
     if raw_requested {
-        let (text, truncated) = clamp_chars(html, max_chars);
+        let (text, truncated) = clamp_chars(&html, max_chars);
         data["body"] = json!(text);
         data["truncated"] = json!(truncated);
         return ok("websearch", data);
     }
 
-    let mut results = parse_results(html);
+    let mut results = parse_results(&html);
     let allowed = string_list(body, &["allowed_domains", "allowedDomains"]);
     let blocked = string_list(body, &["blocked_domains", "blockedDomains"]);
     if !allowed.is_empty() {
