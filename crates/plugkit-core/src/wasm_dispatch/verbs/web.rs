@@ -1,5 +1,8 @@
 use crate::config_path::validate_fetch_url;
-use crate::wasm_dispatch::host_abi::{host_fetch, unpack_to_value};
+use crate::orchestrator::yaml_util::base64_decode;
+use crate::wasm_dispatch::host_abi::{
+    host_env_get, host_fetch, unpack_to_string, unpack_to_value,
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -13,19 +16,38 @@ pub const FETCH_MAX_ANSWER_CHARS: usize = 200_000;
 
 pub const WEBSEARCH_DEFAULT_LIMIT: usize = 8;
 pub const WEBSEARCH_MAX_LIMIT: usize = 25;
+pub const FETCH_SEARCH_DEFAULT_LIMIT: usize = 10;
+pub const FETCH_SEARCH_MAX_LIMIT: usize = 50;
+pub const SEARCH_MAX_BACKENDS: usize = 4;
+pub const SEARCH_ENV_BACKEND: &str = "GM_SEARCH_BACKEND";
+pub const SEARCH_BACKENDS: &[(&str, &str)] = &[
+    ("duckduckgo", "https://html.duckduckgo.com/html/?q={q}"),
+    ("mojeek", "https://www.mojeek.com/search?q={q}"),
+    ("bing", "https://www.bing.com/search?q={q}&setlang=en"),
+    ("searxng", "https://searx.be/search?q={q}"),
+    ("brave", "https://search.brave.com/search?q={q}"),
+    ("marginalia", "https://search.marginalia.nu/search?query={q}"),
+];
 pub const WEBSEARCH_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub const WEBSEARCH_ENGINE_DUCKDUCKGO: &str = "duckduckgo";
 pub const WEBSEARCH_USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
 pub const FETCH_HELP: &str = "\
-fetch {url, prompt?, max_chars?, raw?, method?, headers?, body?, timeoutMs?, answer_max_chars?}.
+fetch {url, | query, prompt?, max_chars?, raw?, method?, headers?, body?, timeoutMs?, answer_max_chars?}.
   url: the page to fetch; https:// and http:// only, no whitespace, at most 2048 bytes.
   The reply is the READABLE page, not the transport payload: HTML is converted to markdown before
   it is returned (head, script, style, svg, nav, header, footer, aside, form and iframe blocks are
   dropped; article or main wins over the rest of the document; headings, lists, links, images,
   code fences and tables are kept as markdown). A body that is not HTML (JSON, plain text, CSV)
   is returned as it arrived.
+  query: (aliases q, search) with no url turns the call into a web search, the discovery half of
+          this port. Backends are keyless and tried in order -- duckduckgo, mojeek, bing, searxng,
+          brave, marginalia -- until one parses into hits; at most 4 are tried per call. Pick one
+          with backend (alias engine, a name or a results-page template holding {q}) or with the
+          GM_SEARCH_BACKEND environment variable, both comma-separated lists. count (alias limit,
+          max_results, k, n) caps the hits, default 10, ceiling 50. Rows are rank, title, url, host
+          and snippet, a few KB in total; no raw HTML is ever returned unless raw:true.
   prompt: when present, the reply answers it instead of carrying the page. The answer is the set of
           passages of the converted page that best match the prompt, so it is compact and verbatim:
           gm has no outbound model dependency, and answer_mode is always \"extractive\". Pass no
@@ -47,8 +69,9 @@ websearch {query, limit?, allowed_domains?, blocked_domains?, url?, engine?, max
   url: fetch this search engine results page instead of building one from query. Use it when the
        default endpoint answers with a challenge or consent page, or to point at another engine.
   engine: \"duckduckgo\" (the default). It reads https://html.duckduckgo.com/html/, which needs no
-       credential and no API key; there is no other built-in engine, so a second engine arrives by
-       passing its results page as url.
+       credential and no API key. Any other backend is reached by naming it in backend (or engine,
+       or GM_SEARCH_BACKEND) or by passing its results page as url; fetch {query} walks the whole
+       keyless list (duckduckgo, mojeek, bing, searxng, brave, marginalia) with fallback.
   limit: results returned, default 8, ceiling 25 (max_results, maxResults and k are aliases).
   allowed_domains / blocked_domains: arrays (or comma-separated strings) of host suffixes. A result
        is kept only when its host matches an allowed suffix, and dropped when it matches a blocked
@@ -77,7 +100,11 @@ const STOPWORDS: &[&str] = &[
 pub fn fetch(body: &Value) -> u64 {
     let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
     if url.is_empty() {
-        return err("fetch", "url required");
+        let query = trimmed_str(body, &["query", "q", "search"]);
+        if query.is_empty() {
+            return err("fetch", "url required (or query, q or search for a web search)");
+        }
+        return search_reply(body, &query, "fetch", &["count", "limit", "max_results", "maxResults", "k", "n"], FETCH_SEARCH_DEFAULT_LIMIT);
     }
     if let Err(reason) = validate_fetch_url(url) {
         return err_coded("fetch", ERR_CODE_INVALID_ARGS, &reason);
@@ -288,7 +315,8 @@ pub fn websearch(body: &Value) -> u64 {
     data["filters"] = json!({ "allowed_domains": allowed, "blocked_domains": blocked });
     data["results"] = json!(results
         .iter()
-        .map(|r| json!({ "title": r.title, "url": r.url, "host": r.host, "snippet": clamp_chars(&r.snippet, 400).0 }))
+        .enumerate()
+        .map(|(rank, r)| json!({ "rank": rank + 1, "title": r.title, "url": r.url, "host": r.host, "snippet": clamp_chars(&r.snippet, 400).0 }))
         .collect::<Vec<Value>>());
     if results.is_empty() {
         data["note"] = json!("no result parsed out of the response: the endpoint most often answers a challenge or consent page. Pass url with a results page of your own, or fetch a known url directly.");
@@ -678,9 +706,9 @@ pub fn strip_noise(html: &str) -> String {
 
 pub fn extract_main(html: &str) -> String {
     let chars: Vec<char> = html.chars().collect();
+    let mut best: Option<(usize, usize)> = None;
     for name in ["article", "main"] {
         let mut from = 0usize;
-        let mut best: Option<(usize, usize)> = None;
         while let Some(start) = find_open_tag(&chars, from, name) {
             match matching_close(&chars, start, name) {
                 Some((close_start, next)) => {
@@ -697,22 +725,36 @@ pub fn extract_main(html: &str) -> String {
                 None => from = start + name.chars().count() + 1,
             }
         }
-        if let Some((start, close_start)) = best {
-            let content_start = after_gt(&chars, start);
-            if close_start > content_start {
-                let inner: String = chars[content_start..close_start].iter().collect();
-                if inner.chars().count() > 200 {
-                    return inner;
-                }
+    }
+    if let Some((start, close_start)) = best {
+        let content_start = after_gt(&chars, start);
+        if close_start > content_start {
+            let inner: String = chars[content_start..close_start].iter().collect();
+            if inner.chars().count() > 200 {
+                return inner;
             }
         }
     }
     html.to_string()
 }
 
+const MAIN_REGION_MIN_CHARS: usize = 500;
+
 pub fn html_to_markdown(html: &str) -> String {
     let cleaned = strip_noise(html);
-    let source = extract_main(&cleaned);
+    let region = tags_to_markdown(&extract_main(&cleaned));
+    if region.chars().count() >= MAIN_REGION_MIN_CHARS {
+        return region;
+    }
+    let whole = tags_to_markdown(&cleaned);
+    if whole.chars().count() > region.chars().count() {
+        whole
+    } else {
+        region
+    }
+}
+
+pub fn tags_to_markdown(source: &str) -> String {
     let chars: Vec<char> = source.chars().collect();
     let n = chars.len();
     let mut out = String::with_capacity(n / 2 + 64);
@@ -1309,4 +1351,354 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).to_string()
+}
+
+const SEARCH_ENGINE_HOSTS: &[&str] = &[
+    "duckduckgo.com", "bing.com", "microsoft.com", "msn.com", "live.com", "mojeek.com",
+    "searx.be", "searxng.site", "brave.com", "search.brave.com", "marginalia.nu", "google.com",
+    "yandex.com", "startpage.com", "ecosia.org", "qwant.com",
+];
+
+const SEARCH_SNIPPET_SCAN_CHARS: usize = 1_200;
+
+fn search_reply(
+    body: &Value,
+    query: &str,
+    verb: &str,
+    limit_keys: &[&str],
+    default_limit: usize,
+) -> u64 {
+    let limit = match bounded_usize(
+        body,
+        limit_keys,
+        default_limit,
+        FETCH_SEARCH_MAX_LIMIT,
+        verb,
+        "count",
+    ) {
+        Ok(n) => n,
+        Err(reply) => return reply,
+    };
+    let timeout_ms = match timeout_ms_of(body, WEBSEARCH_DEFAULT_TIMEOUT_MS, verb) {
+        Ok(n) => n,
+        Err(reply) => return reply,
+    };
+    let raw_requested = flag(body, &["raw", "full_response", "fullResponse"]);
+    let max_chars = match bounded_usize(
+        body,
+        &["max_chars", "maxChars"],
+        if raw_requested {
+            FETCH_RAW_DEFAULT_MAX_CHARS
+        } else {
+            FETCH_DEFAULT_MAX_CHARS
+        },
+        FETCH_MAX_MAX_CHARS,
+        verb,
+        "max_chars",
+    ) {
+        Ok(n) => n,
+        Err(reply) => return reply,
+    };
+    let allowed = string_list(body, &["allowed_domains", "allowedDomains"]);
+    let blocked = string_list(body, &["blocked_domains", "blockedDomains"]);
+    let backends = search_backends(body);
+    let tried: Vec<String> = backends
+        .iter()
+        .take(SEARCH_MAX_BACKENDS)
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut attempts: Vec<Value> = Vec::new();
+    for (name, template) in backends.iter().take(SEARCH_MAX_BACKENDS) {
+        let endpoint = backend_url(template, query);
+        if let Err(reason) = validate_fetch_url(&endpoint) {
+            attempts.push(json!({ "backend": name, "error": reason }));
+            continue;
+        }
+        let opts = json!({
+            "timeoutMs": timeout_ms,
+            "headers": { "User-Agent": WEBSEARCH_USER_AGENT, "Accept-Language": "en-US,en;q=0.9" },
+        });
+        let v = host_fetch_value(&endpoint, &opts);
+        let completed = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+        let status = v.get("status").cloned().unwrap_or(Value::Null);
+        let html = v.get("body").and_then(|b| b.as_str()).unwrap_or("");
+        if !completed || html.is_empty() {
+            attempts.push(json!({
+                "backend": name,
+                "status": status,
+                "error": v.get("error").cloned().unwrap_or_else(|| json!(format!("http status {status}"))),
+            }));
+            continue;
+        }
+        let mut data = json!({
+            "ok": true,
+            "mode": "search",
+            "query": query,
+            "backend": name,
+            "endpoint": endpoint,
+            "status": status,
+            "body_chars": html.chars().count(),
+        });
+        if raw_requested {
+            let (text, truncated) = clamp_chars(html, max_chars);
+            data["body"] = json!(text);
+            data["truncated"] = json!(truncated);
+            if !attempts.is_empty() {
+                data["attempts"] = json!(attempts);
+            }
+            return ok(verb, data);
+        }
+        let mut results = parse_backend_results(html);
+        if !allowed.is_empty() {
+            results.retain(|r| host_matches_any(&r.host, &allowed));
+        }
+        if !blocked.is_empty() {
+            results.retain(|r| !host_matches_any(&r.host, &blocked));
+        }
+        if results.is_empty() {
+            attempts.push(json!({
+                "backend": name,
+                "status": status,
+                "hits": 0,
+                "error": "no result parsed out of the response",
+            }));
+            continue;
+        }
+        let found = results.len();
+        results.truncate(limit);
+        data["count"] = json!(results.len());
+        data["found"] = json!(found);
+        data["limit"] = json!(limit);
+        data["truncated"] = json!(found > results.len());
+        data["filters"] = json!({ "allowed_domains": allowed, "blocked_domains": blocked });
+        data["results"] = json!(results
+            .iter()
+            .enumerate()
+            .map(|(rank, r)| json!({
+                "rank": rank + 1,
+                "title": r.title,
+                "url": r.url,
+                "host": r.host,
+                "snippet": clamp_chars(&r.snippet, 400).0,
+            }))
+            .collect::<Vec<Value>>());
+        if !attempts.is_empty() {
+            data["attempts"] = json!(attempts);
+        }
+        return ok(verb, data);
+    }
+    err_json(
+        verb,
+        json!({
+            "error": "no search backend returned hits",
+            "query": query,
+            "mode": "search",
+            "backends": tried,
+            "attempts": attempts,
+            "note": "every keyless backend answered with a challenge page or nothing parseable. Pass url with a results page of your own, name a backend with backend, or fetch a known url directly.",
+        }),
+    )
+}
+
+fn parse_backend_results(html: &str) -> Vec<SearchResult> {
+    if html.to_ascii_lowercase().contains("result__a") {
+        return parse_results(html);
+    }
+    parse_anchor_results(html)
+}
+
+fn parse_anchor_results(html: &str) -> Vec<SearchResult> {
+    let lower = html.to_ascii_lowercase();
+    let mut out: Vec<SearchResult> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = lower[from..].find("<a ") {
+        let at = from + rel;
+        let href_at = match lower[at..].find("href=\"") {
+            Some(r) => at + r + 6,
+            None => break,
+        };
+        let href_end = match lower[href_at..].find('"') {
+            Some(r) => href_at + r,
+            None => break,
+        };
+        let gt = match html[href_end..].find('>') {
+            Some(r) => href_end + r,
+            None => break,
+        };
+        let close = match lower[gt..].find("</a>") {
+            Some(r) => gt + r,
+            None => break,
+        };
+        let url = unwrap_backend_url(&html[href_at..href_end]);
+        let title = clean_text(&html[gt + 1..close]);
+        let snippet = snippet_after(html, &lower, close + 4);
+        from = close + 4;
+        let host = host_of(&url);
+        let key = url.split('#').next().unwrap_or(&url).to_string();
+        if !url.starts_with("http")
+            || title.chars().count() < 3
+            || host.is_empty()
+            || is_engine_host(&host)
+            || seen.contains(&key)
+        {
+            continue;
+        }
+        seen.push(key);
+        out.push(SearchResult {
+            title,
+            url,
+            host,
+            snippet,
+        });
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    out
+}
+
+fn snippet_after(html: &str, lower: &str, from: usize) -> String {
+    let limit = (from + SEARCH_SNIPPET_SCAN_CHARS).min(html.len());
+    let end = lower[from..]
+        .find("<a ")
+        .map(|r| from + r)
+        .unwrap_or(limit)
+        .min(limit);
+    if end <= from {
+        return String::new();
+    }
+    let text = clean_text(&html[from..end]);
+    if text.chars().count() < 25 {
+        return String::new();
+    }
+    clamp_chars(&text, 400).0
+}
+
+fn is_engine_host(host: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    SEARCH_ENGINE_HOSTS
+        .iter()
+        .any(|bad| host == *bad || host.ends_with(&format!(".{bad}")))
+}
+
+fn unwrap_backend_url(href: &str) -> String {
+    let mut h = href.trim().to_string();
+    if h.starts_with("//") {
+        h = format!("https:{h}");
+    }
+    let host = host_of(&h);
+    let (path, query) = match h.split_once('?') {
+        Some((p, q)) => (p.to_string(), q.to_string()),
+        None => (h.clone(), String::new()),
+    };
+    if host.ends_with("duckduckgo.com") {
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("uddg=") {
+                let decoded = percent_decode(v);
+                if decoded.starts_with("http") {
+                    return decoded;
+                }
+            }
+        }
+        return String::new();
+    }
+    if (host.ends_with("bing.com") || host.ends_with("microsoft.com")) && path.ends_with("/ck/a") {
+        for pair in query.split('&') {
+            if let Some(v) = pair.strip_prefix("u=") {
+                let payload = v.strip_prefix("a1").unwrap_or(v);
+                if let Some(decoded) = base64_url_target(payload) {
+                    return decoded;
+                }
+            }
+        }
+        return String::new();
+    }
+    h
+}
+
+fn base64_url_target(payload: &str) -> Option<String> {
+    let bytes = base64_decode(payload)
+        .ok()
+        .or_else(|| base64_decode(&payload.replace('-', "+").replace('_', "/")).ok())?;
+    let text = String::from_utf8(bytes).ok()?;
+    if text.starts_with("http://") || text.starts_with("https://") {
+        Some(text)
+    } else {
+        None
+    }
+}
+
+fn search_backends(body: &Value) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for raw in backend_names(body) {
+        let name = raw.trim().to_ascii_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        if name.starts_with("http://") || name.starts_with("https://") {
+            out.push(("custom".to_string(), name.clone()));
+            continue;
+        }
+        if let Some((_, template)) = SEARCH_BACKENDS.iter().find(|(known, _)| *known == name) {
+            out.push((name.clone(), (*template).to_string()));
+        }
+    }
+    if out.is_empty() {
+        return SEARCH_BACKENDS
+            .iter()
+            .map(|(name, template)| ((*name).to_string(), (*template).to_string()))
+            .collect();
+    }
+    for (name, template) in SEARCH_BACKENDS {
+        if !out.iter().any(|(chosen, _)| chosen == name) {
+            out.push(((*name).to_string(), (*template).to_string()));
+        }
+    }
+    out
+}
+
+fn backend_names(body: &Value) -> Vec<String> {
+    for key in ["backend", "engine", "search_backend"] {
+        match body.get(key) {
+            Some(Value::String(s)) => return split_backend_list(s),
+            Some(Value::Array(items)) => {
+                return items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| s.to_string())
+                    .collect()
+            }
+            _ => {}
+        }
+    }
+    env_backend().unwrap_or_default()
+}
+
+fn env_backend() -> Option<Vec<String>> {
+    let packed = unsafe {
+        host_env_get(
+            SEARCH_ENV_BACKEND.as_ptr(),
+            SEARCH_ENV_BACKEND.len() as u32,
+        )
+    };
+    unpack_to_string(packed)
+        .map(|raw| split_backend_list(&raw))
+        .filter(|names: &Vec<String>| !names.is_empty())
+}
+
+fn split_backend_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn backend_url(template: &str, query: &str) -> String {
+    let encoded = percent_encode(query);
+    if template.contains("{q}") {
+        template.replace("{q}", &encoded)
+    } else {
+        format!("{template}{encoded}")
+    }
 }
