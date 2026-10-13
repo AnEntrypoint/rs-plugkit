@@ -2,13 +2,13 @@
 
 This is a concern of the method, not a stage of a pipeline: it is entered from whichever node the work reaches it from, and left as soon as what it asks for holds. No concern gates entry to a set of nodes.
 
-PRESSURE removes what the change did not need. It finds every superseded path, fallback, duplicate, dead function and unreachable entry point the change left behind, deletes each one only after callers, codesearch and a build check prove nothing still depends on it, and keeps the diff net-negative or records why it is not. The node exits when the deletion-completeness check and reachability analysis pass for every removed or superseded symbol, the diff budget holds, and transition to=RECORD is dispatched.
+PRESSURE removes what the change did not need. It finds every superseded path, fallback, duplicate, dead function and unreachable entry point the change left behind, deletes each one only after callers, codesearch and a build check prove nothing still depends on it, and keeps the diff net-negative or records why it is not. The node exits when the deletion-completeness check and reachability analysis pass for every removed or superseded symbol, the diff budget holds, and transition to=ADRN is dispatched.
 
 Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each principle's attribution is the label used in gm-config/fsm/graph.json, given in its heading below.
 
 ## Verbs
 
-Enter from VERIFY through gate G_NET (predicate lean-net-negative), after the net-negative gate has passed; the walk then sits at state NODELETE, the node's first node in gm-config/fsm/graph.json. Read the size with git_diff {"stat":true}, then each file's diff with git_diff {"path":"<file>"}, so every added line traces to a row. git_log {"path":"<file>","limit":20} shows the churn on each touched file.
+Enter from G_INDEP through gate G_NET (predicate lean-net-negative), after the net-negative gate has passed; the walk then sits at state NODELETE, the node's first node in gm-config/fsm/graph.json. Read the size with git_diff {"stat":true}, then each file's diff with git_diff {"path":"<file>"}, so every added line traces to a row. git_log {"path":"<file>","limit":20} shows the churn on each touched file.
 
 For each symbol the change removed or left beside its replacement, prove removal with three checks: callers {"symbol":"<name>","limit":50} returns no edges; codesearch {"query":"<name>","mode":"literal","root":"<absolute project root>"} returns no hit outside history; codeinsight {"action":"orphans"} does not list it. For each removed file, codesearch {"query":"<file path>","mode":"filename","root":"<absolute project root>"} returns no hit.
 
@@ -82,7 +82,7 @@ Fan-out: two subagents run in parallel, one re-running the stateful invariant co
 
 Nominates: {DELETIONGATE}. Backreference: {INVARIANTRUN}.
 
-Behaviour drifts across many small edits. Before the last round of PRESSURE edits, the agent re-runs the stateful invariant command and the red-capable command from VERIFY through exec_js and compares the output with the output recorded in the rows. Each difference the diff did not intend is a drift finding, which fires the backreference to INVARIANTRUN, and the invariant is re-witnessed against the new behaviour before it is accepted.
+Behaviour drifts across many small edits. Before the last round of PRESSURE edits, the agent re-runs the stateful invariant command and the red-capable command from G_INDEP through exec_js and compares the output with the output recorded in the rows. Each difference the diff did not intend is a drift finding, which fires the backreference to INVARIANTRUN, and the invariant is re-witnessed against the new behaviour before it is accepted.
 
 ### DELETIONGATE - Deletion-Completeness Check
 
@@ -102,7 +102,7 @@ Fan-out: one subagent per touched file runs git_diff with its path and matches e
 
 Nominates: {CONVCOM}. Backreference: {DELETIONGATE}.
 
-The change is net-negative when added lines are at most removed lines in git_diff {"stat":true}. Where a change adds lines, each file's additions must trace to a row stating why those lines are the minimum the contract needs, and growth with no row is removed. G_NET applies this at the boundary into PRESSURE, and the agent applies it again before RECORD, since the sweep re-checks it at G_SWEEP. Growth fires the backreference from G_NET to DIFFBUDGET. An entry point with no caller fires the backreference from REACHABLE to DIFFBUDGET, and that entry point is given its caller or removed under DELETIONGATE.
+The change is net-negative when added lines are at most removed lines in git_diff {"stat":true}. Where a change adds lines, each file's additions must trace to a row stating why those lines are the minimum the contract needs, and growth with no row is removed. G_NET applies this at the boundary into G_NET, and the agent applies it again before RECORD, since the sweep re-checks it at G_SWEEP. Growth fires the backreference from G_NET to DIFFBUDGET. An entry point with no caller fires the backreference from REACHABLE to DIFFBUDGET, and that entry point is given its caller or removed under DELETIONGATE.
 
 ### REACHABLE - Reachability Analysis
 
@@ -122,7 +122,7 @@ Fan-out: one subagent per piece of state the change adds or touches runs codesea
 
 Nominates: {LEANSW}. Backreference: {ILLEGAL}.
 
-Every piece of mutable state the change adds or touches is classified as essential or accidental. State derivable from other state is accidental and is removed, its readers computing the value from the source. Essential state is kept in one place with one writer per surface, confirmed by codesearch literal on the state's name, which must show one writer. State that is accidental because the type does not express the invariant fires the backreference to ILLEGAL, which returns the chain to CONTRACT.
+Every piece of mutable state the change adds or touches is classified as essential or accidental. State derivable from other state is accidental and is removed, its readers computing the value from the source. Essential state is kept in one place with one writer per surface, confirmed by codesearch literal on the state's name, which must show one writer. State that is accidental because the type does not express the invariant fires the backreference to ILLEGAL, which returns the chain to G_CONTRACT.
 
 ### LEANSW - A Plea for Lean Software - Niklaus Wirth
 
@@ -165,10 +165,10 @@ Deleted symbol and file lists live in the commit and the rows. Diff stats live i
 
 ## Transition
 
-The node is entered from VERIFY through G_NET, the gate for "change closes net-negative, or states why not". Its predicate lean-net-negative is blocking: it passes only when added lines in the working diff against HEAD are at most the removed lines. Enter the walk at state NODELETE only after the G_NET gate passes. A denial names next_dispatch: dispatch it, which removes superseded or duplicated code in this change, then re-dispatch the G_NET transition. The predicate reads no growth reason, so the denial clears by shrinking the diff, not by describing it.
+The node is entered from G_INDEP through G_NET, the gate for "change closes net-negative, or states why not". Its predicate lean-net-negative is blocking: it passes only when added lines in the working diff against HEAD are at most the removed lines. Enter the walk at state NODELETE only after the G_NET gate passes. A denial names next_dispatch: dispatch it, which removes superseded or duplicated code in this change, then re-dispatch the G_NET transition. The predicate reads no growth reason, so the denial clears by shrinking the diff, not by describing it.
 
-The exit is DIFFBUDGET to CONVCOM, a forward edge with no gate. Dispatch transition {"to":"RECORD"} once every removal has its zero-hit or reachability witness, and the net count passes. The gate lean-contract-recorded is checked at the next boundary, in RECORD, where it refuses until every PRD row is closed and the worktree is clean.
+The exit is DIFFBUDGET to CONVCOM, a forward edge with no gate. Dispatch transition {"to":"ADRN"} once every removal has its zero-hit or reachability witness, and the net count passes. The gate lean-contract-recorded is checked at the next boundary, in ADRN, where it refuses until every PRD row is closed and the worktree is clean.
 
-Feedback routes each discovery to the earliest node able to fix it. A net-positive diff that removals cannot shrink returns to G_NET and BUILD, because the grown code must be rebuilt in a smaller shape. A superseded path still reachable is cut under DELETIONGATE here. A new symbol with no entry point is removed here. An accidental state caused by a type that does not express its invariant returns to CONTRACT through ILLEGAL. A description that exceeds its content returns to CONTRACT through DEEPMOD. Duplicate behaviour is merged in BUILD through DRY. A drift finding returns to VERIFY through INVARIANTRUN, because behaviour is re-witnessed there rather than accepted here.
+Feedback routes each discovery to the earliest node able to fix it. A net-positive diff that removals cannot shrink returns to G_NET and BUILD, because the grown code must be rebuilt in a smaller shape. A superseded path still reachable is cut under DELETIONGATE here. A new symbol with no entry point is removed here. An accidental state caused by a type that does not express its invariant returns to G_CONTRACT through ILLEGAL. A description that exceeds its content returns to G_CONTRACT through DEEPMOD. Duplicate behaviour is merged in TOTALITY through DRY. A drift finding returns to G_INDEP through INVARIANTRUN, because behaviour is re-witnessed there rather than accepted here.
 
 A gate denial is never retried blind: dispatch the next_dispatch verb the denial names, then re-dispatch the transition. An identical denial repeated three times is escalated by the repeat threshold, and the escalation is read before any further dispatch.
