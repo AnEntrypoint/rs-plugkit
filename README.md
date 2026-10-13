@@ -477,6 +477,14 @@ nothing, so enforcement is never silently off; a message that holds only
 attribution lines is refused. PRD resolution notes bundled into a commit message
 are screened too.
 
+`git_push` checks that the push landed against the commit it pushed: the
+remote-tracking ref when it equals that commit, else `git ls-remote` on the push
+URL (`pushurl` when set). A fork workflow with a split fetch and push URL
+therefore verifies where it pushed, and a single-branch clone verifies a feature
+branch whose tracking ref its fetch refspec never creates; before, both answered
+`verification_failed` for a push that had landed. When the two URLs differ,
+`remote_before` and the `pushed_commits` delta read the push URL's branch too.
+
 `phase-status` answers the current `phase`, `last_skill`, `prd_pending_count`
 and `mutables_pending_count` (the same open-row counts `instruction` reports, a
 row held `blockedBy` external or out-of-reach not counted), `session_id`,

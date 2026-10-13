@@ -1068,6 +1068,42 @@ pub(super) fn git_fetch_and_resolve_remote(
     resolve_ref(repo, &remote_tracking_ref(branch))
 }
 
+pub(super) fn split_push_url(cwd: Option<&str>) -> Option<String> {
+    let push = configured_push_url(cwd, "origin")?;
+    let fetch = git_call_argv(&["remote", "get-url", "origin"], cwd)
+        .get("stdout")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    (!fetch.is_empty() && fetch != push).then_some(push)
+}
+
+pub(super) fn head_at_push_url(
+    cwd: Option<&str>,
+    push_url: &str,
+    branch: &str,
+    fallback: Option<&SshHttpsFallback>,
+) -> Option<String> {
+    let target = format!("refs/heads/{}", branch.strip_prefix("refs/heads/").unwrap_or(branch));
+    let argv = ["ls-remote", push_url, target.as_str()];
+    let reply = match fallback {
+        Some(f) => f.call(&argv, cwd),
+        None => git_call_argv(&argv, cwd),
+    };
+    if git_exit_code(&reply) != 0 {
+        return None;
+    }
+    reply
+        .get("stdout")
+        .and_then(Value::as_str)?
+        .lines()
+        .next()?
+        .split_whitespace()
+        .next()
+        .map(String::from)
+}
+
 pub(super) fn verify_push_landed(
     cwd: Option<&str>,
     branch: &str,
@@ -1075,28 +1111,33 @@ pub(super) fn verify_push_landed(
     remote_before: Option<&str>,
     fallback: Option<&SshHttpsFallback>,
 ) -> Result<(String, bool), String> {
-    let _ = match fallback {
-        Some(f) => f.call(&["fetch", "origin", branch], cwd),
-        None => git_call_argv(&["fetch", "origin", branch], cwd),
-    };
-    let remote_after = resolve_ref(cwd, &remote_tracking_ref(branch));
-    let remote_after = match remote_after {
-        Some(s) => s,
-        None => {
-            return Err(format!(
-                "could not resolve origin/{} after push -- remote-tracking ref missing",
-                branch
-            ))
-        }
-    };
-    if remote_after != local_head {
-        return Err(format!(
-            "push claimed success but origin/{} ({}) does not match local HEAD ({}) after fetch -- remote did not actually advance to this commit",
-            branch, remote_after, local_head
-        ));
-    }
     let already_current = remote_before.map(|b| b == local_head).unwrap_or(false);
-    Ok((remote_after, already_current))
+    let split = split_push_url(cwd);
+    if split.is_none() {
+        let _ = match fallback {
+            Some(f) => f.call(&["fetch", "origin", branch], cwd),
+            None => git_call_argv(&["fetch", "origin", branch], cwd),
+        };
+        if let Some(tracked) = resolve_ref(cwd, &remote_tracking_ref(branch)) {
+            if tracked == local_head {
+                return Ok((tracked, already_current));
+            }
+        }
+    }
+    let url = split
+        .or_else(|| configured_push_url(cwd, "origin"))
+        .unwrap_or_else(|| "origin".to_string());
+    match head_at_push_url(cwd, &url, branch, fallback) {
+        Some(landed) if landed == local_head => Ok((landed, already_current)),
+        Some(landed) => Err(format!(
+            "push claimed success but {} at {} ({}) does not match local HEAD ({}) -- remote did not actually advance to this commit",
+            branch, url, landed, local_head
+        )),
+        None => Err(format!(
+            "could not read {} at {} after push -- the remote-tracking ref is missing and ls-remote answered nothing",
+            branch, url
+        )),
+    }
 }
 
 pub(super) const PUSHED_COMMITS_LIST_LIMIT: usize = 50;
@@ -1580,7 +1621,10 @@ fn git_push_receipt(body: &Value) -> u64 {
         return pack(refusal.to_string());
     }
     let mut ssh_fallback: Option<SshHttpsFallback> = None;
-    let mut remote_before = git_fetch_and_resolve_remote(repo.as_deref(), &branch, None);
+    let mut remote_before = match split_push_url(repo.as_deref()) {
+        Some(push_url) => head_at_push_url(repo.as_deref(), &push_url, &branch, None),
+        None => git_fetch_and_resolve_remote(repo.as_deref(), &branch, None),
+    };
     let allow_foreign_commits = body
         .get("allow_foreign_commits")
         .and_then(|v| v.as_bool())
