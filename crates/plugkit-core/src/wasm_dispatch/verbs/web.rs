@@ -1634,6 +1634,10 @@ fn parse_backend_results(html: &str, base: &str) -> Vec<SearchResult> {
     if html.to_ascii_lowercase().contains("result__a") {
         return parse_results(html);
     }
+    let scanned = scan_anchors(&strip_noise(html), base);
+    if !scanned.0.is_empty() {
+        return scanned.0;
+    }
     scan_anchors(html, base).0
 }
 
@@ -1641,7 +1645,7 @@ fn parse_backend_diagnostics(html: &str, base: &str) -> Vec<Value> {
     if looks_like_challenge(html) || html.to_ascii_lowercase().contains("result__a") {
         return Vec::new();
     }
-    scan_anchors(html, base).1
+    scan_anchors(&strip_noise(html), base).1
 }
 
 fn looks_like_challenge(html: &str) -> bool {
@@ -1683,9 +1687,26 @@ fn count_anchor_tags(html: &str) -> usize {
     count
 }
 
+fn anchor_href(tag: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(rel) = lower[from..].find("href=") {
+        let at = from + rel;
+        let at_attribute_boundary = at == 0
+            || matches!(
+                tag.as_bytes().get(at - 1).copied(),
+                Some(b' ') | Some(b'\n') | Some(b'\r') | Some(b'\t') | Some(b'<')
+            );
+        if at_attribute_boundary {
+            return attr_value(&tag[at..], "href");
+        }
+        from = at + 5;
+    }
+    None
+}
+
 fn scan_anchors(html: &str, base: &str) -> (Vec<SearchResult>, Vec<Value>) {
-    let cleaned = strip_noise(html);
-    let lower = cleaned.to_ascii_lowercase();
+    let lower = html.to_ascii_lowercase();
     let mut out: Vec<SearchResult> = Vec::new();
     let mut dropped: Vec<Value> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
@@ -1693,7 +1714,7 @@ fn scan_anchors(html: &str, base: &str) -> (Vec<SearchResult>, Vec<Value>) {
     while let Some(rel) = lower[from..].find("<a") {
         let at = from + rel;
         let anchor_starts_here = matches!(
-            cleaned.as_bytes().get(at + 2).copied(),
+            html.as_bytes().get(at + 2).copied(),
             Some(b' ') | Some(b'\n') | Some(b'\r') | Some(b'\t') | Some(b'>')
         );
         if !anchor_starts_here {
@@ -1704,15 +1725,8 @@ fn scan_anchors(html: &str, base: &str) -> (Vec<SearchResult>, Vec<Value>) {
             Some(r) => at + r,
             None => break,
         };
-        let href_at = match lower[at..tag_end].find("href=\"") {
-            Some(r) => at + r + 6,
-            None => {
-                from = tag_end + 1;
-                continue;
-            }
-        };
-        let href_end = match lower[href_at..tag_end].find('"') {
-            Some(r) => href_at + r,
+        let href = match anchor_href(&html[at..=tag_end]) {
+            Some(href) => href,
             None => {
                 from = tag_end + 1;
                 continue;
@@ -1722,9 +1736,9 @@ fn scan_anchors(html: &str, base: &str) -> (Vec<SearchResult>, Vec<Value>) {
             Some(r) => tag_end + r,
             None => break,
         };
-        let url = unwrap_backend_url(&absolute_href(&cleaned[href_at..href_end], base));
-        let title = clean_text(&cleaned[tag_end + 1..close]);
-        let snippet = snippet_after(&cleaned, &lower, close + 4);
+        let url = unwrap_backend_url(&absolute_href(&href, base));
+        let title = clean_text(&html[tag_end + 1..close]);
+        let snippet = snippet_after(html, &lower, close + 4);
         from = close + 4;
         let host = host_of(&url);
         let key = url.split('#').next().unwrap_or(&url).to_string();
@@ -1747,6 +1761,7 @@ fn scan_anchors(html: &str, base: &str) -> (Vec<SearchResult>, Vec<Value>) {
                     "url": url,
                     "title": title.chars().take(60).collect::<String>(),
                     "host": host,
+                    "href": href.chars().take(90).collect::<String>(),
                     "drop": drop,
                 }));
             }
@@ -1944,8 +1959,11 @@ fn json_candidate(
             "{HN_SEARCH_API}?query={}&tags=story&hitsPerPage={per_page}",
             percent_encode(query)
         ),
+        // action=query&list=search answers a real snippet per hit; opensearch answers only titles,
+        // so a row would carry a url and nothing to read. Both shapes stay parseable, because a
+        // caller passing its own MediaWiki url as url gets whichever action it named.
         "wikipedia" => format!(
-            "https://{}/w/api.php?action=opensearch&search={}&limit={per_page}&format=json",
+            "https://{}/w/api.php?action=query&list=search&srsearch={}&srlimit={per_page}&srprop=snippet&format=json",
             wiki_host(body),
             percent_encode(query)
         ),
@@ -2208,9 +2226,9 @@ fn parse_hn_results(value: &Value) -> Vec<SearchResult> {
         if title.is_empty() {
             title = object_id.clone();
         }
-        let mut snippet = json_text(hit.get("story_text"));
+        let mut snippet = clean_text(&json_text(hit.get("story_text")));
         if snippet.is_empty() {
-            snippet = json_text(hit.get("comment_text"));
+            snippet = clean_text(&json_text(hit.get("comment_text")));
         }
         if snippet.is_empty() {
             let points = json_text(hit.get("points"));
