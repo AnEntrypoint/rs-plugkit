@@ -374,6 +374,10 @@ impl Graph {
         "mutables_require_witness_evidence",
         "cas_max_attempts",
         "deviation_severity",
+        "pseudo_phases",
+        "residual_checks",
+        "long_gap_same_burst_ms",
+        "long_gap_retry_escalate_after",
     ];
 
     pub fn min_plugkit_version_unmet(&self) -> Option<String> {
