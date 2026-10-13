@@ -188,7 +188,10 @@ fn fallback_scope_strings(body: &Value, fields: &[&str]) -> Vec<String> {
 pub(super) fn literal_fallback_scan(body: &Value, term: &str, k: usize, regex: bool) -> Option<Value> {
     let cfg = crate::ragconfig::RagConfig::resolved();
     let literal_paths = fallback_scope_strings(body, FALLBACK_SCOPE_PATH_FIELDS);
-    let exclude_globs = fallback_scope_strings(body, FALLBACK_SCOPE_EXCLUDE_FIELDS);
+    let exclude_globs: Vec<String> = fallback_scope_strings(body, FALLBACK_SCOPE_EXCLUDE_FIELDS)
+        .iter()
+        .flat_map(|group| split_top_level_commas(group))
+        .collect();
     let glob_scope_requested = FALLBACK_SCOPE_GLOB_FIELDS
         .iter()
         .any(|field| matches!(body.get(*field), Some(Value::String(_)) | Some(Value::Array(_))));
@@ -838,11 +841,17 @@ pub(super) const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
 
 pub(super) const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit", "head_limit"];
 
-pub(super) fn scan_result_limit(body: &Value, fields: &[&str], default: u32) -> Result<(u32, bool), String> {
+pub(super) fn scan_result_limit(
+    body: &Value,
+    fields: &[&str],
+    default: u32,
+    zero_is_unlimited: bool,
+) -> Result<(u32, bool), String> {
     let mut seen: Vec<(&str, u64)> = Vec::new();
     for field in fields {
         if let Some(v) = body.get(*field) {
             match v.as_u64() {
+                Some(0) if zero_is_unlimited => seen.push((field, 0)),
                 Some(n) if n > 0 => seen.push((field, n)),
                 _ => {
                     return Err(format!(
@@ -854,14 +863,14 @@ pub(super) fn scan_result_limit(body: &Value, fields: &[&str], default: u32) -> 
     }
     match seen.first() {
         None => Ok((default, false)),
-        Some((_, first)) => {
+        Some((winner, first)) => {
             if let Some((other, other_n)) = seen.iter().find(|(_, n)| n != first) {
-                let (winner, _) = seen[0];
                 return Err(format!(
-                    "conflicting result limits in one body: \"{winner}\"={first} and \"{other}\"={other_n} -- pass one, not both"
+                    "\"{winner}\"={first} and \"{other}\"={other_n} both set the result limit in one body -- drop \"{other}\" and keep \"{winner}\""
                 ));
             }
-            Ok((*first as u32, true))
+            let limit = if *first == 0 { u32::MAX } else { *first as u32 };
+            Ok((limit, true))
         }
     }
 }
@@ -869,8 +878,10 @@ pub(super) fn scan_result_limit(body: &Value, fields: &[&str], default: u32) -> 
 pub(super) fn codesearch_result_limit(
     body: &Value,
     cfg: &crate::ragconfig::RagConfig,
+    mode: &str,
 ) -> Result<(u32, bool), String> {
-    scan_result_limit(body, CODESEARCH_LIMIT_FIELDS, cfg.budget.default_k as u32)
+    let zero_is_unlimited = matches!(mode, "literal" | "regex" | "filename");
+    scan_result_limit(body, CODESEARCH_LIMIT_FIELDS, cfg.budget.default_k as u32, zero_is_unlimited)
 }
 
 pub(super) fn scan_root(body: &Value) -> Option<&str> {
@@ -1094,13 +1105,34 @@ pub(super) fn scan_path_refs(paths: &[String]) -> Vec<&str> {
     paths.iter().map(String::as_str).collect()
 }
 
+pub(super) fn split_top_level_commas(text: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '{' | '[' => depth += 1,
+            '}' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(ch);
+    }
+    parts.push(current);
+    parts
+        .into_iter()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
 pub(super) fn glob_patterns_from(value: Option<&Value>) -> Result<Vec<String>, String> {
     match value {
         None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::String(s)) => Ok(Some(s.clone())
-            .filter(|g| !g.is_empty())
-            .into_iter()
-            .collect()),
+        Some(Value::String(s)) => Ok(split_top_level_commas(s)),
         Some(Value::Array(items)) => items
             .iter()
             .map(|item| match item.as_str() {
@@ -2007,7 +2039,7 @@ pub(super) fn grep(body: &Value) -> u64 {
         Err(e) => return err("grep", &e),
     };
     let path_refs = scan_path_refs(&paths);
-    let (max_matches, limit_was_explicit) = match scan_result_limit(body, GREP_LIMIT_FIELDS, GREP_DEFAULT_MAX_MATCHES) {
+    let (max_matches, limit_was_explicit) = match scan_result_limit(body, GREP_LIMIT_FIELDS, GREP_DEFAULT_MAX_MATCHES, false) {
         Ok(limit) => limit,
         Err(e) => return err("grep", &e),
     };
@@ -2166,7 +2198,7 @@ pub(super) fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> 
         Err(e) => return err("grep", &e),
     };
     let path_refs = scan_path_refs(&paths);
-    let (max_matches, _) = match scan_result_limit(body, GREP_LIMIT_FIELDS, GREP_DEFAULT_MAX_MATCHES) {
+    let (max_matches, _) = match scan_result_limit(body, GREP_LIMIT_FIELDS, GREP_DEFAULT_MAX_MATCHES, false) {
         Ok(limit) => limit,
         Err(e) => return err("grep", &e),
     };
@@ -2529,7 +2561,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         Ok(None) => body,
         Err(e) => return err("codesearch", &e),
     };
-    let (k, limit_was_explicit) = match codesearch_result_limit(body, &cfg) {
+    let (k, limit_was_explicit) = match codesearch_result_limit(body, &cfg, mode) {
         Ok(v) => v,
         Err(e) => return err("codesearch", &e),
     };
