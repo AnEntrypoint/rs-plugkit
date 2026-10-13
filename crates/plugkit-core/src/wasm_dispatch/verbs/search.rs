@@ -1674,6 +1674,8 @@ pub(super) fn verb_help_doc(verb: &str) -> Option<&'static str> {
         "websearch" | "web_search" | "web-search" => Some(super::web::WEBSEARCH_HELP),
         "git_merge_abort" => Some(super::git::GIT_MERGE_ABORT_HELP),
         "git_log" => Some(super::git::GIT_LOG_HELP),
+        "git_diff" => Some(super::git::GIT_DIFF_HELP),
+        "git_show" => Some(super::git::GIT_SHOW_HELP),
         "git_commit" | "git_amend" | "git_finalize" | "git_merge" | "git_reword" => {
             Some(super::git::GIT_COMMIT_HELP)
         }

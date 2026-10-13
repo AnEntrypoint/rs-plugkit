@@ -391,14 +391,26 @@ fn git_status_spill_listing(spill_name: &str, lines: &[String]) -> Option<String
     let mut body = lines.join("\n");
     body.push('\n');
     if crate::pkfs::write(&relative, &body) {
-        git_status_prune_spills();
+        git_spill_prune(GIT_STATUS_SPILL_PREFIX);
         Some(crate::pkfs::anchor(&relative))
     } else {
         None
     }
 }
 
-fn git_status_prune_spills() {
+fn git_spill_text(prefix: &str, text: &str) -> Option<String> {
+    let stamp = super::search::dispatch_task_id()
+        .unwrap_or_else(|| unsafe { host_now_ms() }.to_string());
+    let relative = format!("{GIT_STATUS_SPILL_DIR}/{prefix}{stamp}.txt");
+    if crate::pkfs::write(&relative, text) {
+        git_spill_prune(prefix);
+        Some(crate::pkfs::anchor(&relative))
+    } else {
+        None
+    }
+}
+
+fn git_spill_prune(prefix: &str) {
     let Some(Value::Array(entries)) = crate::pkfs::readdir(GIT_STATUS_SPILL_DIR) else {
         return;
     };
@@ -413,7 +425,7 @@ fn git_status_prune_spills() {
                 .or_else(|| entry.get("isFile"))
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
-            if !is_file || !name.starts_with(GIT_STATUS_SPILL_PREFIX) || !name.ends_with(".txt") {
+            if !is_file || !name.starts_with(prefix) || !name.ends_with(".txt") {
                 return None;
             }
             let mtime_ms = crate::pkfs::stat(&format!("{GIT_STATUS_SPILL_DIR}/{name}"))
@@ -4795,32 +4807,192 @@ pub(super) fn git_log(body: &Value) -> u64 {
     })
 }
 
+const GIT_TEXT_INLINE_DEFAULT_CHARS: usize = 60_000;
+const GIT_TEXT_INLINE_FLOOR_CHARS: usize = 1_000;
+const GIT_TEXT_INLINE_CEILING_CHARS: usize = 1_000_000;
+
+pub(super) const GIT_DIFF_HELP: &str = r#"git_diff answers {diff, truncated, range, paths}, or {files, count, ...} with name_only or name_status.
+  range|ref|rev    a revision or range; a bare remote-qualified name that matches several refs resolves to its remote-tracking ref and the reply says ambiguous_ref: true.
+  staged: true     the index against HEAD.
+  path|paths|files limit the diff to those pathspecs.
+  stat: true       the diffstat instead of the diff.
+  name_only: true  the changed file names only, as files: [path, ...] and count, no diff text.
+  name_status: true  the changed files with their status, as files: ["M path", "R100 old new", ...] and count.
+  max_chars        inline text cap (default 60000, 1000 to 1000000). Past it the reply is cut, truncated is true, total_bytes counts what git returned and spill_file names a file under .gm/exec-spool/out holding all of it, newest 20 kept. name_only and name_status cut at whole entries the same way.
+  The host captures at most 1 MiB from one git call; a larger diff answers error_code git_output_too_large (host_cap_bytes 1048576): list the files with name_only or name_status, then diff them with paths."#;
+
+pub(super) const GIT_SHOW_HELP: &str = r#"git_show answers {output, rev, truncated}, or {files, count, rev} with name_only or name_status.
+  rev|ref|sha|commit  a revision (default HEAD). "<rev>:<path>" and path print that file's content at the revision; a bare name matching several refs resolves to its remote-tracking ref and the reply says ambiguous_ref: true.
+  stat: true       the diffstat of the commit.
+  paths|files      limit a commit's diff to those pathspecs.
+  name_only: true  the files the commit changed, as files: [path, ...] and count, no diff text.
+  name_status: true  the files with their status, as files: ["M path", ...] and count.
+  max_chars        inline text cap (default 60000, 1000 to 1000000). Past it output is cut, truncated is true, total_bytes counts what git returned and spill_file names a file under .gm/exec-spool/out holding all of it (a blob read adds blob_bytes, its size).
+  The host captures at most 1 MiB from one git call; a larger commit or blob answers error_code git_output_too_large with host_cap_bytes 1048576 (a blob read adds blob_bytes, its real size); a blob that large has to be read from a checkout.
+  name_only and name_status exclude stat, path and a "<rev>:<path>" rev."#;
+
+fn body_max_chars(body: &Value, verb: &str) -> Result<usize, Value> {
+    match body.get("max_chars") {
+        None | Some(Value::Null) => Ok(GIT_TEXT_INLINE_DEFAULT_CHARS),
+        Some(raw) => match raw.as_u64() {
+            Some(chars) if chars >= 1 => Ok((chars as usize)
+                .clamp(GIT_TEXT_INLINE_FLOOR_CHARS, GIT_TEXT_INLINE_CEILING_CHARS)),
+            _ => Err(json!({
+                "error": format!("{verb} max_chars must be a positive integer"),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "field": "max_chars",
+            })),
+        },
+    }
+}
+
+struct CappedText {
+    text: String,
+    total_bytes: usize,
+    cut: bool,
+    spill_file: Option<String>,
+}
+
+fn cap_text(prefix: &str, full: String, max_chars: usize) -> CappedText {
+    let total_bytes = full.len();
+    let cut = total_bytes > max_chars;
+    let spill_file = if cut { git_spill_text(prefix, &full) } else { None };
+    let mut text = full;
+    if cut {
+        let end = (0..=max_chars).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+        text.truncate(end);
+    }
+    CappedText { text, total_bytes, cut, spill_file }
+}
+
+fn note_capped(data: &mut Value, capped: &CappedText) {
+    if capped.cut {
+        data["total_bytes"] = json!(capped.total_bytes);
+    }
+    if let Some(file) = &capped.spill_file {
+        data["spill_file"] = json!(file);
+        data["spill_retention"] = json!(format!(
+            "newest {GIT_STATUS_SPILL_KEEP} spill files per verb are kept in {GIT_STATUS_SPILL_DIR}"
+        ));
+    }
+}
+
+fn host_capture_limit_hit(reply: &Value) -> bool {
+    ["stderr", "error"].iter().any(|key| {
+        reply
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.contains("exceeded the host capture limit"))
+    })
+}
+
+fn host_capture_limit_detail(what: &str) -> Value {
+    json!({
+        "error": format!("{what} is larger than the 1 MiB the host captures from one git call"),
+        "error_code": "git_output_too_large",
+        "host_cap_bytes": 1_048_576,
+        "hint": "list the files with name_only or name_status, read one file's change with paths, or the diffstat with stat; a blob that large has to be read from a checkout",
+    })
+}
+
+fn name_lines(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(|line| line.replace('\t', " ").trim_end().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn names_reply(prefix: &str, mut lines: Vec<String>, max_chars: usize) -> Value {
+    let count = lines.len();
+    let mut used = 0usize;
+    let mut kept = 0usize;
+    for line in &lines {
+        if kept > 0 && used + line.len() + 1 > max_chars {
+            break;
+        }
+        used += line.len() + 1;
+        kept += 1;
+    }
+    let cut = kept < count;
+    let spill_file = if cut {
+        git_spill_text(prefix, &format!("{}\n", lines.join("\n")))
+    } else {
+        None
+    };
+    lines.truncate(kept);
+    let mut data = json!({ "files": lines, "count": count });
+    if cut {
+        data["truncated"] = json!(true);
+        data["shown"] = json!(kept);
+    }
+    if let Some(file) = spill_file {
+        data["spill_file"] = json!(file);
+    }
+    data
+}
+
+fn git_text_flags(body: &Value, verb: &str, fields: &[&str]) -> Result<Vec<bool>, Value> {
+    fields
+        .iter()
+        .map(|field| body_bool_flag(body, field, verb))
+        .collect()
+}
+
+fn names_flags_conflict(verb: &str, flags: &[(&str, bool)]) -> Option<Value> {
+    let named: Vec<&str> = flags.iter().filter(|(_, set)| *set).map(|(name, _)| *name).collect();
+    if named.len() < 2 {
+        return None;
+    }
+    Some(json!({
+        "error": format!("{verb} {} exclude each other; name one", named.join(", ")),
+        "error_code": ERR_CODE_INVALID_ARGS,
+    }))
+}
+
 pub(super) fn git_diff(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_diff",
         body,
         &[
-            "range", "ref", "rev", "staged", "stat", "path", "paths", "files",
+            "range", "ref", "rev", "staged", "stat", "path", "paths", "files", "name_only",
+            "name_status", "max_chars",
         ],
     ) {
         return refusal;
     }
     git_async_entry("git_diff", body, |body, plan| {
         let cwd = body_cwd(body);
-        let staged = body
-            .get("staged")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let flags = match git_text_flags(body, "git_diff", &["staged", "stat", "name_only", "name_status"]) {
+            Ok(flags) => flags,
+            Err(detail) => return Ok(err_json("git_diff", detail)),
+        };
+        let (staged, stat, name_only, name_status) = (flags[0], flags[1], flags[2], flags[3]);
+        if let Some(detail) = names_flags_conflict(
+            "git_diff",
+            &[("stat", stat), ("name_only", name_only), ("name_status", name_status)],
+        ) {
+            return Ok(err_json("git_diff", detail));
+        }
+        let max_chars = match body_max_chars(body, "git_diff") {
+            Ok(chars) => chars,
+            Err(detail) => return Ok(err_json("git_diff", detail)),
+        };
         let paths = body_pathspecs(body);
         let range = body_revision(body);
         let reading = disambiguated_revision(cwd, range);
-        let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
         let mut argv: Vec<&str> = vec!["diff", "--no-color"];
         if staged {
             argv.push("--staged");
         }
         if stat {
             argv.push("--stat");
+        }
+        if name_only {
+            argv.push("--name-only");
+        }
+        if name_status {
+            argv.push("--name-status");
         }
         if !range.is_empty() {
             argv.push(reading.spec.as_str());
@@ -4832,27 +5004,43 @@ pub(super) fn git_diff(body: &Value) -> u64 {
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
+            if host_capture_limit_hit(&r) {
+                return Ok(err_json(
+                    "git_diff",
+                    host_capture_limit_detail(&format!("the diff of {}", if range.is_empty() { "the working tree" } else { range })),
+                ));
+            }
             let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
             return Ok(err_json(
                 "git_diff",
                 json!({
                     "error": stderr,
                     "range": range,
-                    "hint": "Inspect the error for a Git failure or host execution limit; missing output is not an empty result. Narrow paths/range or use stat:true."
+                    "hint": "Inspect the error for a Git failure or host execution limit; missing output is not an empty result. Narrow paths/range or use stat:true, name_only:true or name_status:true."
                 }),
             ));
         }
-        let mut diff = r
+        let stdout = r
             .get("stdout")
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string();
-        let truncated = diff.len() > 60000;
-        if truncated {
-            let cut = (0..=60000).rev().find(|&i| diff.is_char_boundary(i)).unwrap_or(0);
-            diff.truncate(cut);
-        }
-        let mut data = json!({ "diff": diff, "truncated": truncated, "range": range, "paths": paths });
+        let mut data = if name_only || name_status {
+            let mut data = names_reply("git_diff-", name_lines(&stdout), max_chars);
+            data["range"] = json!(range);
+            data["paths"] = json!(paths);
+            data
+        } else {
+            let capped = cap_text("git_diff-", stdout, max_chars);
+            let mut data = json!({
+                "diff": capped.text,
+                "truncated": capped.cut,
+                "range": range,
+                "paths": paths,
+            });
+            note_capped(&mut data, &capped);
+            data
+        };
         note_ambiguous_refs(&mut data, &reading.ambiguous);
         Ok(ok("git_diff", data))
     })
@@ -4863,7 +5051,8 @@ pub(super) fn git_show(body: &Value) -> u64 {
         "git_show",
         body,
         &[
-            "rev", "ref", "sha", "commit", "stat", "path", "paths", "files",
+            "rev", "ref", "sha", "commit", "stat", "path", "paths", "files", "name_only",
+            "name_status", "max_chars",
         ],
     ) {
         return refusal;
@@ -4873,8 +5062,32 @@ pub(super) fn git_show(body: &Value) -> u64 {
         .iter()
         .find_map(|k| body.get(*k).and_then(|v| v.as_str()))
         .unwrap_or("HEAD");
-    let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
+    let flags = match git_text_flags(body, "git_show", &["stat", "name_only", "name_status"]) {
+        Ok(flags) => flags,
+        Err(detail) => return err_json("git_show", detail),
+    };
+    let (stat, name_only, name_status) = (flags[0], flags[1], flags[2]);
+    let max_chars = match body_max_chars(body, "git_show") {
+        Ok(chars) => chars,
+        Err(detail) => return err_json("git_show", detail),
+    };
     let path = body.get("path").and_then(|v| v.as_str());
+    let blob_read = path.is_some() || refspec.contains(':');
+    if let Some(detail) = names_flags_conflict(
+        "git_show",
+        &[("stat", stat), ("name_only", name_only), ("name_status", name_status)],
+    ) {
+        return err_json("git_show", detail);
+    }
+    if (name_only || name_status) && blob_read {
+        return err_json(
+            "git_show",
+            json!({
+                "error": "git_show name_only and name_status list a commit's files and cannot be combined with path or a \"<rev>:<path>\" rev",
+                "error_code": ERR_CODE_INVALID_ARGS,
+            }),
+        );
+    }
     let paths: Vec<String> = body
         .get("paths")
         .or_else(|| body.get("files"))
@@ -4894,6 +5107,12 @@ pub(super) fn git_show(body: &Value) -> u64 {
     if stat {
         argv.push("--stat");
     }
+    if name_only {
+        argv.extend(["--name-only", "--pretty=format:"]);
+    }
+    if name_status {
+        argv.extend(["--name-status", "--pretty=format:"]);
+    }
     argv.push(&combined_ref);
     if !paths.is_empty() {
         argv.push("--");
@@ -4905,6 +5124,20 @@ pub(super) fn git_show(body: &Value) -> u64 {
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let host_ok = r.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
     if !host_ok || code != 0 {
+        if host_capture_limit_hit(&r) {
+            let mut detail = host_capture_limit_detail(&format!("the output of git_show {combined_ref}"));
+            if blob_read {
+                let size = git_call_argv(&["cat-file", "-s", combined_ref.as_str()], cwd);
+                if let Some(bytes) = size
+                    .get("stdout")
+                    .and_then(Value::as_str)
+                    .and_then(|text| text.trim().parse::<u64>().ok())
+                {
+                    detail["blob_bytes"] = json!(bytes);
+                }
+            }
+            return err_json("git_show", detail);
+        }
         let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
         let repo = git_show_repo_name(cwd);
         let detail = if stderr.is_empty() {
@@ -4928,21 +5161,35 @@ pub(super) fn git_show(body: &Value) -> u64 {
             }),
         );
     }
-    let mut out = r
+    let stdout = r
         .get("stdout")
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .to_string();
-    let mut truncated = r
-        .get("stdout_truncated")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
-    if out.len() > 60000 {
-        let cut = (0..=60000).rev().find(|&i| out.is_char_boundary(i)).unwrap_or(0);
-        out.truncate(cut);
-        truncated = true;
-    }
-    let mut data = json!({ "output": out, "rev": refspec, "truncated": truncated });
+    let mut data = if name_only || name_status {
+        let mut data = names_reply("git_show-", name_lines(&stdout), max_chars);
+        data["rev"] = json!(refspec);
+        data
+    } else {
+        let capped = cap_text("git_show-", stdout, max_chars);
+        let mut data = json!({
+            "output": capped.text,
+            "rev": refspec,
+            "truncated": capped.cut,
+        });
+        note_capped(&mut data, &capped);
+        if blob_read && capped.cut {
+            let size = git_call_argv(&["cat-file", "-s", combined_ref.as_str()], cwd);
+            if let Some(bytes) = size
+                .get("stdout")
+                .and_then(Value::as_str)
+                .and_then(|text| text.trim().parse::<u64>().ok())
+            {
+                data["blob_bytes"] = json!(bytes);
+            }
+        }
+        data
+    };
     if reading.candidates.len() > 1 {
         let mut ambiguous = serde_json::Map::new();
         ambiguous.insert(refspec.to_string(), json!(reading.candidates));
