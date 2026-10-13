@@ -697,6 +697,7 @@ struct InstructionRequest {
     raw_phase: Option<String>,
 }
 
+#[cfg(target_arch = "wasm32")]
 fn parse_instruction_request(content: &str) -> InstructionRequest {
     let trimmed = content.trim();
     let mut req = InstructionRequest::default();
@@ -752,6 +753,7 @@ fn parse_instruction_request(content: &str) -> InstructionRequest {
     InstructionRequest { raw_phase, ..req }
 }
 
+#[cfg(target_arch = "wasm32")]
 pub fn handle_instruction(content: &str) -> (String, String, i32) {
     ilog(&format!(
         "instruction::handle start body_len={}",
