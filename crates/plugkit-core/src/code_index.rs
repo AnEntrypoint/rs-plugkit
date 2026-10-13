@@ -5183,14 +5183,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             continue;
         };
         if content.as_bytes().contains(&0u8) {
-            let has_source_extension = path
-                .rfind('.')
-                .and_then(|dot| lang_for_ext(&path[dot..]))
-                .is_some();
-            if !has_source_extension {
-                files_skipped_binary += 1;
-                continue;
-            }
             files_with_nul_scanned += 1;
         }
         files_scanned += 1;
