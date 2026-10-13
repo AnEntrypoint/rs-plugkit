@@ -683,36 +683,34 @@ fn investigate_readonly_payload(
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn handle_instruction(content: &str) -> (String, String, i32) {
-    ilog(&format!(
-        "instruction::handle start body_len={}",
-        content.len()
-    ));
-    let (graph, graph_tier, graph_path) = super::fsm::graph_detailed();
-    if let Some(refusal) = super::fsm::configured_graph_refusal(graph_tier) {
-        return (String::new(), refusal, 1);
-    }
+#[derive(Default)]
+struct InstructionRequest {
+    session_id: Option<String>,
+    lease_sessions: Option<Vec<serde_json::Value>>,
+    prompt: Option<String>,
+    asserted_instruction_hash: Option<String>,
+    asserted_policy_hash: Option<String>,
+    mode: Option<String>,
+    prd_full_detail: bool,
+    full_reply_requested: bool,
+    asserted_reply_hash: Option<String>,
+    raw_phase: Option<String>,
+}
+
+fn parse_instruction_request(content: &str) -> InstructionRequest {
     let trimmed = content.trim();
-    let mut session_id_opt: Option<String> = None;
-    let mut lease_sessions_opt: Option<Vec<serde_json::Value>> = None;
-    let mut prompt_opt: Option<String> = None;
-    let mut asserted_instruction_hash: Option<String> = None;
-    let mut asserted_policy_hash: Option<String> = None;
-    let mut mode_opt: Option<String> = None;
-    let mut prd_full_detail = false;
-    let mut full_reply_requested = false;
-    let mut asserted_reply_hash: Option<String> = None;
-    let raw_phase_opt = if trimmed.is_empty() {
+    let mut req = InstructionRequest::default();
+    let raw_phase = if trimmed.is_empty() {
         None
     } else if let Some(stripped) = trimmed.strip_prefix("phase=") {
         Some(stripped.trim().to_string())
     } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         if let Some(sid) = crate::validation::session_id_from_body(&v) {
-            session_id_opt = Some(sid);
+            req.session_id = Some(sid);
         }
-        lease_sessions_opt = v.get("_lease_sessions").and_then(serde_json::Value::as_array).cloned();
+        req.lease_sessions = v.get("_lease_sessions").and_then(serde_json::Value::as_array).cloned();
         if let Some(p) = v.get("prompt").and_then(|s| s.as_str()) {
-            prompt_opt = Some(p.to_string());
+            req.prompt = Some(p.to_string());
         }
         if let Some(h) = v
             .get("known_instruction_hash")
@@ -720,26 +718,26 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
             .or_else(|| v.get("ih"))
             .and_then(|s| s.as_str())
         {
-            asserted_instruction_hash = Some(h.trim().to_string());
+            req.asserted_instruction_hash = Some(h.trim().to_string());
         }
         if let Some(h) = v
             .get("known_policy_hash")
             .or_else(|| v.get("ph"))
             .and_then(|s| s.as_str())
         {
-            asserted_policy_hash = Some(h.trim().to_string());
+            req.asserted_policy_hash = Some(h.trim().to_string());
         }
         if let Some(m) = v.get("mode").and_then(|s| s.as_str()) {
-            mode_opt = Some(m.trim().to_ascii_lowercase());
+            req.mode = Some(m.trim().to_ascii_lowercase());
         }
         if let Some(b) = v.get("prd_full_detail").and_then(|s| s.as_bool()) {
-            prd_full_detail = b;
+            req.prd_full_detail = b;
         }
         if let Some(b) = v.get("full").and_then(|s| s.as_bool()) {
-            full_reply_requested = b;
+            req.full_reply_requested = b;
         }
         if let Some(h) = v.get("known_reply_hash").and_then(|s| s.as_str()) {
-            asserted_reply_hash = Some(h.trim().to_string());
+            req.asserted_reply_hash = Some(h.trim().to_string());
         }
         if let Some(s) = v.as_str() {
             Some(s.to_string())
@@ -751,6 +749,30 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     } else {
         Some(trimmed.to_string())
     };
+    InstructionRequest { raw_phase, ..req }
+}
+
+pub fn handle_instruction(content: &str) -> (String, String, i32) {
+    ilog(&format!(
+        "instruction::handle start body_len={}",
+        content.len()
+    ));
+    let (graph, graph_tier, graph_path) = super::fsm::graph_detailed();
+    if let Some(refusal) = super::fsm::configured_graph_refusal(graph_tier) {
+        return (String::new(), refusal, 1);
+    }
+    let InstructionRequest {
+        session_id: session_id_opt,
+        lease_sessions: lease_sessions_opt,
+        prompt: prompt_opt,
+        asserted_instruction_hash,
+        asserted_policy_hash,
+        mode: mode_opt,
+        prd_full_detail,
+        full_reply_requested,
+        asserted_reply_hash,
+        raw_phase: raw_phase_opt,
+    } = parse_instruction_request(content);
 
     if let Some(mode) = mode_opt.as_deref() {
         if is_investigate_readonly_mode(mode) {
