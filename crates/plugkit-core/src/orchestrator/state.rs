@@ -237,6 +237,18 @@ pub fn revert_last_transition() -> Result<TurnState, std::io::Error> {
     }
 }
 
+const STATUS_HISTORY_INLINE_MAX: usize = 5;
+
+#[cfg(target_arch = "wasm32")]
+fn pending_counts() -> Option<(usize, usize)> {
+    Some(super::instructions::pending_counts())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn pending_counts() -> Option<(usize, usize)> {
+    None
+}
+
 pub fn handle_status() -> (String, String, i32) {
     let s = read_state();
     let requesting_session_id = dispatch_session_id();
@@ -248,6 +260,8 @@ pub fn handle_status() -> (String, String, i32) {
         Ok(v) => v,
         Err(e) => return (String::new(), format!("serialize error: {}", e), 1),
     };
+    let history_total = s.phase_history.len();
+    let recent = &s.phase_history[history_total.saturating_sub(STATUS_HISTORY_INLINE_MAX)..];
     if let Value::Object(ref mut m) = payload {
         m.insert(
             "session_owner_before_this_dispatch".to_string(),
@@ -255,6 +269,12 @@ pub fn handle_status() -> (String, String, i32) {
         );
         m.insert("session_id".to_string(), json!(requesting_session_id));
         m.insert("session_mismatch".to_string(), json!(session_mismatch));
+        m.insert("phase_history".to_string(), json!(recent));
+        m.insert("phase_history_total".to_string(), json!(history_total));
+        if let Some((prd_pending, mutables_pending)) = pending_counts() {
+            m.insert("prd_pending_count".to_string(), json!(prd_pending));
+            m.insert("mutables_pending_count".to_string(), json!(mutables_pending));
+        }
     }
     (payload.to_string(), String::new(), 0)
 }
