@@ -220,7 +220,8 @@ pub(super) fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
         let body = pkfs::read_to_string(&path).unwrap_or_default();
         let identity = heartbeat_identity(&body);
         let missing = heartbeat_missing_lines(&body);
-        if !missing.is_empty() {
+        let credited = missing.is_empty();
+        if !credited {
             live.malformed.push(json!({
                 "file": name.clone(),
                 "session": identity.session.clone(),
@@ -234,6 +235,9 @@ pub(super) fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
                 "session": identity.session.clone(),
                 "age_s": age_ms / 1000
             }));
+        }
+        if !credited {
+            continue;
         }
         live.words.extend(
             body.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
