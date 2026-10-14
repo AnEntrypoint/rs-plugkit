@@ -1220,7 +1220,17 @@ fn fs_readdir(body: &Value) -> u64 {
     let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
     let v = unpack_to_value(packed);
     if v.is_null() {
-        return err("fs_readdir", "empty");
+        return err_json(
+            "fs_readdir",
+            json!({
+                "error": format!(
+                    "fs_readdir could not list '{path}': the directory is missing or unreadable (ENOENT or an access failure); the host returned no entries"
+                ),
+                "error_code": "ENOENT",
+                "path": path,
+                "next_dispatch_hint": "fs_stat",
+            }),
+        );
     }
     let entries = match v {
         Value::Array(entries) => entries,
