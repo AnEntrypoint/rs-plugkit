@@ -4329,8 +4329,10 @@ pub enum ScanOutput {
 impl ScanOutput {
     pub fn parse(name: &str) -> Option<ScanOutput> {
         match name {
+            // "content" is the spelling `grep`'s `output_mode` documents for the same shape, so
+            // codesearch answers the name a caller crossing between the two verbs already uses.
             "matches" | "full" => Some(ScanOutput::Matches),
-            "compact" => Some(ScanOutput::Compact),
+            "compact" | "content" => Some(ScanOutput::Compact),
             "files" => Some(ScanOutput::Files),
             "count" => Some(ScanOutput::Count),
             _ => None,
@@ -4347,7 +4349,7 @@ impl ScanOutput {
     }
 }
 
-pub const SCAN_OUTPUT_NAMES: &str = "\"matches\" (default, one object per match), \"compact\" (path:line: trimmed text), \"files\" (matching paths only), \"count\" (totals and the busiest files)";
+pub const SCAN_OUTPUT_NAMES: &str = "\"matches\" (default, one object per match), \"compact\" (path:line: trimmed text, \"content\" is the same shape under grep's name for it), \"files\" (matching paths only), \"count\" (totals and the busiest files)";
 pub const NO_IGNORE_NOTE: &str = "this scan did not apply .gitignore/.codesearchignore: tracked, untracked and ignored files were all listed and scanned -- .git is not a worktree entry, so it stays out either way";
 pub const DEFAULT_REPLY_MAX_CHARS: usize = 24_000;
 pub const MAX_REPLY_MAX_CHARS: usize = 400_000;

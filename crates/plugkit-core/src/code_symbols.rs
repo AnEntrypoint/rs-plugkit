@@ -2210,6 +2210,20 @@ fn edge_line(e: &Edge) -> String {
     format!("{}:{} {} -> {}", e.path, e.line, e.caller, e.callee)
 }
 
+// Call edges are keyed by unqualified caller and callee name, so a qualified `catbuild.Build`
+// matches no edge at all and reads as uncalled. Fall back to the last dotted segment when the
+// qualified name has no edge of its own, and let the reply name both spellings.
+fn edge_name<'a>(edges: &[Edge], symbol: &'a str) -> &'a str {
+    let has_edge = |name: &str| edges.iter().any(|e| e.callee == name || e.caller == name);
+    if has_edge(symbol) {
+        return symbol;
+    }
+    match symbol.rsplit_once('.') {
+        Some((_, tail)) if !tail.is_empty() && has_edge(tail) => tail,
+        _ => symbol,
+    }
+}
+
 fn callers_or_callees(
     db: &str,
     project_path: Option<&str>,
@@ -2218,25 +2232,30 @@ fn callers_or_callees(
     limit: usize,
 ) -> Value {
     let edges = load_edges(project_path);
+    let resolved = edge_name(&edges, symbol);
     let matched: Vec<&Edge> = edges
         .iter()
         .filter(|e| {
             if want_callers {
-                e.callee == symbol
+                e.callee == resolved
             } else {
-                e.caller == symbol
+                e.caller == resolved
             }
         })
         .collect();
     let total = matched.len();
     let mut out = json!({
-        "symbol": symbol,
+        "symbol": resolved,
         "edge_resolution": "unqualified-name",
-        "ambiguous_definitions": definitions(db, symbol, 2).len() > 1,
-        "defined_at": definition_locations(db, symbol),
+        "ambiguous_definitions": definitions(db, resolved, 2).len() > 1,
+        "defined_at": definition_locations(db, resolved),
         "total": total,
         "truncated": total > limit,
     });
+    if resolved != symbol {
+        out["requested_symbol"] = json!(symbol);
+        out["symbol_resolution"] = json!("call edges are keyed by unqualified name, so the qualified symbol was answered from its last dotted segment");
+    }
     if want_callers {
         let distinct: HashSet<(&str, &str)> = matched
             .iter()
@@ -2339,6 +2358,8 @@ fn impact(
 ) -> Value {
     let depth_cap = max_depth.clamp(1, 10);
     let edges = load_edges(project_path);
+    let requested = symbol;
+    let symbol = edge_name(&edges, requested);
     let reached = reach(db, &edges, symbol, depth_cap, upstream, through_ambiguous);
     let total = reached.len();
     let tests_reached = reached
@@ -2361,7 +2382,7 @@ fn impact(
             }
         })
         .collect();
-    json!({
+    let mut out = json!({
         "symbol": symbol,
         "direction": if upstream { "callers: what breaks if this changes" } else { "callees: what this depends on" },
         "edge_resolution": "unqualified-name",
@@ -2372,7 +2393,12 @@ fn impact(
         "tests_reached": tests_reached,
         "truncated": total > limit,
         "reached": lines,
-    })
+    });
+    if symbol != requested {
+        out["requested_symbol"] = json!(requested);
+        out["symbol_resolution"] = json!("call edges are keyed by unqualified name, so the qualified symbol was walked from its last dotted segment");
+    }
+    out
 }
 
 fn tests_for(db: &str, project_path: Option<&str>, symbol: &str, limit: usize) -> Value {
@@ -2614,7 +2640,9 @@ fn drive_sync_to_completion(
 
 pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     clear_store_busy();
-    let action = text_field(body, &["action", "mode"]).unwrap_or("overview");
+    // `verb` is the spelling the docs and the skill prose send; `action` and `mode` are the older
+    // ones and win when a body carries more than one.
+    let action = text_field(body, &["action", "mode", "verb"]).unwrap_or("overview");
     let project_root = text_field(body, &["root", "projectPath"]).map(crate::pkfs::anchor);
     let project_path = project_root.as_deref();
     if matches!(action, "callers" | "callees" | "impact" | "tests") {
