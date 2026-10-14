@@ -328,8 +328,14 @@ project's ledger, which keeps the 500 most recent dispatches, or of a dispatch
 that aged out of that ledger while its own JSON in `.gm/exec-spool/out` still
 carries the id), or all of
 `witness_exit_code` (must be 0), `witness_output_sha256` (sha256 of the output
-file), `witness_output_path` (that file, relative to the project root) and
-`witness_ts` (RFC 3339). A binding is re-hashed against its file and refused on
+file), `witness_output_path` (that file inside the project root, relative or
+absolute) and `witness_ts` (RFC 3339), or `witness_exit_code`, `witness_ts` and
+`witness_output` (the output text itself, up to 16 MiB, for an output that lives
+outside the project root: the verb hashes the text, `witness_output_sha256` is
+optional and must match when given, and the row keeps the hash, `output_inline`
+and `output_bytes`, never the text). An absolute `witness_output_path` outside the
+project root is refused, because the witness sandbox reads nothing outside it. A
+binding is re-hashed against its file and refused on
 any mismatch, and a row closed by binding records `witness_binding`. A dispatch id
 that appears only inside `witness_evidence` is named in a refusal as
 `witness_dispatch_id_in_evidence` with `witness_dispatch_id_field`; it verifies only
@@ -402,9 +408,17 @@ is replaced. An amend answers `old_sha`, `new_sha`, `message` and
 not an array of strings is refused, never silently narrowed. `nothing_to_commit`
 answers echo `requested_paths`. `git_commit` and `git_amend` refuse any body
 field outside `message`, `amend`, `paths`/`files`, `add_all`, `allow_empty`,
-`allow_whole_index`, `allow_foreign_rows`/`allow_foreign_prd_rows`,
+`allow_whole_index`, `refuse_if_foreign_dirt`,
+`allow_foreign_rows`/`allow_foreign_prd_rows`,
 `allow_dangling`, `author_name` and `author_email`, naming `unknown_fields` and
 `accepted_fields` the way `git_log`, `git_diff` and `git_show` do.
+`refuse_if_foreign_dirt: true` (also read by `git_finalize`) needs `paths` and
+refuses with `foreign_dirt` and `unstaged_in_requested`, before anything is staged,
+when a named path differs from the index or is untracked and not ignored: a scoped
+commit stages every dirty hunk of a named file, so stage your own work with
+`git_add` first and commit second. The check catches an edit that lands between
+the two dispatches; it cannot tell whose hunks `git_add` staged, and `.gm/prd.yml`
+keeps its per-row ownership check.
 
 `git_reword {rev?, message}` replaces the message of one commit (`rev` defaults
 to `HEAD`; `ref`, `sha` and `commit` are aliases) and rebuilds every descendant

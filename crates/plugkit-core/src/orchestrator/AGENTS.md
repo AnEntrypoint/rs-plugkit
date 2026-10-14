@@ -11,6 +11,11 @@ Module-scoped rules for the orchestrator sources in this directory. The [root AG
 - `calculus::verify_calculus` and `formal/CordisCalculus/` change together; it stops silently at `max_states`, so `ok` covers only explored states. Base-registry unload's `retired || !satisfied` equals the paper's `target != omega`; ExtendedRegistry has no retirement flag.
 - `component_loader_dispatch::parse_entries` silently drops entries that fail to deserialize; `isolate` is the tagged `{"kind": "none"|"local"|"global"}` shape; `claim_audit_clean` passes only on the exact body `clean`.
 
+## PRD witness binding
+
+- `prd-resolve` binds a witness three ways: `witness_dispatch_id`, a file inside the project root (`witness_output_path`, relative or absolute under the root, re-read and re-hashed), or inline text (`witness_output`, hashed by `verify_inline_witness_output`). The witness sandbox reads nothing outside the project root, so an absolute path outside it is refused with a sentence that names the inline way out.
+- An inline binding stores `output_sha256`, `output_inline` and `output_bytes`, never the text, and no `output_path`: `stale_completed_rows` skips a binding with no `output_path`. The duplicate-witness check compares only open rows, because a resolved row moves to `.gm/prd-log.jsonl`.
+
 ## Dream-RSI replay
 
 - Replay is frozen-world evidence, not execution or deployment authority: records stay bound to their completed dispatch and the owner session.
