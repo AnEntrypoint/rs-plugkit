@@ -405,6 +405,7 @@ orchestrator_dispatch_table! {
     "dream-round" => dream_rsi::handle_dream_round(content),
     "dream-replay" => dream_rsi::handle(content),
     "dream-replay-cycle" => dream_cycle::handle(content),
+    "dream-strategy-propose" => dream_rsi::handle_strategy_propose(content),
     "memorize-fire" => memorize::handle_fire(content),
     "memorize-backfill" => memorize::handle_backfill(content),
     "discipline-note" => discipline_note::handle(content),
