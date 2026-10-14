@@ -3,6 +3,7 @@
 Cargo.lock
 .gm/exec-spool/
 .gm/gm.db
+.gm/gm.db.lock.owner
 .gm/config-source-cache-default/
 .gm/config-source-cache-default.0f97d1a3fa2b58cb.sync.json
 .gm/last-dispatch-ts
