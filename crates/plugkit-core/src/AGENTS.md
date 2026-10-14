@@ -44,6 +44,7 @@ Module-scoped rules for the sources in this directory. The [root AGENTS.md](../.
 - Symbols, metrics and raw import specs live in `code_symbols`, `code_symbol_files` and `code_imports`, not vector chunks; multi-row inserts stay within SQLite's 999-parameter bound.
 - JSON has no structural symbol support: scoped queries reject it, and observed JSON clears prior symbols, imports and edges. Cleanup failures make coverage incomplete.
 - Resolved `index.max_file_bytes` has a 2 MiB minimum after typed overlay; `index.max_chunks_per_file_per_pass` bounds vector work only, `0` keeps BM25 text and manifests.
+- A file over 4 times `index.max_file_bytes` is never indexed, so the sync report stays `complete: false` and no pass can change that. The report names the files in `oversized_set` (with `oversized_cap_bytes`), and when oversized files are the only cause the reply says that syncing cannot complete the index instead of asking for another sync.
 - Import specs resolve at query time; only resolved indexed targets form edges. Edges are unqualified callee names: callers, callees, impact and tests reject scopes they cannot represent, and `impact` does not expand same-name ambiguity unless `through_ambiguous` is explicit.
 
 ### Search dispatch and retention (`ragconfig.rs`, `codesearch`)

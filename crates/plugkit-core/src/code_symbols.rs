@@ -796,6 +796,7 @@ pub(crate) fn sync_files(
     let mut focus_failed = false;
     let mut unreadable = 0u32;
     let mut oversized = 0u32;
+    let mut oversized_paths: Vec<String> = Vec::new();
     let mut store_failures = 0u32;
     let mut store_busy = false;
     let mut unsupported = 0u32;
@@ -863,6 +864,7 @@ pub(crate) fn sync_files(
         };
         if content.len() > size_cap {
             oversized += 1;
+            oversized_paths.push(key.clone());
             record_focus_failure(&mut focus_failed, focus, &key);
             continue;
         }
@@ -981,6 +983,16 @@ pub(crate) fn sync_files(
             .collect();
         report["deferred_set"] = json!(listed);
         report["deferred_set_truncated"] = json!(deferred_paths.len() > DEFERRED_SET_NAMES_LIMIT);
+    }
+    if !oversized_paths.is_empty() {
+        let listed: Vec<String> = oversized_paths
+            .iter()
+            .take(DEFERRED_SET_NAMES_LIMIT)
+            .cloned()
+            .collect();
+        report["oversized_set"] = json!(listed);
+        report["oversized_set_truncated"] = json!(oversized_paths.len() > DEFERRED_SET_NAMES_LIMIT);
+        report["oversized_cap_bytes"] = json!(size_cap);
     }
     if let Some(path) = focus {
         let state = if focus_deferred {
@@ -2483,6 +2495,38 @@ fn refresh_refusal_detail(refresh: &Value) -> String {
     detail
 }
 
+fn only_oversized_files_block_completion(refresh: &Value) -> bool {
+    let count = |key: &str| refresh.get(key).and_then(Value::as_u64).unwrap_or(0);
+    count("files_oversized") > 0
+        && count("files_deferred") == 0
+        && count("files_unreadable") == 0
+        && count("store_failures") == 0
+        && count("treesitter_failures") == 0
+        && refresh.get("listing_complete").and_then(Value::as_bool) == Some(true)
+        && refresh.get("store_busy").and_then(Value::as_bool) != Some(true)
+        && refresh.get("ok").and_then(Value::as_bool) != Some(false)
+}
+
+fn oversized_files_refusal(scope: &str, action: &str, refresh: &Value) -> String {
+    let count = refresh.get("files_oversized").and_then(Value::as_u64).unwrap_or(0);
+    let cap = refresh.get("oversized_cap_bytes").and_then(Value::as_u64).unwrap_or(0);
+    let named = refresh
+        .get("oversized_set")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .take(REFUSAL_REFRESH_EXEMPLARS)
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    format!(
+        "{scope}symbol index cannot become complete by syncing: {count} file(s) exceed the {cap} byte symbol size cap and are never indexed (codeinsight_index.oversized_set names them, e.g. {named}), so symbols defined in them are absent from this {action} answer. Read those files with codesearch, or raise index.max_file_bytes (the cap is 4 times that value). Refresh: {}",
+        refresh_refusal_detail(refresh)
+    )
+}
+
 fn stale_index_refusal(action: &str, root: Option<&str>, refresh: &Value, answered: bool) -> String {
     let (scope, sync_body) = match root {
         Some(root) => (
@@ -2494,6 +2538,9 @@ fn stale_index_refusal(action: &str, root: Option<&str>, refresh: &Value, answer
             "codeinsight {\"action\":\"sync\"}".to_string(),
         ),
     };
+    if only_oversized_files_block_completion(refresh) {
+        return oversized_files_refusal(&scope, action, refresh);
+    }
     if answered {
         return format!(
             "{scope}symbol index refresh is incomplete, so this {action} answer is not current evidence; it reads the cached graph only as far as this dispatch's own sync passes advanced it, and codeinsight_index below says how far that was. Refresh it with `{sync_body}`, then re-dispatch this {action}; a sync pass is incremental, so one that does not finish still advances the index. Refresh: {}",
@@ -2786,7 +2833,11 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     if !refresh_complete && action != "outline" {
         output["index_current"] = json!(false);
         if output.get("answered_from").is_none() {
-            output["answered_from"] = json!("a symbol index this dispatch could not refresh to completion; definition and call-edge lookups read it as-is, so anything living in a still-deferred file is absent from this answer rather than reported as absent from the project");
+            output["answered_from"] = if only_oversized_files_block_completion(&refresh) {
+                json!("a symbol index that never indexes the oversized files named in codeinsight_index.oversized_set; definition and call-edge lookups read it as-is, so anything defined in those files is absent from this answer rather than reported as absent from the project")
+            } else {
+                json!("a symbol index this dispatch could not refresh to completion; definition and call-edge lookups read it as-is, so anything living in a still-deferred file is absent from this answer rather than reported as absent from the project")
+            };
         }
         output["index_incomplete_reason"] = json!(stale_index_refusal(action, project_path, &refresh, true));
     }
