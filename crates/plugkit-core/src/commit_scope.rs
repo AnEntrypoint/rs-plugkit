@@ -36,6 +36,33 @@ pub fn blanket_stage_refusal(verb: &str, paths: &[String]) -> Value {
     })
 }
 
+pub fn foreign_dirt_refusal(verb: &str, requested: &[String], unstaged: &[String]) -> Value {
+    let mut listed: Vec<String> = unstaged
+        .iter()
+        .take(BLANKET_REFUSAL_LISTED_PATHS)
+        .cloned()
+        .collect();
+    if unstaged.len() > listed.len() {
+        listed.push(format!(
+            "... and {} more",
+            unstaged.len() - BLANKET_REFUSAL_LISTED_PATHS
+        ));
+    }
+    json!({
+        "error": format!(
+            "{} refused under refuse_if_foreign_dirt: {} path(s) inside the named pathspec(s) carry changes the index does not hold: {}. A path-scoped commit stages every dirty hunk of a named file, so an unstaged change may belong to another writer. Nothing was staged or committed. Stage your own changes with git_add and re-dispatch, or leave a path that is not yours out of paths.",
+            verb,
+            unstaged.len(),
+            listed.join(", ")
+        ),
+        "error_code": "foreign_dirt",
+        "requested_paths": requested,
+        "unstaged_in_requested": listed,
+        "unstaged_count": unstaged.len(),
+        "next_dispatch": "git_add",
+    })
+}
+
 pub fn unrequested_stage_refusal(verb: &str, requested: &[String], extra: &[String]) -> Value {
     json!({
         "error": format!(

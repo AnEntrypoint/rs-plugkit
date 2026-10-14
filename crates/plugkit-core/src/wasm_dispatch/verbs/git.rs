@@ -2346,6 +2346,53 @@ pub(super) fn staged_outside_requested(
         .collect()
 }
 
+pub(super) fn foreign_dirt_guard(
+    verb: &str,
+    body: &Value,
+    paths: &[String],
+    add_all: bool,
+    mut git: impl FnMut(&[&str]) -> Result<Value, u64>,
+) -> Result<Option<Value>, u64> {
+    let requested = body
+        .get("refuse_if_foreign_dirt")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !requested {
+        return Ok(None);
+    }
+    if add_all || paths.is_empty() {
+        return Ok(Some(json!({
+            "error": format!("{verb} with refuse_if_foreign_dirt compares the named paths with the index: pass paths:[...] and leave add_all out"),
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "requested_paths": paths,
+        })));
+    }
+    let mut unstaged: Vec<String> = Vec::new();
+    for head in [
+        &["diff", "--name-only", "-z", "--"][..],
+        &["ls-files", "--others", "--exclude-standard", "-z", "--"][..],
+    ] {
+        let mut argv: Vec<&str> = head.to_vec();
+        argv.extend(paths.iter().map(String::as_str));
+        let reply = git(&argv)?;
+        let stdout = reply.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+        for entry in stdout.split('\0') {
+            if !entry.is_empty()
+                && entry != PRD_STATE_PATHSPEC
+                && !unstaged.iter().any(|seen| seen == entry)
+            {
+                unstaged.push(entry.to_string());
+            }
+        }
+    }
+    unstaged.sort();
+    if unstaged.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(foreign_dirt_refusal(verb, paths, &unstaged)))
+    }
+}
+
 pub(super) const GIT_COMMIT_ACCEPTED_FIELDS: &[&str] = &[
     "message",
     "amend",
@@ -2354,6 +2401,7 @@ pub(super) const GIT_COMMIT_ACCEPTED_FIELDS: &[&str] = &[
     "add_all",
     "allow_empty",
     "allow_whole_index",
+    "refuse_if_foreign_dirt",
     "allow_foreign_rows",
     "allow_foreign_prd_rows",
     "allow_dangling",
@@ -2473,6 +2521,11 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 "git_commit",
                 protected_pathspec_refusal("git_commit", &blocked_paths),
             ));
+        }
+        if let Some(refusal) = foreign_dirt_guard("git_commit", body, &paths, add_all, |argv| {
+            git_step_replayed_by_call_order(plan, argv, cwd)
+        })? {
+            return Ok(err_json("git_commit", refusal));
         }
         let allow_whole_index = body
             .get("allow_whole_index")
@@ -3892,6 +3945,13 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             protected_pathspec_refusal("git_finalize", &blocked_paths),
         );
     }
+    match foreign_dirt_guard("git_finalize", body, &paths, !scoped, |argv| {
+        Ok(git_call_argv(argv, cwd_ref))
+    }) {
+        Ok(Some(refusal)) => return err_json("git_finalize", refusal),
+        Ok(None) => {}
+        Err(parked) => return parked,
+    }
     let mut steps: Vec<Value> = vec![];
     let mut write_steps: Vec<Value> = Vec::new();
     let mut committed = false;
@@ -4589,7 +4649,8 @@ pub(super) const GIT_LOG_HELP: &str = r#"git_log lists commits newest first as {
   oneline: true    answers commits as "<sha> <YYYY-MM-DD> <author> <subject>" strings, a fraction of the bytes; not combinable with body or trailers.
   trailers: true   adds the commit's trailers as {Key: value} (an array when a key repeats), read by git from the final paragraph of the message (%(trailers:only=true,unfold=true)). A Co-Authored-By line above the final paragraph is not a trailer: find those with grep."#;
 
-pub(super) const GIT_COMMIT_HELP: &str = r#"git_commit, git_amend, git_finalize, git_merge and git_reword take a message. git_commit and git_amend accept message, amend, paths|files, add_all, allow_empty, allow_whole_index, allow_foreign_rows|allow_foreign_prd_rows, allow_dangling, author_name and author_email.
+pub(super) const GIT_COMMIT_HELP: &str = r#"git_commit, git_amend, git_finalize, git_merge and git_reword take a message. git_commit and git_amend accept message, amend, paths|files, add_all, allow_empty, allow_whole_index, refuse_if_foreign_dirt, allow_foreign_rows|allow_foreign_prd_rows, allow_dangling, author_name and author_email.
+refuse_if_foreign_dirt: true (git_commit, git_amend and git_finalize) needs paths and refuses with error_code foreign_dirt, before anything is staged, when a named path has a change the index does not hold: a tracked file that differs from the index, or an untracked file that is not ignored. The refusal lists unstaged_in_requested. A path-scoped commit stages every dirty hunk of a named file, so stage your own work with git_add first and commit second: the check then catches an edit that arrives between the two dispatches. It cannot tell whose hunks git_add staged, and .gm/prd.yml keeps its own per-row ownership check.
 Attribution policy: when a policy file exists the message is screened before git sees it. The file is .gm/attribution.json in the project (the git toplevel of the dispatch), else ~/.gm/attribution.json; no file means off.
   {"mode": "off" | "strip" | "refuse", "author": {"name": "...", "email": "..."}}
   strip    removes every line that is a Co-Authored-By trailer naming Claude or Anthropic, or that holds "generated with" and "claude" (case-insensitive), tidies the blank lines left behind and lists the removed lines in the receipt as attribution_stripped.
