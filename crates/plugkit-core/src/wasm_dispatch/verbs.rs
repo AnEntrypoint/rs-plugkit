@@ -2936,24 +2936,23 @@ fn codeinsight_action(verb: &str, action: &str, body: &Value) -> u64 {
     }
 }
 
+// `verb` is the selector the docs and the skill prose send (`{"verb":"callers","symbol":"..."}`);
+// `action` and `mode` are the same selector under its older spellings and stay authoritative when
+// both arrive. Reading none of the three is the index overview, which is the reply that used to
+// answer every call because `verb` was never read.
+const CODEINSIGHT_SELECTOR_KEYS: &[&str] = &["action", "mode", "verb"];
+
 fn codeinsight(body: &Value) -> u64 {
-    let explicit_action = body
-        .get("action")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|a| !a.is_empty());
-    if explicit_action.is_some() {
-        return codeinsight_action("codeinsight", "overview", body);
-    }
-    match body
-        .get("mode")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-    {
-        Some(mode) => codeinsight_action("codeinsight", mode, body),
-        None => codeinsight_action("codeinsight", "overview", body),
-    }
+    let requested = CODEINSIGHT_SELECTOR_KEYS
+        .iter()
+        .find_map(|key| {
+            body.get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or("overview");
+    codeinsight_action("codeinsight", requested, body)
 }
 
 fn callers(body: &Value) -> u64 {
