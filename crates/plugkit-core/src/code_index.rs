@@ -4177,6 +4177,7 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
             json!(universe.git_untracked_files),
         );
     }
+    insert_nested_worktree_fields(&mut out, universe.git_nested_worktrees, universe.git_nested_untracked_failed);
     if corpus_blind_spot {
         out.insert(
             "corpus_blind_spot".to_string(),
@@ -4799,6 +4800,20 @@ where
     }
     out.sort_unstable();
     out
+}
+
+fn insert_nested_worktree_fields(out: &mut serde_json::Map<String, Value>, nested_worktrees: usize, untracked_failed: bool) {
+    if nested_worktrees == 0 && !untracked_failed {
+        return;
+    }
+    out.insert("nested_worktrees".to_string(), json!(nested_worktrees));
+    if untracked_failed {
+        out.insert("nested_worktrees_unlisted".to_string(), json!(true));
+        out.insert(
+            "nested_worktrees_note".to_string(),
+            json!(crate::scan_universe::NESTED_WORKTREE_BLIND_SPOT_NOTE),
+        );
+    }
 }
 
 fn insert_excluded_by_rule(
@@ -5842,6 +5857,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             json!(universe.git_untracked_files),
         );
     }
+    insert_nested_worktree_fields(&mut out, universe.git_nested_worktrees, universe.git_nested_untracked_failed);
     if corpus_blind_spot {
         out.insert(
             "corpus_blind_spot".to_string(),
