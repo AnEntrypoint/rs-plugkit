@@ -2298,7 +2298,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 .map(String::from)
                 .collect()
         };
-        if !add_all && paths.is_empty() && !allow_whole_index {
+        if !add_all && paths.is_empty() && !allow_whole_index && !merge_pending {
             let sweep = blanket_stage_would_take(cwd);
             if !sweep.is_empty() {
                 return Ok(err_json(
