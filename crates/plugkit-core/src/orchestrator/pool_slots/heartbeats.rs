@@ -169,7 +169,7 @@ pub(super) struct LiveHeartbeats {
     pub(super) malformed: Vec<Value>,
 }
 
-pub(super) fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
+pub(super) fn read_heartbeats(dir: &str, extra_dirs: &[String], now: u64) -> LiveHeartbeats {
     let mut live = LiveHeartbeats {
         count: 0,
         sessions: Vec::new(),
@@ -179,8 +179,20 @@ pub(super) fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
         aging: Vec::new(),
         malformed: Vec::new(),
     };
+    let mut seen = BTreeSet::new();
+    read_heartbeat_dir(&mut live, dir, now, true, &mut seen);
+    for extra in extra_dirs {
+        read_heartbeat_dir(&mut live, extra, now, false, &mut seen);
+    }
+    live.sessions.sort();
+    live.rows.sort();
+    live.rows.dedup();
+    live
+}
+
+fn read_heartbeat_dir(live: &mut LiveHeartbeats, dir: &str, now: u64, reap: bool, seen: &mut BTreeSet<String>) {
     let Some(Value::Array(entries)) = pkfs::readdir(dir) else {
-        return live;
+        return;
     };
     for entry in entries {
         let name = match entry.as_str() {
@@ -195,7 +207,7 @@ pub(super) fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
             .or_else(|| entry.get("isFile"))
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        if !is_file || !name.ends_with(".live") {
+        if !is_file || !name.ends_with(".live") || !seen.insert(name.clone()) {
             continue;
         }
         let path = format!("{}/{}", dir, name);
@@ -209,7 +221,7 @@ pub(super) fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
         };
         let age_ms = now.saturating_sub(mtime_ms);
         if age_ms > HEARTBEAT_REAP_MS {
-            if remove_file(&path) {
+            if reap && remove_file(&path) {
                 live.reaped.push(name.to_string());
             }
             continue;
@@ -250,10 +262,6 @@ pub(super) fn read_heartbeats(dir: &str, now: u64) -> LiveHeartbeats {
         }
         live.rows.extend(identity.rows);
     }
-    live.sessions.sort();
-    live.rows.sort();
-    live.rows.dedup();
-    live
 }
 
 pub(super) fn count_of_record_live(project_root: &str, now: u64) -> Option<u64> {
