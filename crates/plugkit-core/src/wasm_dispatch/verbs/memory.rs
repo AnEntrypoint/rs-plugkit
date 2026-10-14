@@ -899,7 +899,20 @@ pub(super) fn mark_deleted_index_first_before_file_removal_to_close_resurrection
     }
 }
 
-pub(super) fn memorize_prune(body: &Value) -> u64 {
+enum PruneRequest<'a> {
+    Remove {
+        namespace: &'a str,
+        keys: Vec<String>,
+    },
+    Review {
+        namespace: &'a str,
+        query: &'a str,
+        k: u32,
+    },
+    Missing,
+}
+
+fn parse_prune_request(body: &Value) -> PruneRequest<'_> {
     let namespace = body
         .get("namespace")
         .and_then(|v| v.as_str())
@@ -917,10 +930,41 @@ pub(super) fn memorize_prune(body: &Value) -> u64 {
             }
         }
     }
-    if !keys.is_empty() && crate::tencentdb_memory::namespace_is_routed(namespace) {
+    if !keys.is_empty() {
+        return PruneRequest::Remove { namespace, keys };
+    }
+    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    if query.is_empty() {
+        return PruneRequest::Missing;
+    }
+    let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
+    PruneRequest::Review {
+        namespace,
+        query,
+        k,
+    }
+}
+
+pub(super) fn memorize_prune(body: &Value) -> u64 {
+    match parse_prune_request(body) {
+        PruneRequest::Remove { namespace, keys } => prune_keys(namespace, &keys),
+        PruneRequest::Review {
+            namespace,
+            query,
+            k,
+        } => prune_candidates(namespace, query, k),
+        PruneRequest::Missing => err(
+            "memorize-prune",
+            "provide `key`/`keys` to delete, or `query` to list prune candidates",
+        ),
+    }
+}
+
+fn prune_keys(namespace: &str, keys: &[String]) -> u64 {
+    if crate::tencentdb_memory::namespace_is_routed(namespace) {
         let mut deleted = Vec::new();
         let mut not_found = Vec::new();
-        for key in &keys {
+        for key in keys {
             match crate::tencentdb_memory::delete_index_first_then_file(namespace, key) {
                 Ok(true) => deleted.push(key.clone()),
                 Ok(false) => not_found.push(key.clone()),
@@ -939,62 +983,54 @@ pub(super) fn memorize_prune(body: &Value) -> u64 {
         }
         return ok("memorize-prune", resp);
     }
-    if !keys.is_empty() {
-        let vec_ns = format!("{}-vec", namespace);
-        let mut deleted = Vec::new();
-        let mut not_found = Vec::new();
-        for key in &keys {
-            let idx_marked =
-                mark_deleted_index_first_before_file_removal_to_close_resurrection_window(
-                    namespace, key,
-                );
-            let flat_rc = unsafe {
-                host_kv_delete(
-                    namespace.as_ptr(),
-                    namespace.len() as u32,
-                    key.as_ptr(),
-                    key.len() as u32,
-                )
-            };
-            let _ = unsafe {
-                host_kv_delete(
-                    vec_ns.as_ptr(),
-                    vec_ns.len() as u32,
-                    key.as_ptr(),
-                    key.len() as u32,
-                )
-            };
-            let md_deleted = crate::memory_md::delete_memory(namespace, key);
-            let legacy_deleted = crate::memory_md::delete_legacy_flat(namespace, key);
-            if flat_rc != 0 || md_deleted || idx_marked || legacy_deleted {
-                deleted.push(key.clone());
-                emit_event(
-                    "memory.pruned",
-                    json!({"key": key, "namespace": namespace, "mode": "explicit-key", "md_deleted": md_deleted, "index_marked": idx_marked, "legacy_deleted": legacy_deleted}),
-                );
-            } else {
-                not_found.push(key.clone());
-                emit_event(
-                    "memory.prune-miss",
-                    json!({"key": key, "namespace": namespace, "mode": "explicit-key"}),
-                );
-            }
-        }
-        let mut resp = json!({"namespace": namespace, "deleted": deleted, "mode": "explicit-key"});
-        if !not_found.is_empty() {
-            resp["not_found"] = json!(not_found);
-            resp["note"] = json!("Keys in not_found did not exist in this namespace -- nothing was pruned for them. The key is likely under a different namespace (pass {namespace:<the recall hit's namespace>}) or the key string did not match exactly. Re-run memorize-prune {query} to get live candidates with their exact keys + namespaces.");
-        }
-        return ok("memorize-prune", resp);
-    }
-    let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
-    if query.is_empty() {
-        return err(
-            "memorize-prune",
-            "provide `key`/`keys` to delete, or `query` to list prune candidates",
+    let vec_ns = format!("{}-vec", namespace);
+    let mut deleted = Vec::new();
+    let mut not_found = Vec::new();
+    for key in keys {
+        let idx_marked = mark_deleted_index_first_before_file_removal_to_close_resurrection_window(
+            namespace, key,
         );
+        let flat_rc = unsafe {
+            host_kv_delete(
+                namespace.as_ptr(),
+                namespace.len() as u32,
+                key.as_ptr(),
+                key.len() as u32,
+            )
+        };
+        let _ = unsafe {
+            host_kv_delete(
+                vec_ns.as_ptr(),
+                vec_ns.len() as u32,
+                key.as_ptr(),
+                key.len() as u32,
+            )
+        };
+        let md_deleted = crate::memory_md::delete_memory(namespace, key);
+        let legacy_deleted = crate::memory_md::delete_legacy_flat(namespace, key);
+        if flat_rc != 0 || md_deleted || idx_marked || legacy_deleted {
+            deleted.push(key.clone());
+            emit_event(
+                "memory.pruned",
+                json!({"key": key, "namespace": namespace, "mode": "explicit-key", "md_deleted": md_deleted, "index_marked": idx_marked, "legacy_deleted": legacy_deleted}),
+            );
+        } else {
+            not_found.push(key.clone());
+            emit_event(
+                "memory.prune-miss",
+                json!({"key": key, "namespace": namespace, "mode": "explicit-key"}),
+            );
+        }
     }
-    let k = body.get("k").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
+    let mut resp = json!({"namespace": namespace, "deleted": deleted, "mode": "explicit-key"});
+    if !not_found.is_empty() {
+        resp["not_found"] = json!(not_found);
+        resp["note"] = json!("Keys in not_found did not exist in this namespace -- nothing was pruned for them. The key is likely under a different namespace (pass {namespace:<the recall hit's namespace>}) or the key string did not match exactly. Re-run memorize-prune {query} to get live candidates with their exact keys + namespaces.");
+    }
+    ok("memorize-prune", resp)
+}
+
+fn prune_candidates(namespace: &str, query: &str, k: u32) -> u64 {
     let embedding = embed_query(query);
     if query_embedding_unusable(&embedding) {
         emit_event(
