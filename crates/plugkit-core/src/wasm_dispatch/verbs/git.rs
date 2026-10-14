@@ -5715,6 +5715,458 @@ pub(super) fn ci_status(body: &Value) -> u64 {
     }
 }
 
+pub(super) const CI_LOG_GH_TIMEOUT_MS: u64 = 120_000;
+pub(super) const CI_LOG_DEFAULT_MAX_LINES: usize = 40;
+pub(super) const CI_LOG_MAX_LINES_CEILING: usize = 500;
+pub(super) const CI_LOG_DEFAULT_MAX_CHARS: usize = 8000;
+pub(super) const CI_LOG_MAX_CHARS_CEILING: usize = 40000;
+pub(super) const CI_LOG_SCANNED_MARKER: &str = "ci_log_scanned=";
+pub(super) const CI_LOG_MATCHED_MARKER: &str = "ci_log_matched=";
+pub(super) const CI_LOG_FAILURE_MARKER: &str = "ci_log_gh_failed=";
+
+pub(super) const CI_LOG_FIELDS: &[&str] = &[
+    "github_repo",
+    "repo",
+    "run_id",
+    "run",
+    "job_id",
+    "job",
+    "step",
+    "pattern",
+    "match",
+    "grep",
+    "mode",
+    "regex",
+    "ignore_case",
+    "max_lines",
+    "max_chars",
+    "sha",
+    "rev",
+    "ref",
+];
+
+pub(super) const CI_LOG_AWK: &str = r#"BEGIN {
+  FS = "\t"
+  JOBP = ENVIRON["GMCLOG_JOB"]
+  STEPP = ENVIRON["GMCLOG_STEP"]
+  PAT = ENVIRON["GMCLOG_PAT"]
+  RX = ENVIRON["GMCLOG_RX"] + 0
+  IC = ENVIRON["GMCLOG_IC"] + 0
+  CAP = ENVIRON["GMCLOG_CAP"] + 0
+  BCAP = ENVIRON["GMCLOG_BCAP"] + 0
+}
+function keep(s, p,    a, b) {
+  if (p == "") return 1
+  if (IC) { a = tolower(s); b = tolower(p) } else { a = s; b = p }
+  if (RX) return (a ~ b)
+  return index(a, b) > 0
+}
+{
+  scanned++
+  if (NF < 1) next
+  j = $1; s = $2; rest = $3
+  for (i = 4; i <= NF; i++) rest = rest "\t" $i
+  sp = index(rest, " ")
+  if (sp > 0) { ts = substr(rest, 1, sp - 1); m = substr(rest, sp + 1) } else { ts = rest; m = "" }
+  if (!keep(j, JOBP)) next
+  if (!keep(s, STEPP)) next
+  if (!keep(m, PAT)) next
+  total++
+  if (printed < CAP && used <= BCAP) {
+    printf "%s\t%s\t%s\t%s\n", j, s, ts, m
+    printed++
+    used += length(j) + length(s) + length(rest) + 8
+  }
+}
+END {
+  printf "ci_log_scanned=%d\n", scanned + 0 > "/dev/stderr"
+  printf "ci_log_matched=%d\n", total + 0 > "/dev/stderr"
+}
+"#;
+
+pub(super) fn ci_log_string(body: &Value, fields: &[&str]) -> String {
+    for field in fields {
+        if let Some(s) = body.get(field).and_then(Value::as_str) {
+            return s.trim().to_string();
+        }
+    }
+    String::new()
+}
+
+pub(super) fn ci_log_id(body: &Value, fields: &[&str]) -> Option<u64> {
+    for field in fields {
+        match body.get(field) {
+            Some(v) if v.is_u64() => return v.as_u64(),
+            Some(v) => {
+                if let Some(s) = v.as_str() {
+                    let trimmed = s.trim();
+                    if trimmed.chars().all(|c| c.is_ascii_digit()) && !trimmed.is_empty() {
+                        return trimmed.parse::<u64>().ok();
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    None
+}
+
+pub(super) fn ci_log_optional_id(body: &Value, field: &str) -> Result<Option<u64>, Value> {
+    match body.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => match ci_log_id(body, &[field]) {
+            Some(id) => Ok(Some(id)),
+            None => Err(json!({
+                "error": format!("{} must be a positive integer GitHub job id, got {}", field, body[field]),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "field": field,
+            })),
+        },
+    }
+}
+
+pub(super) fn ci_log_bounded(
+    body: &Value,
+    field: &str,
+    default: usize,
+    ceiling: usize,
+) -> Result<usize, Value> {
+    let raw = match body.get(field) {
+        None | Some(Value::Null) => return Ok(default),
+        Some(raw) => raw,
+    };
+    let parsed = match raw.as_u64() {
+        Some(n) => Some(n),
+        None => raw
+            .as_str()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<u64>().ok()),
+    };
+    match parsed {
+        Some(n) if n >= 1 => Ok((n as usize).min(ceiling)),
+        _ => Err(json!({
+            "error": format!("{} must be an integer from 1 through {}, got {}", field, ceiling, raw),
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "field": field,
+        })),
+    }
+}
+
+pub(super) fn ci_log_regex_mode(body: &Value) -> Result<bool, Value> {
+    let explicit = match body.get("mode") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.trim().to_ascii_lowercase()),
+        Some(raw) => {
+            return Err(json!({
+                "error": format!("mode must be \"literal\" or \"regex\", got {}", raw),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "field": "mode",
+            }))
+        }
+    };
+    let flag = body_bool_flag(body, "regex", "ci-log")?;
+    match explicit.as_deref() {
+        None => Ok(flag),
+        Some("literal") => Ok(false),
+        Some("regex") => Ok(true),
+        Some(other) => Err(json!({
+            "error": format!("mode must be \"literal\" or \"regex\", got \"{}\"", other),
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "field": "mode",
+        })),
+    }
+}
+
+pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Value> {
+    if let Some(run_id) = ci_log_id(body, &["run_id", "run"]) {
+        return Ok(run_id);
+    }
+    let sha = ci_log_string(body, &["sha", "rev", "ref"]);
+    if sha.is_empty() {
+        return Err(json!({
+            "error": "run_id required: name the GitHub Actions run whose log to read, or pass sha/rev/ref to read the newest run for that commit; ci-status returns run_id for every job",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "accepted_fields": ["run_id", "job_id", "sha"],
+        }));
+    }
+    let parsed = ci_status_gh_api_json(&format!(
+        "repos/{}/actions/runs?head_sha={}&per_page=20",
+        repo, sha
+    ))
+    .map_err(|reason| {
+        json!({
+            "error": format!("could not list workflow runs for sha {} in {}: {}", sha, repo, reason),
+            "repo": repo, "sha": sha,
+        })
+    })?;
+    match parsed
+        .get("workflow_runs")
+        .and_then(Value::as_array)
+        .and_then(|runs| runs.first())
+        .and_then(|run| run.get("id"))
+        .and_then(Value::as_u64)
+    {
+        Some(run_id) => Ok(run_id),
+        None => Err(json!({
+            "error": format!("no workflow run found for sha {} in {}", sha, repo),
+            "repo": repo, "sha": sha,
+        })),
+    }
+}
+
+pub(super) fn ci_log_shell_result(code: &str) -> Value {
+    let opts = json!({ "lang": "bash", "timeoutMs": CI_LOG_GH_TIMEOUT_MS }).to_string();
+    let packed = unsafe {
+        host_exec_js(
+            code.as_ptr(),
+            code.len() as u32,
+            opts.as_ptr(),
+            opts.len() as u32,
+        )
+    };
+    let raw = unpack_to_string(packed).unwrap_or_default();
+    serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({ "stdout": raw }))
+}
+
+pub(super) fn ci_log_command(
+    repo: &str,
+    run_id: u64,
+    job_id: Option<u64>,
+    job_filter: &str,
+    step_filter: &str,
+    pattern: &str,
+    regex_mode: bool,
+    ignore_case: bool,
+    max_lines: usize,
+    max_chars: usize,
+) -> String {
+    let target = match job_id {
+        Some(job_id) => format!(
+            "gh run view --job {} --log --repo {}",
+            ci_status_shell_quote(&job_id.to_string()),
+            ci_status_shell_quote(repo)
+        ),
+        None => format!(
+            "gh run view {} --log --repo {}",
+            ci_status_shell_quote(&run_id.to_string()),
+            ci_status_shell_quote(repo)
+        ),
+    };
+    let env = format!(
+        "GMCLOG_JOB={} GMCLOG_STEP={} GMCLOG_PAT={} GMCLOG_RX={} GMCLOG_IC={} GMCLOG_CAP={} GMCLOG_BCAP={}",
+        ci_status_shell_quote(job_filter),
+        ci_status_shell_quote(step_filter),
+        ci_status_shell_quote(pattern),
+        if regex_mode { 1 } else { 0 },
+        if ignore_case { 1 } else { 0 },
+        max_lines,
+        max_chars
+    );
+    format!(
+        "err=\"$(mktemp 2>/dev/null || printf '/tmp/gm-ci-log-%s' \"$$\")\"\n\
+         trap 'rm -f \"$err\"' EXIT\n\
+         {target} 2>\"$err\" | {env} awk {program}\n\
+         code=${{PIPESTATUS[0]}}\n\
+         if [ \"$code\" -ne 0 ]; then printf '{failure}%s\\n' \"$code\" >&2; head -c 400 \"$err\" >&2; fi\n\
+         rm -f \"$err\"\n\
+         exit 0\n",
+        target = target,
+        env = env,
+        program = ci_status_shell_quote(CI_LOG_AWK),
+        failure = CI_LOG_FAILURE_MARKER,
+    )
+}
+
+pub(super) fn ci_log_marker(stream: &str, marker: &str) -> Option<String> {
+    stream
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(marker))
+        .map(|value| value.trim().to_string())
+}
+
+pub(super) fn ci_log(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("ci-log", body, CI_LOG_FIELDS) {
+        return refusal;
+    }
+    let cwd = body_cwd(body);
+    let repo = match ci_status_resolve_repo_preferring_unambiguous_github_repo_field(body, cwd) {
+        Ok(repo) => repo,
+        Err(packed) => return packed,
+    };
+    let run_id = match ci_log_resolve_run_id(body, &repo) {
+        Ok(run_id) => run_id,
+        Err(detail) => return err_json("ci-log", detail),
+    };
+    let job_id = match ci_log_optional_id(body, "job_id") {
+        Ok(job_id) => job_id,
+        Err(detail) => return err_json("ci-log", detail),
+    };
+    let job_filter = ci_log_string(body, &["job"]);
+    let step_filter = ci_log_string(body, &["step"]);
+    let pattern = ci_log_string(body, &["pattern", "match", "grep"]);
+    let regex_mode = match ci_log_regex_mode(body) {
+        Ok(regex_mode) => regex_mode,
+        Err(detail) => return err_json("ci-log", detail),
+    };
+    let ignore_case = match body_bool_flag(body, "ignore_case", "ci-log") {
+        Ok(ignore_case) => ignore_case,
+        Err(detail) => return err_json("ci-log", detail),
+    };
+    let max_lines = match ci_log_bounded(
+        body,
+        "max_lines",
+        CI_LOG_DEFAULT_MAX_LINES,
+        CI_LOG_MAX_LINES_CEILING,
+    ) {
+        Ok(max_lines) => max_lines,
+        Err(detail) => return err_json("ci-log", detail),
+    };
+    let max_chars = match ci_log_bounded(
+        body,
+        "max_chars",
+        CI_LOG_DEFAULT_MAX_CHARS,
+        CI_LOG_MAX_CHARS_CEILING,
+    ) {
+        Ok(max_chars) => max_chars,
+        Err(detail) => return err_json("ci-log", detail),
+    };
+    let command = ci_log_command(
+        &repo,
+        run_id,
+        job_id,
+        &job_filter,
+        &step_filter,
+        &pattern,
+        regex_mode,
+        ignore_case,
+        max_lines,
+        max_chars,
+    );
+    let result = ci_log_shell_result(&command);
+    if result.get("timed_out").and_then(Value::as_bool) == Some(true) {
+        return err_json(
+            "ci-log",
+            json!({
+                "error": format!("gh log fetch timed out after {} ms", CI_LOG_GH_TIMEOUT_MS),
+                "repo": repo, "run_id": run_id, "job_id": job_id,
+            }),
+        );
+    }
+    let stderr = ci_status_shell_stream(&result, "stderr");
+    if let Some(code) = ci_log_marker(&stderr, CI_LOG_FAILURE_MARKER) {
+        return err_json(
+            "ci-log",
+            json!({
+                "error": format!("gh exited {} reading the log of {} run {}", code, repo, run_id),
+                "detail": ci_status_truncate_for_error(&stderr, 400),
+                "repo": repo, "run_id": run_id, "job_id": job_id,
+                "hint": "logs are retained for a limited time and are gone once expired; a run that never started has no log",
+            }),
+        );
+    }
+    let scanned = ci_log_marker(&stderr, CI_LOG_SCANNED_MARKER);
+    if scanned.is_none() {
+        return err_json(
+            "ci-log",
+            json!({
+                "error": format!("the gh log pipeline produced no parsable output for {} run {}", repo, run_id),
+                "detail": ci_status_truncate_for_error(&stderr, 400),
+                "repo": repo, "run_id": run_id, "job_id": job_id,
+                "hint": format!("ci-log shells out to `gh run view {} --log`, so gh and awk must both be on PATH", run_id),
+            }),
+        );
+    }
+    let scanned = scanned
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(0);
+    let matched = ci_log_marker(&stderr, CI_LOG_MATCHED_MARKER)
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut lines: Vec<Value> = Vec::new();
+    let mut returned_chars = 0usize;
+    let mut truncated_by: Option<&'static str> = None;
+    for raw in ci_status_shell_stdout(&result).lines() {
+        if raw.is_empty() {
+            continue;
+        }
+        let mut parts = raw.splitn(4, '\t');
+        let job = parts
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('\u{feff}')
+            .to_string();
+        let step = parts.next().unwrap_or("").to_string();
+        let at = parts
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('\u{feff}')
+            .to_string();
+        let text = parts.next().unwrap_or("").to_string();
+        let cost = text.chars().count() + job.chars().count() + step.chars().count() + 8;
+        if !lines.is_empty() && returned_chars + cost > max_chars {
+            truncated_by = Some("max_chars");
+            break;
+        }
+        if lines.len() >= max_lines {
+            truncated_by = Some("max_lines");
+            break;
+        }
+        returned_chars += cost;
+        lines.push(json!({
+            "n": lines.len() + 1,
+            "job": job,
+            "step": step,
+            "at": at,
+            "text": text,
+        }));
+    }
+    let truncated = truncated_by.is_some() || lines.len() < matched;
+    let truncated_by = truncated_by.or(if !truncated {
+        None
+    } else if lines.len() >= max_lines {
+        Some("max_lines")
+    } else {
+        Some("max_chars")
+    });
+    let filtered = !job_filter.is_empty() || !step_filter.is_empty() || !pattern.is_empty();
+    let mut data = json!({
+        "repo": repo,
+        "run_id": run_id,
+        "run_url": format!("https://github.com/{}/actions/runs/{}", repo, run_id),
+        "scope": if job_id.is_some() { "job" } else { "run" },
+        "job_id": job_id,
+        "filters": {
+            "job": job_filter,
+            "step": step_filter,
+            "pattern": pattern,
+            "mode": if regex_mode { "regex" } else { "literal" },
+            "ignore_case": ignore_case,
+        },
+        "lines_scanned": scanned,
+        "matched_lines": matched,
+        "returned_lines": lines.len(),
+        "returned_chars": returned_chars,
+        "max_lines": max_lines,
+        "max_chars": max_chars,
+        "truncated": truncated,
+        "truncated_by": truncated_by,
+        "lines": lines,
+        "transport": "gh_cli",
+    });
+    if lines.is_empty() {
+        let hint = if matched == 0 && filtered {
+            "no line matched these filters; narrow job, step or pattern, or drop the filters to see the whole log"
+        } else if matched == 0 {
+            "gh returned no log lines for this run"
+        } else {
+            "no line fit the max_chars budget; raise max_chars"
+        };
+        data["hint"] = json!(hint);
+    }
+    pack(json!({ "ok": true, "verb": "ci-log", "data": data }).to_string())
+}
+
 pub(super) fn git_branch(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields("git_branch", body, &["remote", "all"]) {
         return refusal;
