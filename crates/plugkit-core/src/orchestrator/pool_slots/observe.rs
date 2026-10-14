@@ -14,6 +14,21 @@ use crate::pkfs;
 
 const TRAVERSAL_SUPPLY_FACTOR: u64 = 2;
 const DEFAULT_LIST_LIMIT: usize = 12;
+const CAPPED_SLOT_LISTS: [&str; 6] = ["live_rows", "live_rows_unmatched", "live_sessions", "candidates_removed", "launch_filters", "already_fixed_on_head"];
+
+fn cap_slots(slots: &mut Value, limit: usize) {
+    cap_candidates(slots, limit);
+    cap_acceptance(slots);
+    for key in CAPPED_SLOT_LISTS {
+        cap_list(slots, key, limit);
+    }
+}
+
+pub fn compact_slots(slots: &Value) -> Value {
+    let mut compact = slots.clone();
+    cap_slots(&mut compact, DEFAULT_LIST_LIMIT);
+    compact
+}
 
 const POOL_RULES: [&str; 8] = [
     "Floor 10: while open_rows > 0 keep live at or above the floor, which is 10 or the recorded spawn ceiling when that is lower; the floor is a gate, not a launch count: refill is measured against the ceiling (rule 3).",
@@ -76,11 +91,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         .and_then(Value::as_u64)
         .filter(|n| *n > 0)
         .map_or(DEFAULT_LIST_LIMIT, |n| n as usize);
-    cap_candidates(&mut slots, limit);
-    cap_acceptance(&mut slots);
-    for key in ["live_rows", "live_rows_unmatched", "live_sessions", "candidates_removed", "launch_filters", "already_fixed_on_head"] {
-        cap_list(&mut slots, key, limit);
-    }
+    cap_slots(&mut slots, limit);
     let held = slots["live_rows_total"].as_u64().unwrap_or(0);
     let live = slots["live"].as_u64().unwrap_or(0);
     let ceiling = spawn_ceiling(&slots) as u64;

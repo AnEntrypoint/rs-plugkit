@@ -700,6 +700,7 @@ struct InstructionRequest {
     asserted_policy_hash: Option<String>,
     mode: Option<String>,
     prd_full_detail: bool,
+    slots_full: bool,
     full_reply_requested: bool,
     asserted_reply_hash: Option<String>,
     raw_phase: Option<String>,
@@ -742,6 +743,9 @@ fn parse_instruction_request(content: &str) -> InstructionRequest {
         if let Some(b) = v.get("prd_full_detail").and_then(|s| s.as_bool()) {
             req.prd_full_detail = b;
         }
+        if let Some(b) = v.get("slots_full").and_then(|s| s.as_bool()) {
+            req.slots_full = b;
+        }
         if let Some(b) = v.get("full").and_then(|s| s.as_bool()) {
             req.full_reply_requested = b;
         }
@@ -779,6 +783,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         asserted_policy_hash,
         mode: mode_opt,
         prd_full_detail,
+        slots_full,
         full_reply_requested,
         asserted_reply_hash,
         raw_phase: raw_phase_opt,
@@ -1158,11 +1163,16 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
 
     let slots_prose = super::pool_slots::slots_prose(&slots);
     let monitor = super::pool_slots::monitor_block(&slots);
+    let slots_in_reply = if slots_full {
+        slots
+    } else {
+        super::pool_slots::compact_slots(&slots)
+    };
     let mut payload = json!({
         "subagents_running": subagents_running,
         "concurrency_shortfall": concurrency_shortfall_field,
         "phase": phase,
-        "slots": slots,
+        "slots": slots_in_reply,
         "monitor": monitor,
         "slots_prose": slots_prose,
         "fsm_graph": {

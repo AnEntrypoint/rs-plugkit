@@ -10,7 +10,7 @@ pub use admission::slots_prose;
 pub use brief::handle_brief;
 pub use floor::{floor_gate, monitor_block};
 pub use heartbeats::{HEARTBEAT_LIVE_MS, HEARTBEAT_REFRESH_MS};
-pub use observe::handle_observe;
+pub use observe::{compact_slots, handle_observe};
 pub use state::{slot_state, spawn_ceiling};
 
 const DEFAULT_SPAWN_CEILING: usize = 20;
