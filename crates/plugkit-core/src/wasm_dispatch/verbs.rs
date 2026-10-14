@@ -1463,7 +1463,7 @@ fn lang(body: &Value) -> u64 {
     }
 }
 
-const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "[timeoutMs=<ms>\\n]<code> (timeoutMs is the enforced wall-clock limit: default 300000, hard ceiling 900000, the process tree is killed at expiry). A child started inside the body does NOT outlive the dispatch -- the exec child and its whole tree are held in a kill-on-close job, so a daemon that must survive is created outside it: on Windows parent it to the WMI service with ([wmiclass]'Win32_Process').Create('cmd.exe /c \"<path>\"'), then confirm it is alive from a SEPARATE dispatch by pid";
+const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "raw_body=<code> plus the typed timeoutMs field (the enforced wall-clock limit: default 300000, hard ceiling 900000, the process tree is killed at expiry). A child started inside the body does NOT outlive the dispatch -- the exec child and its whole tree are held in a kill-on-close job, so a daemon that must survive is created outside it: on Windows parent it to the WMI service with ([wmiclass]'Win32_Process').Create('cmd.exe /c \"<path>\"'), then confirm it is alive from a SEPARATE dispatch by pid";
 
 #[cfg(target_arch = "wasm32")]
 const EXEC_JS_WITNESS_MAX_BYTES: usize = 262_144;
