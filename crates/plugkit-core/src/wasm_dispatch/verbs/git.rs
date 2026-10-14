@@ -1611,11 +1611,11 @@ pub(super) fn git_push(body: &Value) -> u64 {
             "source_sha": local_source_before,
             "preserved_dirty_worktree": preserved_dirty_worktree,
             "reason": format!(
-                "push of explicit source ref '{}' to {} failed because the remote moved (e.g. a CI autobump commit landed after this ref was created); git_push will not rebase or otherwise mutate a dirty checkout for an isolated-ref publication. Recover with exactly: git_pull {{branch:\"{}\"}} to fast-forward past the remote's new commit, then git_push {{rev:\"HEAD\"}} (or git_finalize {{rev:\"HEAD\"}}) to publish this ref on top of it. Output:\n{}",
+                "push of explicit source ref '{}' to {} failed because the remote moved (e.g. a CI autobump commit landed after this ref was created); git_push will not rebase or otherwise mutate a dirty checkout for an isolated-ref publication. Recover with exactly: git_pull {{branch:\"{}\"}} to fast-forward past the remote's new commit, then git_push {{rev:\"<head_after of that pull>\"}} (or git_finalize {{rev:\"<head_after of that pull>\"}}) to publish this ref on top of it; the symbolic HEAD is refused. Output:\n{}",
                 source_ref, branch, branch, push_out
             ),
             "next_dispatch": "instruction",
-            "next_action_hint": "git_pull {branch} then git_push {rev:\"HEAD\"}",
+            "next_action_hint": "git_pull {branch} then git_push {rev:\"<head_after of that pull>\"}",
         });
         match remote_moved_recovery_refusal(body, repo.as_deref(), &branch, &local_source_before)
         {
