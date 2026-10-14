@@ -5865,9 +5865,12 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     }
     if !universe.listing_complete {
         out.insert("listing_incomplete".to_string(), json!(true));
-        if let Some(reason) = &universe.walk_reason {
-            out.insert("walk_reason".to_string(), json!(reason));
-        }
+    }
+    // Why this corpus is a walk at all rides on every reply, not only on a cut one: "git tracks no
+    // file in this worktree" is the reason the corpus is not git's view, and a caller weighing a
+    // zero needs it as much as a caller weighing an incomplete listing.
+    if let Some(reason) = &universe.walk_reason {
+        out.insert("walk_reason".to_string(), json!(reason));
     }
     insert_excluded_by_rule(&mut out, &universe.excluded);
     out.insert("term_combination".to_string(), json!(combination.label()));
