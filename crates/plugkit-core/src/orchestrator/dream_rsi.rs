@@ -789,6 +789,15 @@ pub fn handle_strategy_propose(_content: &str) -> (String, String, i32) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn handle_strategy_propose(_content: &str) -> (String, String, i32) {
+    (
+        json!({ "ok": false, "error": "dream-strategy-propose runs only in the wasm guest" }).to_string(),
+        String::new(),
+        1,
+    )
+}
+
 #[cfg(target_arch = "wasm32")]
 fn evaluator_receipt_path() -> Result<String, String> {
     session_store_path("evaluator-receipts")
