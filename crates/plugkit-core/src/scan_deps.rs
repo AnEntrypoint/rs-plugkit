@@ -281,6 +281,34 @@ struct PackageWalkResult {
     escapes: Vec<String>,
 }
 
+struct FsStat {
+    is_directory: bool,
+    canonical_path: Option<String>,
+    mtime_ms: Option<f64>,
+    size: u64,
+}
+
+impl FsStat {
+    fn host(path: &str) -> Option<Self> {
+        let stat = crate::wasm_dispatch::host_stat(path)?;
+        if stat.is_null() {
+            return None;
+        }
+        Some(FsStat {
+            is_directory: stat
+                .get("isDirectory")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            canonical_path: stat
+                .get("canonicalPath")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            mtime_ms: stat.get("mtime_ms").and_then(Value::as_f64),
+            size: stat.get("size").and_then(Value::as_u64).unwrap_or(0),
+        })
+    }
+}
+
 struct Containment {
     allowed_canonical_roots: Vec<String>,
 }
@@ -297,29 +325,24 @@ fn comparable_canonical_path(path: &str) -> String {
     }
 }
 
-fn canonical_path_of(stat: &Value) -> Option<String> {
-    stat.get("canonicalPath")
-        .and_then(|v| v.as_str())
-        .map(comparable_canonical_path)
-}
-
 impl Containment {
     fn around(directories: &[&str]) -> Self {
         let allowed_canonical_roots = directories
             .iter()
-            .filter_map(|dir| crate::wasm_dispatch::host_stat(dir))
-            .filter_map(|stat| canonical_path_of(&stat))
+            .filter_map(|dir| FsStat::host(dir))
+            .filter_map(|stat| stat.canonical_path)
+            .map(|canonical| comparable_canonical_path(&canonical))
             .collect();
         Containment {
             allowed_canonical_roots,
         }
     }
 
-    fn admits(&self, stat: &Value) -> bool {
+    fn admits(&self, stat: &FsStat) -> bool {
         if self.allowed_canonical_roots.is_empty() {
             return true;
         }
-        let Some(canonical) = canonical_path_of(stat) else {
+        let Some(canonical) = stat.canonical_path.as_deref().map(comparable_canonical_path) else {
             return true;
         };
         self.allowed_canonical_roots.iter().any(|root| {
@@ -398,14 +421,10 @@ fn walk_package(
     if r.file_count >= budget {
         return;
     }
-    let Some(stat) = crate::wasm_dispatch::host_stat(dir) else {
+    let Some(stat) = FsStat::host(dir) else {
         return;
     };
-    if !stat
-        .get("isDirectory")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    if !stat.is_directory {
         return;
     }
     if !containment.admits(&stat) {
@@ -413,9 +432,8 @@ fn walk_package(
         return;
     }
     let directory_identity = stat
-        .get("canonicalPath")
-        .and_then(|v| v.as_str())
-        .map(ToOwned::to_owned)
+        .canonical_path
+        .clone()
         .or_else(|| package_directory_identity(dir).map(|identity| format!("package:{identity}")))
         .unwrap_or_else(|| format!("path:{dir}"));
     if !visited_directories.insert(directory_identity) {
@@ -429,33 +447,26 @@ fn walk_package(
             continue;
         }
         let next = format!("{dir}/{entry}");
-        let Some(stat) = crate::wasm_dispatch::host_stat(&next) else {
+        let Some(stat) = FsStat::host(&next) else {
             continue;
         };
-        if stat.is_null() {
-            continue;
-        }
         if !containment.admits(&stat) {
             r.escapes.push(next);
             continue;
         }
-        let is_dir = stat
-            .get("isDirectory")
-            .and_then(|b| b.as_bool())
-            .unwrap_or(false);
-        if is_dir {
+        if stat.is_directory {
             if entry == "node_modules" || is_noise_dir_segment(&entry) {
                 continue;
             }
             walk_package(&next, budget, containment, visited_directories, r);
         } else {
             r.file_count += 1;
-            if let Some(m) = stat.get("mtime_ms").and_then(|v| v.as_f64()) {
+            if let Some(m) = stat.mtime_ms {
                 if m > r.max_mtime {
                     r.max_mtime = m;
                 }
             }
-            r.total_size += stat.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+            r.total_size += stat.size;
             if !is_noise_suffix(&next) {
                 r.candidates.push(next);
             }
