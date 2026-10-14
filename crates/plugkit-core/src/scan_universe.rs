@@ -129,6 +129,11 @@ pub struct ScanUniverse {
     pub listing_complete: bool,
     pub excluded: Vec<RuleExclusion>,
     pub walk_reason: Option<String>,
+    // What git itself contributed to the corpus: a git corpus whose tracked count is 0 carries no
+    // committed content at all, so the reply has to be able to say so -- the number is what turns
+    // "searched 1803 files" from a reassurance into the blind spot it is when nothing is tracked.
+    pub git_tracked_files: usize,
+    pub git_untracked_files: usize,
     target: String,
 }
 
@@ -364,12 +369,13 @@ fn nested_untracked(dir: &str, nesting: usize, no_ignore: bool) -> (Vec<String>,
     (files, complete)
 }
 
-fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec<String>, bool), String> {
+fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec<String>, bool, usize, usize), String> {
     let mut tracked = Vec::new();
     let mut untracked = Vec::new();
     let others_mode: &[&str] = if no_ignore { &["--others"] } else { &["--others", "--exclude-standard"] };
     let mut complete = git_list_into(dir, &["--cached", "--recurse-submodules"], None, 0, &mut tracked)?;
     complete &= git_list_into(dir, others_mode, None, 0, &mut untracked)?;
+    let mut tracked_count = tracked.len();
     let mut files: Vec<String> = tracked.into_iter().map(|p| join_under(dir, &p)).collect();
     for entry in untracked {
         let Some(nested_repo) = entry.strip_suffix('/') else {
@@ -378,9 +384,10 @@ fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec
         };
         let nested_dir = join_under(dir, nested_repo);
         match (nesting < NESTED_REPO_DEPTH_LIMIT).then(|| git_worktree_files(&nested_dir, nesting + 1, no_ignore)) {
-            Some(Ok((nested_files, nested_complete))) => {
+            Some(Ok((nested_files, nested_complete, nested_tracked, _))) => {
                 files.extend(nested_files);
                 complete &= nested_complete;
+                tracked_count += nested_tracked;
             }
             _ => complete = false,
         }
@@ -392,7 +399,8 @@ fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec
     }
     files.sort_unstable();
     files.dedup();
-    Ok((files, complete))
+    let untracked_count = files.len().saturating_sub(tracked_count.min(files.len()));
+    Ok((files, complete, tracked_count, untracked_count))
 }
 
 fn runtime_artifact_rule(path: &str) -> Option<&'static str> {
@@ -425,6 +433,7 @@ enum WalkCause {
     TargetGitignored,
     OutsideWorktree(String),
     GitListingFailed(String),
+    GitTracksNothing,
     CallerForcedDisk,
 }
 
@@ -438,10 +447,15 @@ const DEPENDENCY_WALK_SKIPS: &str = "skipping only VCS, dependency-store, cache 
 
 const NO_IGNORE_WALK_NOTE: &str = "\"no_ignore\": true, so .gitignore/.codesearchignore rules were not applied";
 
+const GIT_TRACKS_NOTHING_REASON: &str = "git tracks no file in this worktree (no commit yet, or an empty index), so its listing holds only the files the ignore rules spare; the target was walked on disk as well and its files joined with that listing";
+
+pub const CORPUS_BLIND_SPOT_REASON: &str = "git tracks no file in this worktree, so its corpus is untracked files only; the disk walk that covers the rest did not finish, so the corpus does not hold every source file here and a zero over it is not a finding";
+
 fn walk_policy(cause: WalkCause, origin: TargetOrigin, no_ignore: bool) -> WalkPolicy {
     let project = |reason: String| WalkPolicy { honour_gitignore: true, noise: NoiseDirs::ProjectNoiseList, reason };
     let mut policy = match (cause, origin) {
         (WalkCause::GitListingFailed(e), _) => project(format!("git could not list the worktree, so it was walked directly ({e})")),
+        (WalkCause::GitTracksNothing, _) => project(GIT_TRACKS_NOTHING_REASON.to_string()),
         (WalkCause::CallerForcedDisk, _) => project("the caller passed \"refresh\": true, so git ls-files was not consulted and the target was walked on disk".to_string()),
         (WalkCause::TargetGitignored, TargetOrigin::ProjectDefault) => project("the target is gitignored, so git lists nothing there and it was walked directly".to_string()),
         (WalkCause::OutsideWorktree(e), TargetOrigin::ProjectDefault) => project(format!("not inside a git worktree, so it was walked directly ({e})")),
@@ -620,6 +634,8 @@ pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &I
         acc.files.extend(next.files);
         acc.excluded.extend(next.excluded);
         acc.listing_complete &= next.listing_complete;
+        acc.git_tracked_files = acc.git_tracked_files.saturating_add(next.git_tracked_files);
+        acc.git_untracked_files = acc.git_untracked_files.saturating_add(next.git_untracked_files);
         if acc.walk_reason.is_none() { acc.walk_reason = next.walk_reason; }
         if acc.source != next.source { acc.source = FileSource::Walk; }
     }
@@ -637,12 +653,14 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
     };
     let named_scope = rel.is_some();
     let target = rel.as_deref().map(|r| join_under(root, r)).unwrap_or_else(|| root.to_string());
-    let universe = |files, source, listing_complete, excluded, walk_reason| ScanUniverse {
+    let universe = |files, source, listing_complete, excluded, walk_reason, tracked, untracked| ScanUniverse {
         files,
         source,
         listing_complete,
         excluded,
         walk_reason,
+        git_tracked_files: tracked,
+        git_untracked_files: untracked,
         target: target.clone(),
     };
     if named_scope {
@@ -652,16 +670,19 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
                 scope.unwrap_or(""),
                 absolute_root_for_message(root),
             )),
-            Some(false) => return Ok(universe(vec![target.clone()], FileSource::SingleFile, true, Vec::new(), None)),
+            Some(false) => return Ok(universe(vec![target.clone()], FileSource::SingleFile, true, Vec::new(), None, 0, 0)),
             Some(true) => {}
         }
     }
+    // What git listed, kept aside when its tracked set is empty: the walk below then answers on the
+    // union, so an untracked tree is scanned instead of being reported as covered-but-empty.
+    let mut git_join: Option<(Vec<String>, bool)> = None;
     let cause = if force_disk {
         WalkCause::CallerForcedDisk
     } else {
         match directory_is_gitignored(&target) {
             Ok(false) => match git_worktree_files(&target, 0, no_ignore) {
-                Ok((files, complete)) => {
+                Ok((files, complete, tracked, untracked)) => {
                     let (files, mut pruned) = if named_scope {
                         (files, Vec::new())
                     } else {
@@ -680,7 +701,11 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
                             None => kept.push(path),
                         }
                     }
-                    return Ok(universe(kept, FileSource::Git, complete, pruned, None));
+                    if tracked > 0 {
+                        return Ok(universe(kept, FileSource::Git, complete, pruned, None, tracked, untracked));
+                    }
+                    git_join = Some((kept, complete));
+                    WalkCause::GitTracksNothing
                 }
                 Err(e) => WalkCause::GitListingFailed(e),
             },
@@ -707,12 +732,30 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         excluded: Vec::new(),
     };
     walk.descend(&target);
+    let mut files = walk.files;
+    let mut listing_complete = !walk.reached_deadline;
+    // git contributed no tracked file here (that is why this is a walk at all), so 0 is the count
+    // the reply reports: it is the number that names the blind spot.
+    let tracked = 0usize;
+    let mut untracked = 0usize;
+    if let Some((git_files, git_complete)) = git_join {
+        listing_complete &= git_complete;
+        untracked = git_files.len();
+        let mut seen: HashSet<String> = files.iter().cloned().collect();
+        for file in git_files {
+            if seen.insert(file.clone()) {
+                files.push(file);
+            }
+        }
+    }
     Ok(universe(
-        walk.files,
+        files,
         FileSource::Walk,
-        !walk.reached_deadline,
+        listing_complete,
         walk.excluded,
         Some(policy.reason),
+        tracked,
+        untracked,
     ))
 }
 
