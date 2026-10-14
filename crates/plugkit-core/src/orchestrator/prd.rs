@@ -1236,15 +1236,19 @@ const WITNESS_BINDING_FIELDS: &[&str] = &[
     "witness_ts",
 ];
 
+const WITNESS_INLINE_BINDING_FIELDS: &[&str] = &["witness_exit_code", "witness_output", "witness_ts"];
+
 const WITNESS_OUTPUT_MAX_BYTES: usize = 16 * 1024 * 1024;
 
-const WITNESS_BINDING_HINT: &str = "bind the witness with witness_dispatch_id (string: the dispatch_id of your own live run in this project), or with all four of witness_exit_code (integer, must be 0), witness_output_sha256 (string: sha256 of the witness output file, 64 lowercase hex), witness_output_path (string: that output file, relative to the project root, no .. segments) and witness_ts (string: RFC 3339 timestamp). prd-resolve re-reads the file, re-hashes it and refuses on any mismatch.";
+const WITNESS_OUTPUT_OUTSIDE_ROOT: &str = "an absolute path must lie inside the project root, because the witness sandbox reads nothing outside it. Pass the output text inline as witness_output, copy the file under the project root, or bind witness_dispatch_id";
+
+const WITNESS_BINDING_HINT: &str = "bind the witness with witness_dispatch_id (string: the dispatch_id of your own live run in this project), or with all four of witness_exit_code (integer, must be 0), witness_output_sha256 (string: sha256 of the witness output file, 64 lowercase hex), witness_output_path (string: that output file inside the project root, relative or absolute, no .. segments) and witness_ts (string: RFC 3339 timestamp). prd-resolve re-reads the file, re-hashes it and refuses on any mismatch. A witness output that lives outside the project root is bound inline instead: witness_exit_code, witness_ts and witness_output (string: the output text), where prd-resolve hashes the text itself and witness_output_sha256 is optional and must match when given.";
 
 fn prd_resolve_required_fields() -> serde_json::Value {
     serde_json::json!({
         "id": "string: the row id, at top level (aliases prd_id, mutable_id, item_id, slug, key)",
         "witness_evidence": "string, non-empty: a file:line, codesearch hit or exec output specific to this row",
-        "binding": "witness_dispatch_id (string), OR all four of witness_exit_code (integer 0), witness_output_sha256 (string, 64 lowercase hex), witness_output_path (string) and witness_ts (string, RFC 3339)",
+        "binding": "witness_dispatch_id (string), OR all four of witness_exit_code (integer 0), witness_output_sha256 (string, 64 lowercase hex), witness_output_path (string) and witness_ts (string, RFC 3339), OR witness_exit_code, witness_ts and witness_output (string: the output text, hashed by the verb)",
     })
 }
 
@@ -1997,18 +2001,27 @@ pub fn reopen_rows_for_changed_paths(changed: &[String]) -> Vec<serde_json::Valu
 struct VerifiedWitness {
     exit_code: i64,
     output_sha256: String,
-    output_path: String,
+    output_path: Option<String>,
+    output_bytes: Option<usize>,
     ts: String,
 }
 
 impl VerifiedWitness {
     fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut binding = serde_json::json!({
             "exit_code": self.exit_code,
             "output_sha256": self.output_sha256,
-            "output_path": self.output_path,
             "ts": self.ts,
-        })
+        });
+        match (&self.output_path, self.output_bytes) {
+            (Some(path), _) => binding["output_path"] = serde_json::json!(path),
+            (None, Some(bytes)) => {
+                binding["output_inline"] = serde_json::json!(true);
+                binding["output_bytes"] = serde_json::json!(bytes);
+            }
+            (None, None) => {}
+        }
+        binding
     }
 
     fn to_yaml(&self) -> Value {
@@ -2021,10 +2034,22 @@ impl VerifiedWitness {
             Value::String("output_sha256".to_string()),
             Value::String(self.output_sha256.clone()),
         );
-        map.insert(
-            Value::String("output_path".to_string()),
-            Value::String(self.output_path.clone()),
-        );
+        match (&self.output_path, self.output_bytes) {
+            (Some(path), _) => {
+                map.insert(
+                    Value::String("output_path".to_string()),
+                    Value::String(path.clone()),
+                );
+            }
+            (None, Some(bytes)) => {
+                map.insert(Value::String("output_inline".to_string()), Value::Bool(true));
+                map.insert(
+                    Value::String("output_bytes".to_string()),
+                    serde_yaml::to_value(bytes).unwrap_or(Value::Null),
+                );
+            }
+            (None, None) => {}
+        }
         map.insert(
             Value::String("ts".to_string()),
             Value::String(self.ts.clone()),
@@ -2101,6 +2126,92 @@ fn is_rfc3339_timestamp(ts: &str) -> bool {
     }
 }
 
+fn witness_timestamp(request: &serde_json::Value) -> Result<String, (&'static str, String)> {
+    let ts = request
+        .get("witness_ts")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if is_rfc3339_timestamp(&ts) {
+        Ok(ts)
+    } else {
+        Err((
+            "witness_ts",
+            "must be an RFC 3339 timestamp such as 2026-10-09T13:44:57Z".to_string(),
+        ))
+    }
+}
+
+fn project_relative_witness_path(path: &str) -> Result<String, (&'static str, String)> {
+    let relative = if pkfs::is_absolute(path) {
+        pkfs::relative_to_project_root(path)
+            .ok_or_else(|| ("witness_output_path", WITNESS_OUTPUT_OUTSIDE_ROOT.to_string()))?
+    } else {
+        path.to_string()
+    };
+    if is_relative_project_path(&relative) {
+        Ok(relative)
+    } else {
+        Err((
+            "witness_output_path",
+            "must be a path inside the project root with no .. segments".to_string(),
+        ))
+    }
+}
+
+fn verify_inline_witness_output(
+    request: &serde_json::Value,
+    exit_code: i64,
+) -> Result<VerifiedWitness, (&'static str, String)> {
+    use sha2::{Digest, Sha256};
+    if request.get("witness_output_path").is_some_and(|v| !v.is_null()) {
+        return Err((
+            "witness_output_path",
+            "name the output in witness_output_path or pass its text in witness_output, not both"
+                .to_string(),
+        ));
+    }
+    let ts = witness_timestamp(request)?;
+    let text = request
+        .get("witness_output")
+        .and_then(|v| v.as_str())
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| {
+            (
+                "witness_output",
+                "must be a non-empty string: the witness output text".to_string(),
+            )
+        })?;
+    if text.len() > WITNESS_OUTPUT_MAX_BYTES {
+        return Err((
+            "witness_output",
+            format!("is larger than {} bytes", WITNESS_OUTPUT_MAX_BYTES),
+        ));
+    }
+    let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+    let claimed = request
+        .get("witness_output_sha256")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|claimed| !claimed.is_empty());
+    if let Some(claimed) = claimed {
+        if claimed != digest {
+            return Err((
+                "witness_output_sha256",
+                format!("sha256 of witness_output is {}, not the claimed {}", digest, claimed),
+            ));
+        }
+    }
+    Ok(VerifiedWitness {
+        exit_code,
+        output_sha256: digest,
+        output_path: None,
+        output_bytes: Some(text.len()),
+        ts,
+    })
+}
+
 fn verify_witness_binding(
     request: &serde_json::Value,
 ) -> Result<VerifiedWitness, (&'static str, String)> {
@@ -2123,6 +2234,9 @@ fn verify_witness_binding(
             ))
         }
     };
+    if request.get("witness_output").is_some_and(|v| !v.is_null()) {
+        return verify_inline_witness_output(request, exit_code);
+    }
     let output_sha256 = request
         .get("witness_output_sha256")
         .and_then(|v| v.as_str())
@@ -2142,24 +2256,8 @@ fn verify_witness_binding(
         .unwrap_or("")
         .trim()
         .to_string();
-    if !is_relative_project_path(&output_path) {
-        return Err((
-            "witness_output_path",
-            "must be a relative path inside the project root with no .. segments".to_string(),
-        ));
-    }
-    let ts = request
-        .get("witness_ts")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if !is_rfc3339_timestamp(&ts) {
-        return Err((
-            "witness_ts",
-            "must be an RFC 3339 timestamp such as 2026-10-09T13:44:57Z".to_string(),
-        ));
-    }
+    let output_path = project_relative_witness_path(&output_path)?;
+    let ts = witness_timestamp(request)?;
     let content = pkfs::read_to_string(&output_path).ok_or_else(|| {
         (
             "witness_output_path",
@@ -2191,7 +2289,8 @@ fn verify_witness_binding(
     Ok(VerifiedWitness {
         exit_code,
         output_sha256,
-        output_path,
+        output_path: Some(output_path),
+        output_bytes: None,
         ts,
     })
 }
@@ -2303,7 +2402,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             "prd_id": id_target,
             "field": "witness_binding",
             "received": received,
-            "accepted_fields": ["witness_dispatch_id", "witness_exit_code", "witness_output_sha256", "witness_output_path", "witness_ts"],
+            "accepted_fields": ["witness_dispatch_id", "witness_exit_code", "witness_output_sha256", "witness_output_path", "witness_output", "witness_ts"],
             "flat_binding_fields": WITNESS_BINDING_FIELDS,
             "hint": WITNESS_BINDING_HINT,
         })
@@ -2314,12 +2413,19 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             1,
         );
     }
+    let required_binding_fields: &[&str] =
+        if binding_request.get("witness_output").is_some_and(|v| !v.is_null()) {
+            WITNESS_INLINE_BINDING_FIELDS
+        } else {
+            WITNESS_BINDING_FIELDS
+        };
     let binding_present: Vec<&str> = WITNESS_BINDING_FIELDS
         .iter()
         .copied()
+        .chain(std::iter::once("witness_output"))
         .filter(|field| binding_request.get(*field).is_some_and(|v| !v.is_null()))
         .collect();
-    let binding_missing: Vec<&str> = WITNESS_BINDING_FIELDS
+    let binding_missing: Vec<&str> = required_binding_fields
         .iter()
         .copied()
         .filter(|field| !binding_present.contains(field))
@@ -2473,13 +2579,13 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     {
         let body = serde_json::json!({
             "error": format!(
-                "prd-resolve refused: witness for {} is unbound -- pass witness_dispatch_id, or all of witness_exit_code, witness_output_sha256, witness_output_path and witness_ts",
+                "prd-resolve refused: witness for {} is unbound -- pass witness_dispatch_id, or all of witness_exit_code, witness_output_sha256, witness_output_path and witness_ts, or witness_exit_code, witness_ts and the output text in witness_output",
                 id_target
             ),
             "deviation_kind": "prd-resolve-unbound-witness",
             "deviation_severity": "deny",
             "prd_id": id_target,
-            "missing_fields": ["witness_dispatch_id", "witness_exit_code", "witness_output_sha256", "witness_output_path", "witness_ts"],
+            "missing_fields": ["witness_dispatch_id", "witness_exit_code", "witness_output_sha256", "witness_output_path", "witness_output", "witness_ts"],
             "required_fields": prd_resolve_required_fields(),
             "witness_dispatch_id_field": "witness_dispatch_id",
             "witness_dispatch_id_in_evidence": evidence_dispatch_id,

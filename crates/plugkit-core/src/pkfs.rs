@@ -58,6 +58,21 @@ pub fn is_absolute(path: &str) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub fn relative_to_project_root(path: &str) -> Option<String> {
+    let root = project_root()?.replace('\\', "/");
+    let candidate = path.replace('\\', "/");
+    let rest = candidate
+        .strip_prefix(root.trim_end_matches('/'))?
+        .strip_prefix('/')?;
+    (!rest.is_empty()).then(|| rest.to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn relative_to_project_root(_path: &str) -> Option<String> {
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn read_to_string(path: &str) -> Option<String> {
     crate::wasm_dispatch::host_read(&anchor(path))
 }

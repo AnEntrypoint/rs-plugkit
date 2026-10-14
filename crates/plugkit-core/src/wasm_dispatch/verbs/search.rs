@@ -1585,9 +1585,15 @@ prd-resolve {id (string), witness_evidence (string), commit_comment (string, opt
                    dispatch ledger, copied from that dispatch's reply.
   binding, OR all four of: witness_exit_code (integer, must be 0), witness_output_sha256
                    (64 lowercase hex sha256 of the witness output file), witness_output_path
-                   (that output file, relative to the project root, no .. segments) and
-                   witness_ts (RFC 3339 timestamp). The file is re-read and re-hashed, and any
-                   mismatch is refused.
+                   (that output file inside the project root, relative or absolute, no ..
+                   segments) and witness_ts (RFC 3339 timestamp). The file is re-read and
+                   re-hashed, and any mismatch is refused. An absolute path outside the project
+                   root is refused, because the witness sandbox reads nothing outside it.
+  binding, OR inline: witness_exit_code, witness_ts and witness_output (string: the witness
+                   output text, up to 16 MiB). The verb hashes the text itself, so
+                   witness_output_sha256 is optional and must equal that hash when given. Give
+                   witness_output or witness_output_path, never both. The row stores the hash and
+                   the byte count, never the text.
   id aliases: prd_id, mutable_id, item_id, slug, key. commit_comment aliases: commit_message,
   resolution_note (a one-line note bundled into the next commit).
   resolution: free text stored on the row as resolution (alias resolution_text). It is not bundled into
