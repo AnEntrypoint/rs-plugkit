@@ -35,6 +35,44 @@ impl OverrideKind {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Anchor {
+    name: String,
+    author: String,
+}
+
+fn parse_anchors(body: &Value) -> Result<Vec<Anchor>, String> {
+    let entries = body
+        .get("anchors")
+        .and_then(|v| v.as_array())
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| "body.anchors: non-empty array of {name, author} -- required when kind=\"prose\"".to_string())?;
+    entries
+        .iter()
+        .map(|entry| -> Result<Anchor, String> {
+            let obj = entry
+                .as_object()
+                .ok_or_else(|| "body.anchors: each entry must be an object {name, author}".to_string())?;
+            if let Some(extra) = obj.keys().find(|k| k.as_str() != "name" && k.as_str() != "author") {
+                return Err(format!(
+                    "body.anchors: entry field \"{extra}\" is outside {{name, author}} -- an anchor carries no url or other key"
+                ));
+            }
+            let field = |k: &str| {
+                obj.get(k)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            match (field("name"), field("author")) {
+                (Some(name), Some(author)) => Ok(Anchor { name, author }),
+                _ => Err("body.anchors: each entry needs non-empty string name and author".to_string()),
+            }
+        })
+        .collect()
+}
+
 fn prose_target_path(key: &str) -> Result<String, String> {
     validate_prose_key(key)?;
     let path = format!("{INSTRUCTIONS_BASE}/{key}.md");
@@ -104,6 +142,17 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
     if kind_parsed == Some(OverrideKind::Graph) && user_confirmed && confirmation_witness.trim().is_empty() {
         missing.push("body.confirmation_witness: non-empty string citing the AskUserQuestion dispatch -- required when kind=\"graph\" and user_confirmed:true".to_string());
     }
+    let anchors: Vec<Anchor> = if kind_parsed == Some(OverrideKind::Prose) {
+        match parse_anchors(&body) {
+            Ok(list) => list,
+            Err(e) => {
+                missing.push(e);
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
     if !missing.is_empty() {
         return (
             json!({
@@ -119,6 +168,7 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
                     "reason": "string, non-empty, citing the friction signal",
                     "witness": "string, non-empty",
                     "key": "string, non-empty -- required when kind=\"prose\"",
+                    "anchors": "non-empty array of {name, author} (both non-empty strings, no other keys, no url) -- required when kind=\"prose\"",
                     "confirmation_witness": "string, non-empty -- required when kind=\"graph\" and user_confirmed:true",
                 },
                 "missing": missing,
@@ -217,6 +267,7 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
                 "requires_confirmation": true,
                 "requires_execution_authority": requires_authority,
                 "kind": kind.label(),
+                "anchors": anchors.iter().map(|a| json!({"name": a.name, "author": a.author})).collect::<Vec<Value>>(),
                 "target_path": target_path,
                 "reason": reason,
                 "witness": witness,
