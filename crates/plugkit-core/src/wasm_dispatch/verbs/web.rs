@@ -1155,13 +1155,62 @@ fn prompt_terms(prompt: &str) -> Vec<String> {
     out
 }
 
-fn split_blocks(markdown: &str) -> Vec<String> {
-    markdown
-        .split("\n\n")
-        .map(|b| b.trim())
-        .filter(|b| b.chars().count() >= 40)
-        .map(|b| b.to_string())
-        .collect()
+const PASSAGE_MIN_CHARS: usize = 40;
+const PASSAGE_SOFT_CHARS: usize = 700;
+const PASSAGE_HARD_CHARS: usize = 1_200;
+const PASSAGE_MAX_COUNT: usize = 8;
+
+fn split_passages(markdown: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for block in markdown.split("\n\n") {
+        let block = block.trim();
+        let len = block.chars().count();
+        if len < PASSAGE_MIN_CHARS {
+            continue;
+        }
+        if len <= PASSAGE_HARD_CHARS {
+            out.push(block.to_string());
+        } else {
+            out.extend(split_long_block(block));
+        }
+    }
+    out
+}
+
+fn split_long_block(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out: Vec<String> = Vec::new();
+    let mut start = 0usize;
+    while start < n {
+        let soft = (start + PASSAGE_SOFT_CHARS).min(n);
+        let mut end = soft;
+        if soft < n {
+            let hard = (start + PASSAGE_HARD_CHARS).min(n);
+            let mut cut = None;
+            let mut space = None;
+            let mut i = soft;
+            while i < hard {
+                let c = chars[i];
+                if c == '\n' || c == ',' || c == ';' || c == '}' || c == ']' || c == '.' {
+                    cut = Some(i + 1);
+                    break;
+                }
+                if space.is_none() && c.is_whitespace() {
+                    space = Some(i + 1);
+                }
+                i += 1;
+            }
+            end = cut.or(space).unwrap_or(soft);
+        }
+        let piece: String = chars[start..end].iter().collect();
+        let piece = piece.trim().to_string();
+        if piece.chars().count() >= PASSAGE_MIN_CHARS {
+            out.push(piece);
+        }
+        start = end;
+    }
+    out
 }
 
 fn document_frequencies(blocks: &[String], terms: &[String]) -> HashMap<String, usize> {
@@ -1186,42 +1235,45 @@ fn matched_terms(block: &str, terms: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn score_block(block: &str, terms: &[String], df: &HashMap<String, usize>, total: f64) -> f64 {
-    let low = block.to_ascii_lowercase();
-    let mut score = 0.0f64;
-    let mut hits = 0usize;
+fn score_passage(passage: &str, terms: &[String], df: &HashMap<String, usize>, total: f64) -> f64 {
+    let low = passage.to_ascii_lowercase();
+    let mut idf_sum = 0.0f64;
+    let mut distinct = 0usize;
+    let mut occurrences = 0usize;
     for t in terms {
-        if low.contains(t.as_str()) {
-            hits += 1;
-            let d = *df.get(t).unwrap_or(&1) as f64;
-            score += 1.0 + (total / (1.0 + d)).ln().max(0.0);
+        let hits = low.match_indices(t.as_str()).count();
+        if hits == 0 {
+            continue;
         }
+        distinct += 1;
+        occurrences += hits;
+        let d = *df.get(t).unwrap_or(&1) as f64;
+        idf_sum += 1.0 + (total / (1.0 + d)).ln().max(0.0);
     }
-    if hits == 0 {
+    if distinct == 0 {
         return 0.0;
     }
-    score += hits as f64 * 0.5;
-    if block.chars().count() < 1200 {
-        score += 0.5;
-    }
+    let coverage = distinct as f64 / terms.len() as f64;
+    let per_1000 = occurrences as f64 / (passage.chars().count() as f64 / 1000.0).max(0.05);
+    let mut score = idf_sum * (0.5 + coverage) + (1.0 + per_1000).ln();
     if low.starts_with('#') {
-        score += 0.75;
+        score += 0.25;
     }
     score
 }
 
 pub fn extractive_answer(markdown: &str, prompt: &str, budget: usize) -> (String, Vec<Value>) {
     let terms = prompt_terms(prompt);
-    let blocks = split_blocks(markdown);
-    if terms.is_empty() || blocks.is_empty() {
+    let candidates = split_passages(markdown);
+    if terms.is_empty() || candidates.is_empty() {
         return (take_chars(markdown, budget), Vec::new());
     }
-    let total = blocks.len() as f64;
-    let df = document_frequencies(&blocks, &terms);
-    let mut scored: Vec<(usize, f64)> = blocks
+    let total = candidates.len() as f64;
+    let df = document_frequencies(&candidates, &terms);
+    let mut scored: Vec<(usize, f64)> = candidates
         .iter()
         .enumerate()
-        .map(|(idx, b)| (idx, score_block(b, &terms, &df, total)))
+        .map(|(idx, b)| (idx, score_passage(b, &terms, &df, total)))
         .filter(|(_, s)| *s > 0.0)
         .collect();
     scored.sort_by(|a, b| {
@@ -1233,14 +1285,14 @@ pub fn extractive_answer(markdown: &str, prompt: &str, budget: usize) -> (String
     let mut passages: Vec<Value> = Vec::new();
     let mut used = 0usize;
     for (idx, score) in scored {
-        if used >= budget || passages.len() >= 8 {
+        if used >= budget || passages.len() >= PASSAGE_MAX_COUNT {
             break;
         }
         let room = budget.saturating_sub(used);
         if room < 80 {
             break;
         }
-        let piece = take_chars(&blocks[idx], room);
+        let piece = take_chars(&candidates[idx], room);
         if piece.is_empty() {
             continue;
         }
@@ -1252,7 +1304,7 @@ pub fn extractive_answer(markdown: &str, prompt: &str, budget: usize) -> (String
         passages.push(json!({
             "chars": piece.chars().count(),
             "score": (score * 100.0).round() / 100.0,
-            "matched_terms": matched_terms(&blocks[idx], &terms),
+            "matched_terms": matched_terms(&candidates[idx], &terms),
         }));
     }
     if passages.is_empty() {
