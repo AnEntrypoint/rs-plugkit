@@ -1382,7 +1382,7 @@ pub(super) const GREP_ACCEPTED_FIELDS: &[&str] = &[
     "regex", "fixed_strings", "fixedStrings", "case_insensitive", "ignore_case", "whole_word",
     "context", "max_files",
     "no_ignore", "include_ignored",
-    "max_results", "maxResults", "limit", "max_matches", "k",
+    "max_results", "maxResults", "limit", "head_limit", "max_matches", "k",
     "refresh", "no_cache", "force_disk", "file_source",
 ];
 
@@ -1835,7 +1835,7 @@ pub(super) fn finish_scan_reply(out: &mut serde_json::Map<String, Value>, scan_c
     partial
 }
 
-pub(super) const GREP_LIMIT_FIELDS: &[&str] = &["max_results", "maxResults", "limit", "max_matches", "k"];
+pub(super) const GREP_LIMIT_FIELDS: &[&str] = &["max_results", "maxResults", "limit", "head_limit", "max_matches", "k"];
 
 pub(super) const GREP_DEFAULT_MAX_MATCHES: u32 = 200;
 
