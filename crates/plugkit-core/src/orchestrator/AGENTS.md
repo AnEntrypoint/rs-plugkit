@@ -14,6 +14,7 @@ Module-scoped rules for the orchestrator sources in this directory. The [root AG
 ## Dream-RSI replay
 
 - Replay is frozen-world evidence, not execution or deployment authority: records stay bound to their completed dispatch and the owner session.
+- `observe_dispatch` (`dream_rsi.rs`) appends each real dispatch to `.gm/dream-rsi/<session>/observations.json`, capped at the newest 256 records, with `dispatch_id`, `verb`, `fingerprint`, `exit_code`, `gate_drift`, `prd_open_count`, `mutable_open_count`, `quality`, `ts`, `reply_sha256` and optional `lean_node`. Orchestration verbs and `dream-*` dispatches are not recorded. The same call rewrites `active-strategy.json`; no cycle path writes it.
 - Score each world as best attained quality minus `beta1 * summed cost` plus `beta2 * parallelism_bonus`; a policy scores the mean over its worlds, and a challenger wins only with a strict improvement over the incumbent on the same worlds. Betas are explicit finite nonnegative inputs.
 - `dream-replay-round` is session-owned progressive reveal from the policy roots and the revealed frontier; it closes at `max_rounds` or `max_nodes`, and `max_online_rounds` bounds new distinct values.
 - `dream-replay-cycle` is observation-only maintenance: it uses the canonical owner `session_id`, verifies ledger evidence through `automatic_replay`, defers when no new verified dispatch exists, and never refreshes phase clocks.
