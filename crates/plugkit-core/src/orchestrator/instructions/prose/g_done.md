@@ -2,6 +2,5 @@
 
 Gate `G_DONE` on the spine. A gate is a condition that must hold before the walk leaves this node; it is not a work node.
 
-Condition: contract satisfied and recorded. The transition out of this gate is refused until predicate `lean-contract-recorded` holds.
-
+Condition: contract satisfied and recorded.
 The walk is recorded by the transition that leaves this node.
