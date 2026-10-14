@@ -49,7 +49,7 @@ Route KV writes to `<cwd>/.gm/disciplines/<ns>/`. `@<name>` prefix sets namespac
 
 **Verification before recall.** A memory naming a specific file/function/flag is a claim indexed at write-time, not a claim about present state -- re-verify the named thing still exists before acting on the hit. A recall result is a lead, never a fact.
 
-Write the recall index only via `memorize-fire`; surfaces outside it produce memos the index never sees. Prune bad memory on sight: a stale/superseded/wrong recall hit poisons every future recall, so `memorize-prune {key}` removes it (text + embedding); pruning bad memory matters more than preserving good. For an uncertain set, `memorize-prune {query}` returns review-only candidates to judge before removing by `{keys}` -- never a blind similarity-removal.
+Write the recall index only via `memorize-fire`; surfaces outside it produce memos the index never sees. Prune bad memory on sight, since a stale or wrong recall hit poisons every future recall: `memorize-prune {keys}` removes the named entries (text + embedding); `memorize-prune {query}` is review-only and returns candidates without removing any.
 
 By default `memorize`/`recall`/`memorize-fire`/`memorize-prune` write markdown files at `.gm/memories/<key>.md` (the durable store) with a lean cache index at `.gm/gm.db`'s `rssearch_vectors` table. A project can opt a namespace into a second, file-pointer-only backend (`memory.tencentdb_backend` in `gm.config.json`) -- its index rows carry only a path pointer plus the embedding, never inline text, and its embedding dimension is independently configurable (not gm's fixed 384-dim model). Same verb surface either way; the backend selection is transparent and config-gated.
 
