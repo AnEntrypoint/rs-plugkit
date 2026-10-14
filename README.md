@@ -528,6 +528,40 @@ row held `blockedBy` external or out-of-reach not counted), `session_id`,
 newest five `phase_history` entries and `phase_history_total`, the number
 recorded in `turn-state.json`.
 
+`session-claim` makes the session of the dispatch the owner of the state machine
+in `turn-state.json`. `phase-status` and `instruction` compare that owner with
+the caller and answer `session_mismatch` when the two differ. Without `force`,
+the verb takes ownership only when no owner is recorded or the owner shows no
+sign of life. Signs of life are a live session lease among the `_lease_sessions`
+the host passes in, and spool activity of that session in the last `idle_secs`
+seconds (default 600). The verb reads the activity from the session id inside
+the names of the files in `.gm/exec-spool/out/` and from
+`.last-instruction-hash-<session>.json`. A live owner is refused with its
+evidence. `force: true` takes ownership from any owner. `dry_run: true` reports
+the decision and writes nothing. The reply carries `claimed`, `would_claim`,
+`reason` (`no_owner`, `already_owner`, `owner_gone`, `forced` or `owner_live`),
+`previous_owner` and `owner_evidence`. Its `basis` is `session_lease`,
+`recent_activity`, `no_lease_and_idle` or `idle_without_lease_facts`.
+
+`prd-gc` lists the open PRD rows that are safe to retire, and with
+`confirm: true` it retires them. A review writes nothing. Two reasons qualify a
+row. `external_stale`: the row is `blockedBy` external or out-of-reach, and its
+row file was last written more than `older_than_days` days ago (default 14).
+`session_gone`: the row names a `session_id` other than the caller's, and that
+session shows no sign of life (the same evidence as `session-claim`, with
+`idle_secs` default 3600). A PRD row carries no creation time, so the age is the
+time since its row file was last written, or since the legacy `.gm/prd.yml` was
+last written for a row not yet split into `.gm/prd/`; the reply names this as
+`age_basis`. `reasons` narrows the set. A row of the caller's own session is
+never `session_gone`, and a row with a closed status is never listed. A
+`session_gone` row can hold real open work, so read the list before you confirm.
+`confirm: true` moves at most `limit` rows (default 100, oldest first) into the
+append-only commit log `.gm/prd-log.jsonl` with status `archived` and a note that
+names the reasons, then removes the row file. The whole row stays in the log, and
+a row that changed after the scan is skipped. The reply carries `counts`
+(`rows_open`, `candidates`, `external_stale`, `session_gone`, `archived`,
+`skipped`, `left`), `rows`, `sessions`, `archived` and `skipped`.
+
 `git_commit` and `git_finalize` refuse before staging anything when the commit
 would reference a file that exists on disk, is untracked, is not gitignored
 and is not part of this commit (`error_code: dangling_reference`, one

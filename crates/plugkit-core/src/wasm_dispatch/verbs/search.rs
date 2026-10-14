@@ -1668,6 +1668,8 @@ pub(super) fn verb_help_doc(verb: &str) -> Option<&'static str> {
         "fs_stat" => Some(FS_STAT_HELP),
         "prd-resolve" => Some(PRD_RESOLVE_HELP),
         "prd-add" => Some(PRD_ADD_HELP),
+        "prd-gc" => Some(crate::orchestrator::prd_gc::HELP),
+        "session-claim" => Some(crate::orchestrator::session_claim::HELP),
         "codeinsight" | "code_insight" => Some(CODEINSIGHT_HELP),
         "comment-audit" => Some(COMMENT_AUDIT_HELP),
         "fetch" => Some(super::web::FETCH_HELP),

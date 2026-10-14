@@ -21,6 +21,7 @@ pub mod memorize;
 pub mod memory_component;
 pub mod mutables;
 pub mod prd;
+pub mod prd_gc;
 pub mod prd_repair;
 pub mod predicate_registry;
 pub mod pool_rank;
@@ -28,6 +29,8 @@ pub mod pool_slots;
 pub mod recall;
 pub mod residual;
 pub mod row_store;
+pub mod session_claim;
+pub mod session_liveness;
 pub mod state;
 pub mod subagent;
 pub mod submodule_drift;
@@ -432,6 +435,8 @@ orchestrator_dispatch_table! {
     "pool-observe" => pool_slots::handle_observe(content),
     "prd-block" => prd::handle_block(content),
     "prd-repair" => prd_repair::handle_repair(content),
+    "prd-gc" => prd_gc::handle(content),
+    "session-claim" => session_claim::handle(content),
     "prd-defer" => prd::handle_defer(content),
     "task-spawn" => task::handle_spawn(content),
     "task-list" => task::handle_list(content),

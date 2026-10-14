@@ -85,6 +85,8 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 ### Mutables and PRD
 
 - `mutable-add` requires a nonempty caller `id` and a payload field beyond the envelope; `status` counts as payload, so `{id, status}` reopens a row. `mutables::handle_add` upserts by `id` and collapses duplicates, keeping a resolved row over an unresolved one; `handle_list` stays un-deduplicated. `prd-list` defaults to brief rows; internal evidence and gates use `handle_list_full`.
+- `prd-gc` writes nothing without `confirm: true`, never lists a closed row, and archives only through `row_store::retire_to_log` (append-only, hash-chained) after the row compares equal to the scan. A PRD row has no creation time, so the `external_stale` age is the row file mtime: a checkout or a migration that rewrites row files restarts the clock.
+- `session-claim` and `prd-gc` share `session_liveness::ActivityProbe`. A session is live with a lease in `_lease_sessions`, or with spool activity (the task id inside `.gm/exec-spool/out/` file names, `.last-instruction-hash-<sid>.json`) inside `idle_secs`. The gm-mcp wrapper injects `_lease_sessions` only for `instruction`, so on the other verbs only idleness proves a session gone, and the reply `basis` says so.
 
 ## Lean graph and compiled prose
 
