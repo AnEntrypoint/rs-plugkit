@@ -5008,7 +5008,9 @@ const UNCOVERED_SCAN_LIST_CAP: usize = 20_000;
 
 const UNCOVERED_SCAN_MATCH_CAP: usize = 20_000;
 
-const UNCOVERED_SCAN_NOTE: &str = "the indexed cover does not hold these files (they are gitignored, untracked or dropped by a rule), so this pass read them straight from disk with the ignore rules off: files_scanned_indexed is what the indexed cover read, files_scanned_uncovered what this pass added";
+const GLOB_RELATIVE_TO_PATH_NOTE: &str = "each listed glob names a leading directory that is not under path, so it matched files below path and was read relative to path; a glob is read against the root-relative path first and the path-relative path second";
+
+const UNCOVERED_SCAN_NOTE: &str ="the indexed cover does not hold these files (they are gitignored, untracked or dropped by a rule), so this pass read them straight from disk with the ignore rules off: files_scanned_indexed is what the indexed cover read, files_scanned_uncovered what this pass added";
 
 pub struct UncoveredScanResult {
     pub files_listed: usize,
@@ -5265,8 +5267,14 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
     let files_matching_glob = files.iter().filter(|p| admitted(p)).count();
     let glob_matched_no_files = has_glob_filter && !files.is_empty() && files_matching_glob == 0;
-    let glob_outside_path =
-        crate::path_glob::alternatives_outside_scopes(&req.include_globs, req.paths);
+    let glob_scope_reading = crate::path_glob::read_alternatives_against_scopes(
+        &req.include_globs,
+        root,
+        &glob_scopes,
+        files,
+    );
+    let glob_outside_path = glob_scope_reading.outside_path;
+    let glob_relative_to_path = glob_scope_reading.relative_to_path;
 
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let listing_ms = started_ms.saturating_sub(listing_started_ms);
@@ -6129,6 +6137,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     out.insert("lines_scanned".to_string(), json!(lines_scanned));
     if !glob_outside_path.is_empty() {
         out.insert("glob_outside_path".to_string(), json!(glob_outside_path));
+    }
+    if !glob_relative_to_path.is_empty() {
+        out.insert("glob_relative_to_path".to_string(), json!(glob_relative_to_path));
+        out.insert("glob_relative_to_path_note".to_string(), json!(GLOB_RELATIVE_TO_PATH_NOTE));
     }
     if files_truncated {
         out.insert("files_truncated".to_string(), json!(true));

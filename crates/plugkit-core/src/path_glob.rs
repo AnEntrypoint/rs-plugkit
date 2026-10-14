@@ -85,6 +85,37 @@ pub fn alternatives_outside_scopes(patterns: &[String], scopes: &[&str]) -> Vec<
         .collect()
 }
 
+pub struct ScopeGlobReading {
+    pub outside_path: Vec<String>,
+    pub relative_to_path: Vec<String>,
+}
+
+pub fn read_alternatives_against_scopes(
+    patterns: &[String],
+    root: &str,
+    scopes: &[Option<&str>],
+    listed_files: &[String],
+) -> ScopeGlobReading {
+    let scope_names: Vec<&str> = scopes.iter().flatten().copied().collect();
+    let mut reading = ScopeGlobReading {
+        outside_path: Vec::new(),
+        relative_to_path: Vec::new(),
+    };
+    for alternative in alternatives_outside_scopes(patterns, &scope_names) {
+        let matched_below_path = PathGlob::parse(&alternative).is_ok_and(|glob| {
+            listed_files
+                .iter()
+                .any(|file| scopes.iter().any(|scope| glob.admits(root, *scope, file)))
+        });
+        if matched_below_path {
+            reading.relative_to_path.push(alternative);
+        } else {
+            reading.outside_path.push(alternative);
+        }
+    }
+    reading
+}
+
 fn directory_reaches_scope(directory: &str, scope: &str) -> bool {
     directory.is_empty()
         || directory == scope
