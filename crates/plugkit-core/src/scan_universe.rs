@@ -439,13 +439,17 @@ fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec
     // written minutes ago is in the corpus without `refresh: true`. Both discovery routes are
     // tried because either can be the one that answers: git's own gitlink listing, and a listing
     // for the worktrees that route missed.
-    let (mut nested_dirs, gitlink_failed) = gitlink_dirs(dir, &mut complete);
+    let (mut nested_dirs, _gitlink_failed) = gitlink_dirs(dir, &mut complete);
     for found in nested_worktree_dirs(dir) {
         if !nested_dirs.iter().any(|d| *d == found) {
             nested_dirs.push(found);
         }
     }
-    let mut nested_untracked_failed = gitlink_failed;
+    // git's own gitlink listing is a second discovery route, not the one coverage rests on: the
+    // listing above names the nested worktrees whether or not git answers, so its failure costs
+    // nothing and is not reported as a blind spot. What is reported is a worktree whose own
+    // untracked files could not be listed, or a discovery that stopped at the cap.
+    let mut nested_untracked_failed = nested_dirs.len() >= MAX_NESTED_WORKTREES;
     nested_worktrees += nested_dirs.len();
     for nested_dir in nested_dirs {
         let (nested_files, nested_complete) = nested_untracked(&nested_dir, nesting + 1, no_ignore);
