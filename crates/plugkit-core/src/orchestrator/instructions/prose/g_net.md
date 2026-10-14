@@ -2,6 +2,5 @@
 
 Gate `G_NET` on the spine. A gate is a condition that must hold before the walk leaves this node; it is not a work node.
 
-Condition: change closes net-negative, or states why not. The transition out of this gate is refused until predicate `lean-net-negative` holds.
-
+Condition: change closes net-negative, or states why not.
 The walk is recorded by the transition that leaves this node.
