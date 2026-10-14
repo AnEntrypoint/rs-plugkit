@@ -27,6 +27,74 @@ struct World {
     nodes: BTreeMap<String, Node>,
 }
 
+pub const INSUFFICIENT_RECORD_THRESHOLD: u64 = 20;
+pub const MAX_PART_A_PROPOSALS: usize = 3;
+pub const MAX_PART_B_PROPOSALS: usize = 5;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DreamRsiStatus {
+    Proposed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerbStat {
+    pub verb: String,
+    pub count: u64,
+    pub failure_rate: f64,
+    pub gate_drift_rate: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerbProposal {
+    pub verb: String,
+    pub change: String,
+    pub evidence: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PartA {
+    Measured {
+        records: u64,
+        per_verb: Vec<VerbStat>,
+        proposals: Vec<VerbProposal>,
+    },
+    Insufficient {
+        records: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RejectedWalk {
+    pub node: String,
+    pub missing_dispatch_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeProposal {
+    pub node: String,
+    pub walk_when: String,
+    pub evidence_that_counts: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartB {
+    pub traversable_nodes: u64,
+    pub nodes_verified: u64,
+    pub backreference_edges: u64,
+    pub backreferences_verified: u64,
+    pub forward_edge_coverage_approx: f64,
+    pub rejected_walks: Vec<RejectedWalk>,
+    pub proposals: Vec<NodeProposal>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DreamRsiResult {
+    pub status: DreamRsiStatus,
+    pub part_a: PartA,
+    pub part_b: PartB,
+}
+
 fn string_field(value: &Value, field: &str) -> Result<String, String> {
     let value = value
         .get(field)
