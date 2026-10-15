@@ -478,6 +478,9 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     if let Some(v) = shell_git_gate(verb, body, &policy) {
         return v;
     }
+    if let Some(v) = native_search_gate(verb, body, &policy) {
+        return v;
+    }
     policy_gate(verb, body, &policy)
 }
 
@@ -568,6 +571,51 @@ fn shell_git_gate(
                 verb, cmd.chars().take(120).collect::<String>()
             )).with_next("git_finalize"));
         }
+    }
+    None
+}
+
+fn native_search_gate(
+    verb: &str,
+    body: &Value,
+    policy: &crate::orchestrator::fsm::Policy,
+) -> Option<GateVerdict> {
+    if !policy.deny_native_search || !policy.shell_verbs.iter().any(|v| v == verb) {
+        return None;
+    }
+    let cmd = body
+        .get("command")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("code").and_then(|v| v.as_str()))
+        .or_else(|| body.get("script").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let is_native_search = |first: &str| {
+        let base = first.rsplit(['/', '\\']).next().unwrap_or(first);
+        matches!(base, "find" | "find.exe" | "grep" | "grep.exe" | "rg" | "rg.exe")
+    };
+    let native_in_segments = |text: &str| {
+        text.split([';', '\n', '|', '&'])
+            .map(|s| s.trim_start())
+            .any(|s| is_native_search(s.split_whitespace().next().unwrap_or("")))
+    };
+    let native_in_subshell = extract_substitution_bodies(cmd)
+        .into_iter()
+        .any(|inner| native_in_segments(&inner));
+    if native_in_segments(cmd) || native_in_subshell {
+        log_deviation(
+            "native-search-bypass",
+            &format!(
+                "verb={} cmd={}",
+                verb,
+                cmd.chars().take(80).collect::<String>()
+            ),
+        );
+        return Some(GateVerdict::deny(format!(
+            "native-search-bypass:a `{}` verb invoking `find`, `grep` or `rg` is denied - codesearch is the first-class code search surface. Use the codesearch verb instead: gm.codesearch({{body:{{query, mode, path}}}}); mode grep or literal is its exhaustive scan. Command was: `{}`",
+            verb,
+            cmd.chars().take(120).collect::<String>()
+        ))
+        .with_next("codesearch"));
     }
     None
 }
