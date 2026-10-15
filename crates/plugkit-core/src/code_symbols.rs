@@ -2210,6 +2210,131 @@ fn edge_line(e: &Edge) -> String {
     format!("{}:{} {} -> {}", e.path, e.line, e.caller, e.callee)
 }
 
+// The package (Go) or module (Rust) a symbol is qualified by: the basename of the directory its
+// defining file sits in. `internal/catbuild/catbuild.go` is package `catbuild`, which is the
+// trailing segment of the import path any caller of `catbuild.Build` has to name.
+fn package_of(path: &str) -> &str {
+    let dir = path_dir(path);
+    if dir.is_empty() {
+        return "";
+    }
+    dir.rsplit(['/', '\\']).next().unwrap_or(dir)
+}
+
+fn definitions_in_package(db: &str, package: &str, name: &str) -> Vec<Value> {
+    definitions(db, name, MAX_LIMIT)
+        .into_iter()
+        .filter(|d| package_of(&string(d, "path")) == package)
+        .collect()
+}
+
+// A call site can only be a call into `package` when it lives in one of that package's own
+// directories or imports a spec whose trailing segment is the package name. Go import paths end
+// in their package name and Rust `use` paths in their module name, so the trailing segment is
+// what a qualified `pkg.Name` is actually qualified by.
+fn file_reaches_package(db: &str, file: &str, package: &str, dirs: &[String]) -> bool {
+    if dirs.iter().any(|dir| file.starts_with(&format!("{dir}/"))) {
+        return true;
+    }
+    rows(
+        db,
+        &format!("SELECT spec FROM {IMPORTS_TABLE} WHERE path=?1"),
+        &[file],
+    )
+    .iter()
+    .any(|r| {
+        let spec = string(r, "spec");
+        let spec = spec.trim_matches('"').trim_matches('`');
+        spec.rsplit(['/', '\\', ':'])
+            .next()
+            .unwrap_or(spec)
+            .trim_end_matches(';')
+            == package
+    })
+}
+
+// How a requested symbol was turned into the name call edges are keyed by, and which of that
+// name's definitions the answer is about. Call edges carry unqualified caller and callee names,
+// so `Build` alone names three different functions here; a qualified `catbuild.Build` has to be
+// pinned to its own package before any edge can be attributed to it.
+struct Resolved {
+    requested: String,
+    // The name edges are matched on.
+    name: String,
+    // Set when the qualification pinned the symbol to a package.
+    package: Option<String>,
+    // The package's directories; empty means every edge of `name` is in scope.
+    dirs: Vec<String>,
+    defined_at: Vec<String>,
+    explanation: Option<String>,
+    // Set when the answer had to fall back to the bare name and therefore merges definitions.
+    warns: bool,
+}
+
+fn resolve_symbol(db: &str, edges: &[Edge], symbol: &str) -> Resolved {
+    let bare = |name: &str, defined_at: Vec<String>, explanation: Option<String>, warns: bool| {
+        Resolved {
+            requested: symbol.to_string(),
+            name: name.to_string(),
+            package: None,
+            dirs: Vec::new(),
+            defined_at,
+            explanation,
+            warns,
+        }
+    };
+    let has_edge = |name: &str| edges.iter().any(|e| e.callee == name || e.caller == name);
+    if let Some((qualifier, tail)) = symbol.rsplit_once('.') {
+        let tail = tail.trim();
+        if !qualifier.is_empty() && !tail.is_empty() {
+            let defs = definitions_in_package(db, qualifier, tail);
+            if !defs.is_empty() {
+                let mut dirs: Vec<String> = defs
+                    .iter()
+                    .map(|d| path_dir(&string(d, "path")).to_string())
+                    .collect();
+                dirs.sort();
+                dirs.dedup();
+                let defined_at = defs
+                    .iter()
+                    .map(|d| format!("{} {}", location(d), string(d, "kind")))
+                    .collect();
+                let count = defs.len();
+                return Resolved {
+                    requested: symbol.to_string(),
+                    name: tail.to_string(),
+                    package: Some(qualifier.to_string()),
+                    dirs,
+                    defined_at,
+                    explanation: Some(format!(
+                        "{symbol} resolved to {count} definition(s) of `{tail}` in package `{qualifier}`; only call sites that live in that package or import it are listed"
+                    )),
+                    warns: count > 1,
+                };
+            }
+            if has_edge(tail) {
+                return bare(
+                    tail,
+                    definition_locations(db, tail),
+                    Some(format!(
+                        "no definition of `{tail}` is indexed in a package named `{qualifier}`, so the qualification could not be honoured: this answer is the bare name `{tail}` and merges every same-named symbol in the project, which is not a caller list of {symbol}"
+                    )),
+                    true,
+                );
+            }
+            return bare(
+                tail,
+                definition_locations(db, tail),
+                Some(format!(
+                    "no definition of `{tail}` is indexed in a package named `{qualifier}`, and no call edge names `{tail}` either; check the spelling with action=find"
+                )),
+                true,
+            );
+        }
+    }
+    bare(symbol, definition_locations(db, symbol), None, false)
+}
+
 fn callers_or_callees(
     db: &str,
     project_path: Option<&str>,
@@ -2218,25 +2343,53 @@ fn callers_or_callees(
     limit: usize,
 ) -> Value {
     let edges = load_edges(project_path);
-    let matched: Vec<&Edge> = edges
+    let r = resolve_symbol(db, &edges, symbol);
+    let in_scope = |e: &Edge| match r.package.as_deref() {
+        Some(package) => file_reaches_package(db, &e.path, package, &r.dirs),
+        None => true,
+    };
+    let named: Vec<&Edge> = edges
         .iter()
         .filter(|e| {
             if want_callers {
-                e.callee == symbol
+                e.callee == r.name
             } else {
-                e.caller == symbol
+                e.caller == r.name
             }
         })
         .collect();
+    let matched: Vec<&Edge> = named.iter().copied().filter(|e| in_scope(*e)).collect();
     let total = matched.len();
+    let dropped = named.len() - total;
     let mut out = json!({
-        "symbol": symbol,
-        "edge_resolution": "unqualified-name",
-        "ambiguous_definitions": definitions(db, symbol, 2).len() > 1,
-        "defined_at": definition_locations(db, symbol),
+        "symbol": r.name,
+        "edge_resolution": if r.package.is_some() { "qualified-by-package" } else { "unqualified-name" },
+        "ambiguous_definitions": r.defined_at.len() > 1,
+        "defined_at": r.defined_at,
         "total": total,
         "truncated": total > limit,
     });
+    if r.requested != r.name {
+        out["requested_symbol"] = json!(r.requested);
+    }
+    if let Some(explanation) = &r.explanation {
+        out["symbol_resolution"] = json!(explanation);
+    }
+    if r.defined_at.len() == 1 {
+        out["resolved_definition"] = json!(r.defined_at[0]);
+    }
+    if r.warns && r.package.is_none() {
+        out["merged_definitions"] = json!(true);
+    }
+    if dropped > 0 {
+        out["dropped_call_sites"] = json!(dropped);
+        out["dropped_reason"] = json!(format!(
+            "{dropped} call site(s) named `{}` were left out because their file neither lives in nor imports package `{}`, so they cannot be calls into {}",
+            r.name,
+            r.package.as_deref().unwrap_or_default(),
+            r.requested
+        ));
+    }
     if want_callers {
         let distinct: HashSet<(&str, &str)> = matched
             .iter()
@@ -2283,6 +2436,7 @@ fn reach(
     max_depth: usize,
     upstream: bool,
     through_ambiguous: bool,
+    seed: Option<&dyn Fn(&Edge) -> bool>,
 ) -> Vec<(String, usize)> {
     let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
     for e in edges {
@@ -2307,10 +2461,34 @@ fn reach(
             if *node != symbol && !through_ambiguous && is_ambiguous(node) {
                 continue;
             }
-            for neighbour in adjacency.get(node).map(Vec::as_slice).unwrap_or(&[]) {
+            // Depth 1 is the direct callers (or callees) of the symbol itself, so a qualified
+            // symbol can hold them to its own package. Deeper hops are reached through names
+            // only, so they are not filtered: they are attributed in the reply instead.
+            let neighbours: Vec<&str> = match seed {
+                Some(filter) if depth == 1 => edges
+                    .iter()
+                    .filter(|e| {
+                        let from = if upstream { e.callee.as_str() } else { e.caller.as_str() };
+                        from == *node && filter(*e)
+                    })
+                    .map(|e| {
+                        if upstream {
+                            e.caller.as_str()
+                        } else {
+                            e.callee.as_str()
+                        }
+                    })
+                    .collect(),
+                _ => adjacency
+                    .get(node)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[])
+                    .to_vec(),
+            };
+            for neighbour in neighbours {
                 if !visited.contains_key(neighbour) {
                     visited.insert(neighbour, depth);
-                    next.push(*neighbour);
+                    next.push(neighbour);
                 }
             }
         }
@@ -2339,7 +2517,25 @@ fn impact(
 ) -> Value {
     let depth_cap = max_depth.clamp(1, 10);
     let edges = load_edges(project_path);
-    let reached = reach(db, &edges, symbol, depth_cap, upstream, through_ambiguous);
+    let r = resolve_symbol(db, &edges, symbol);
+    let in_scope = |e: &Edge| match r.package.as_deref() {
+        Some(package) => file_reaches_package(db, &e.path, package, &r.dirs),
+        None => true,
+    };
+    let seed: Option<&dyn Fn(&Edge) -> bool> = if r.package.is_some() {
+        Some(&in_scope)
+    } else {
+        None
+    };
+    let reached = reach(
+        db,
+        &edges,
+        &r.name,
+        depth_cap,
+        upstream,
+        through_ambiguous,
+        seed,
+    );
     let total = reached.len();
     let tests_reached = reached
         .iter()
@@ -2361,23 +2557,36 @@ fn impact(
             }
         })
         .collect();
-    json!({
-        "symbol": symbol,
+    let mut out = json!({
+        "symbol": r.name,
         "direction": if upstream { "callers: what breaks if this changes" } else { "callees: what this depends on" },
-        "edge_resolution": "unqualified-name",
-        "ambiguous_definitions": definitions(db, symbol, 2).len() > 1,
-        "defined_at": definition_locations(db, symbol),
+        "edge_resolution": if r.package.is_some() { "qualified-by-package at depth 1, unqualified-name beyond it" } else { "unqualified-name" },
+        "ambiguous_definitions": r.defined_at.len() > 1,
+        "defined_at": r.defined_at,
         "max_depth": depth_cap,
         "total": total,
         "tests_reached": tests_reached,
         "truncated": total > limit,
         "reached": lines,
-    })
+    });
+    if r.requested != r.name {
+        out["requested_symbol"] = json!(r.requested);
+    }
+    if let Some(explanation) = &r.explanation {
+        out["symbol_resolution"] = json!(explanation);
+    }
+    if r.defined_at.len() == 1 {
+        out["resolved_definition"] = json!(r.defined_at[0]);
+    }
+    if r.package.is_some() && depth_cap > 1 {
+        out["depth_note"] = json!("depth 1 is held to the symbol's own package; deeper hops are walked by unqualified name, so a d2+ row can be a same-named symbol from another package");
+    }
+    out
 }
 
 fn tests_for(db: &str, project_path: Option<&str>, symbol: &str, limit: usize) -> Value {
     let edges = load_edges(project_path);
-    let reached = reach(db, &edges, symbol, TEST_CALLER_DEPTH, true, false);
+    let reached = reach(db, &edges, symbol, TEST_CALLER_DEPTH, true, false, None);
     let mut found: Vec<String> = Vec::new();
     for (name, depth) in &reached {
         for d in definitions(db, name, 6)
@@ -2614,7 +2823,9 @@ fn drive_sync_to_completion(
 
 pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     clear_store_busy();
-    let action = text_field(body, &["action", "mode"]).unwrap_or("overview");
+    // `verb` is the spelling the docs and the skill prose send; `action` and `mode` are the older
+    // ones and win when a body carries more than one.
+    let action = text_field(body, &["action", "mode", "verb"]).unwrap_or("overview");
     let project_root = text_field(body, &["root", "projectPath"]).map(crate::pkfs::anchor);
     let project_path = project_root.as_deref();
     if matches!(action, "callers" | "callees" | "impact" | "tests") {

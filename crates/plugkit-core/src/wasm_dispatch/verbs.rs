@@ -15,7 +15,9 @@ use serde_json::{json, Value};
 mod git;
 mod search;
 mod memory;
+mod web;
 use git::*;
+use web::{fetch, websearch};
 
 /// `_`-prefixed keys a verb owns itself and must keep receiving: the async git replay id
 /// (`git_async_entry` reads it back to resume a parked plan) and the instruction lease list.
@@ -276,6 +278,7 @@ const VERB_CAPABILITIES: &[(&str, Capability)] = &[
     ("env_get", Capability::EnvAllowlist),
     ("kv_put", Capability::KvNamespace),
     ("fetch", Capability::Unguarded),
+    ("websearch", Capability::Unguarded),
     ("exec_js", Capability::Unguarded),
 ];
 
@@ -298,6 +301,7 @@ fn guarded_verb_is_dispatchable(verb: &str) -> bool {
             | "env_get"
             | "kv_put"
             | "fetch"
+            | "websearch"
             | "exec_js"
     )
 }
@@ -366,7 +370,8 @@ fn plugin_response_envelope_contract() -> Value {
             "libsql.query_params": "rows",
             "libsql.serialize": "bytes_b64 (also mirrored as `data` for older callers; `bytes_b64` is the contract field)",
             "libsql.list_dbs": "dbs (always empty: connections are no longer tracked by name)",
-            "libsql.open/close/begin/commit/rollback": "ACCEPTED BUT INERT -- every exec/query is its own open-operate-close cycle, so these are no-ops kept only so existing callers do not break. A caller must not assume begin/commit gives it a transaction.",
+            "libsql.open/close": "ACCEPTED BUT INERT -- every exec/query is its own open-operate-close cycle, so these are no-ops kept only so existing callers do not break.",
+            "libsql.begin/commit/rollback": "REFUSED -- there is no transaction: each exec/query is its own cycle. The plugin answers ok:false naming the unsupported verb.",
             "treesitter.parse": "nodes (plus `lang`, null when neither ext nor lang resolves -- an unresolved language is ok:true with an empty nodes array, NOT an error)",
             "treesitter.extract_chunks": "chunks (plus `lang`)",
             "treesitter.lang_for_ext": "lang (null when the extension is unrecognized)",
@@ -1215,7 +1220,17 @@ fn fs_readdir(body: &Value) -> u64 {
     let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
     let v = unpack_to_value(packed);
     if v.is_null() {
-        return err("fs_readdir", "empty");
+        return err_json(
+            "fs_readdir",
+            json!({
+                "error": format!(
+                    "fs_readdir could not list '{path}': the directory is missing or unreadable (ENOENT or an access failure); the host returned no entries"
+                ),
+                "error_code": "ENOENT",
+                "path": path,
+                "next_dispatch_hint": "fs_stat",
+            }),
+        );
     }
     let entries = match v {
         Value::Array(entries) => entries,
@@ -1285,66 +1300,6 @@ fn scan_deps(body: &Value) -> u64 {
 
 pub const FETCH_DEFAULT_TIMEOUT_MS: u64 = 60_000;
 pub const FETCH_MAX_TIMEOUT_MS: u64 = 600_000;
-
-fn fetch(body: &Value) -> u64 {
-    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    if url.is_empty() {
-        return err("fetch", "url required");
-    }
-    if let Err(reason) = crate::config_path::validate_fetch_url(url) {
-        return err_coded("fetch", ERR_CODE_INVALID_ARGS, &reason);
-    }
-    let has_explicit_timeout = body.get("timeoutMs").is_some()
-        || body.get("opts").and_then(|o| o.get("timeoutMs")).is_some();
-    let timeout_ms = if has_explicit_timeout {
-        match crate::validation::validate_timeout_ms(body, true) {
-            Ok(n) if n > FETCH_MAX_TIMEOUT_MS => {
-                return err_json(
-                    "fetch",
-                    json!({
-                        "error": "timeoutMs above ceiling",
-                        "max": FETCH_MAX_TIMEOUT_MS,
-                        "received": n,
-                    }),
-                );
-            }
-            Ok(n) => n,
-            Err(detail) => return err_json("fetch", detail),
-        }
-    } else {
-        FETCH_DEFAULT_TIMEOUT_MS
-    };
-    let mut opts_obj = body.get("opts").cloned().unwrap_or_else(|| json!({}));
-    if let Some(map) = opts_obj.as_object_mut() {
-        for key in ["method", "headers", "body"] {
-            if let Some(value) = body.get(key) {
-                map.insert(key.to_string(), value.clone());
-            }
-        }
-        map.insert("timeoutMs".to_string(), json!(timeout_ms));
-    } else {
-        opts_obj = json!({"timeoutMs": timeout_ms});
-    }
-    let opts = opts_obj.to_string();
-    let packed = unsafe {
-        host_fetch(
-            url.as_ptr(),
-            url.len() as u32,
-            opts.as_ptr(),
-            opts.len() as u32,
-        )
-    };
-    let v = unpack_to_value(packed);
-    if v.is_null() {
-        return err("fetch", "host_fetch empty");
-    }
-    let transport_completed = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
-    if transport_completed {
-        ok("fetch", v)
-    } else {
-        err_json("fetch", v)
-    }
-}
 
 const CRAWL_ENGINE_CDP: &str = "cdp";
 const CRAWL_ENGINE_LIGHTPANDA: &str = "lightpanda";
@@ -1518,7 +1473,7 @@ fn lang(body: &Value) -> u64 {
     }
 }
 
-const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "[timeoutMs=<ms>\\n]<code> (timeoutMs is the enforced wall-clock limit: default 300000, hard ceiling 900000, the process tree is killed at expiry). A child started inside the body does NOT outlive the dispatch -- the exec child and its whole tree are held in a kill-on-close job, so a daemon that must survive is created outside it: on Windows parent it to the WMI service with ([wmiclass]'Win32_Process').Create('cmd.exe /c \"<path>\"'), then confirm it is alive from a SEPARATE dispatch by pid";
+const EXEC_JS_SUPPORTED_BODY_SHAPES: &str = "raw_body=<code> plus the typed timeoutMs field (the enforced wall-clock limit: default 300000, hard ceiling 900000, the process tree is killed at expiry). A child started inside the body does NOT outlive the dispatch -- the exec child and its whole tree are held in a kill-on-close job, so a daemon that must survive is created outside it: on Windows parent it to the WMI service with ([wmiclass]'Win32_Process').Create('cmd.exe /c \"<path>\"'), then confirm it is alive from a SEPARATE dispatch by pid";
 
 #[cfg(target_arch = "wasm32")]
 const EXEC_JS_WITNESS_MAX_BYTES: usize = 262_144;
@@ -2981,24 +2936,23 @@ fn codeinsight_action(verb: &str, action: &str, body: &Value) -> u64 {
     }
 }
 
+// `verb` is the selector the docs and the skill prose send (`{"verb":"callers","symbol":"..."}`);
+// `action` and `mode` are the same selector under its older spellings and stay authoritative when
+// both arrive. Reading none of the three is the index overview, which is the reply that used to
+// answer every call because `verb` was never read.
+const CODEINSIGHT_SELECTOR_KEYS: &[&str] = &["action", "mode", "verb"];
+
 fn codeinsight(body: &Value) -> u64 {
-    let explicit_action = body
-        .get("action")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|a| !a.is_empty());
-    if explicit_action.is_some() {
-        return codeinsight_action("codeinsight", "overview", body);
-    }
-    match body
-        .get("mode")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-    {
-        Some(mode) => codeinsight_action("codeinsight", mode, body),
-        None => codeinsight_action("codeinsight", "overview", body),
-    }
+    let requested = CODEINSIGHT_SELECTOR_KEYS
+        .iter()
+        .find_map(|key| {
+            body.get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or("overview");
+    codeinsight_action("codeinsight", requested, body)
 }
 
 fn callers(body: &Value) -> u64 {
@@ -3133,6 +3087,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "fs_stat" => fs_stat(&body),
         "scan_deps" | "scan-deps" => scan_deps(&body),
         "fetch" => fetch(&body),
+        "websearch" | "web_search" | "web-search" => websearch(&body),
         "crawl" => crawl(&body_s),
         "chrome" => chrome(&body_s),
         "session-list" | "session_list" => session_not_implemented_in_guest(verb, "session-list"),
@@ -3194,7 +3149,8 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_show" => git_show(&body),
         "git_fetch" => git_fetch(&body),
         "git_pull" => git_pull(&body),
-            "ci-status" | "ci_status" => ci_status(&body),
+        "ci-status" | "ci_status" => ci_status(&body),
+        "ci-log" | "ci_log" => ci_log(&body),
             "git_branch" => git_branch(&body),
             "git_remote" => git_remote(&body),
             "git_worktree" => git_worktree(&body),

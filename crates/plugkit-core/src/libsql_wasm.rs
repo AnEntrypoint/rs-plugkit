@@ -218,19 +218,6 @@ pub fn query_params(path: &str, sql: &str, params: &[&str]) -> Result<Value, Str
     plugin_ok_rows(&resp)
 }
 
-pub fn begin(path: &str) -> Result<(), String> {
-    let resp = plugin_call("libsql", "begin", &json!({ "path": path }));
-    plugin_ok_err(&resp)
-}
-pub fn commit(path: &str) -> Result<(), String> {
-    let resp = plugin_call("libsql", "commit", &json!({ "path": path }));
-    plugin_ok_err(&resp)
-}
-pub fn rollback(path: &str) -> Result<(), String> {
-    let resp = plugin_call("libsql", "rollback", &json!({ "path": path }));
-    plugin_ok_err(&resp)
-}
-
 pub fn prepare_execute(path: &str, sql: &str, params: &[&str]) -> Result<(), String> {
     let resp = plugin_call(
         "libsql",
