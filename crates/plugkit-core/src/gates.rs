@@ -258,12 +258,19 @@ fn log_deviation(event: &str, detail: &str) {
     }
 }
 
-fn parse_pending_step() -> Option<(String, u64)> {
-    let content = host_read(&crate::pkfs::anchor(".gm/turn-state.json")).unwrap_or_default();
-    if content.is_empty() {
-        return None;
+fn turn_state_value() -> Result<Option<Value>, String> {
+    let path = crate::pkfs::anchor(".gm/turn-state.json");
+    let content = host_read(&path).unwrap_or_default();
+    if content.trim().is_empty() {
+        return Ok(None);
     }
-    let v: Value = serde_json::from_str(&content).ok()?;
+    serde_json::from_str::<Value>(&content)
+        .map(Some)
+        .map_err(|e| format!("turn-state-corrupt: {} is not valid JSON ({})", path, e))
+}
+
+fn parse_pending_step() -> Option<(String, u64)> {
+    let v = turn_state_value().ok()??;
     let step_id = v
         .get("pending_step_id")
         .and_then(|s| s.as_str())?
@@ -475,6 +482,16 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
 }
 
 fn await_gate(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> Option<GateVerdict> {
+    if let Err(detail) = turn_state_value() {
+        if policy.await_allowed_verbs.iter().any(|v| v == verb) {
+            return None;
+        }
+        log_deviation("turn-state-corrupt", &format!("verb={} {}", verb, detail));
+        return Some(GateVerdict::deny(format!(
+            "{}; restore the file from its .corrupt-<ts> backup or repair it before dispatching {}",
+            detail, verb
+        )));
+    }
     if let Some(step_id) = read_pending_step() {
         if !policy.await_allowed_verbs.iter().any(|v| v == verb) {
             log_deviation(
