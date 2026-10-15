@@ -36,6 +36,11 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
         Severity::Deny,
     ),
     (
+        "native-search-bypass",
+        "a shell verb (per `policy.shell_verbs`) invoked `find`, `grep` or `rg` directly, bypassing codesearch -- the codesearch verb is the admissible code search surface",
+        Severity::Deny,
+    ),
+    (
         "long-gap-no-instruction",
         "a state-changing verb was dispatched after more than `policy.longgap_threshold_ms` of idle with no intervening `instruction` -- idle mid-chain loses the recovery prose; reads and the exec/shell verbs are exempt, so a lookup is never blocked by this gate",
         Severity::Deny,
