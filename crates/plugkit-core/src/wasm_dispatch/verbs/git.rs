@@ -1783,11 +1783,13 @@ pub(super) fn git_add(body: &Value) -> u64 {
             let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
             write_steps.push(r.clone());
             if code != 0 {
-                return Ok(err(
+                let reason = r
+                    .get("stderr")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("git add failed");
+                return Ok(err_json(
                     "git_add",
-                    r.get("stderr")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("git add failed"),
+                    with_exclusion_report(json!({ "error": reason }), cwd, &paths),
                 ));
             }
         }
@@ -8283,11 +8285,42 @@ fn agentplug_runtime_rule_applies(paths: &[String]) -> bool {
         })
 }
 
+fn runtime_exclude_is_redundant(cwd: Option<&str>, path: &str) -> bool {
+    if ignored_requested_paths_now(cwd, &[path.to_string()]).is_empty() {
+        return false;
+    }
+    git_call_argv(&["ls-files", "-z", "--", path], cwd)
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+}
+
+fn agentplug_glob_exclude_is_redundant(cwd: Option<&str>) -> bool {
+    if ignored_requested_paths_now(cwd, &[".agentplug".to_string()]).is_empty() {
+        return false;
+    }
+    git_call_argv(&["ls-files", "-z", "--", ":(glob).agentplug*"], cwd)
+        .get("stdout")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+}
+
 pub(super) fn git_pathspec_scope(paths: &[String], cwd: Option<&str>) -> Vec<String> {
-    let mut scope: Vec<String> = vec![":(top,exclude).agentplug*".to_string()];
-    let mut used: usize = scope[0].len() + 1;
+    let mut scope: Vec<String> = Vec::new();
+    let mut used: usize = 0;
+    if !agentplug_glob_exclude_is_redundant(cwd) {
+        scope.push(":(top,exclude).agentplug*".to_string());
+        used = scope[0].len() + 1;
+    }
     for (_, path) in withheld_dirty_entries(cwd) {
-        if path.starts_with(".agentplug") || caller_pathspec_covers(paths, &path) {
+        if path.starts_with(".agentplug")
+            || caller_pathspec_covers(paths, &path)
+            || runtime_exclude_is_redundant(cwd, &path)
+        {
             continue;
         }
         let spec = format!(":(top,exclude,literal){}", path);

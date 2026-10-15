@@ -7,7 +7,7 @@ use crate::code_index::{
     list_dir, load_repo_gitignore,
 };
 use crate::ragconfig::IndexConfig;
-use crate::wasm_dispatch::{git_call_argv, host_now_ms, host_stat_is_directory};
+use crate::wasm_dispatch::{git_call_argv, host_exists, host_now_ms, host_stat_is_directory};
 
 const GIT_LISTING_SPLIT_DEPTH_LIMIT: usize = 16;
 
@@ -129,6 +129,16 @@ pub struct ScanUniverse {
     pub listing_complete: bool,
     pub excluded: Vec<RuleExclusion>,
     pub walk_reason: Option<String>,
+    // What git itself contributed to the corpus: a git corpus whose tracked count is 0 carries no
+    // committed content at all, so the reply has to be able to say so -- the number is what turns
+    // "searched 1803 files" from a reassurance into the blind spot it is when nothing is tracked.
+    pub git_tracked_files: usize,
+    pub git_untracked_files: usize,
+    // Nested worktrees (submodule checkouts) this corpus had to be widened for, and whether the
+    // untracked listing inside one of them failed: their untracked files are outside the parent
+    // worktree's own listing, so a miss here is a blind spot a zero must not be read over.
+    pub git_nested_worktrees: usize,
+    pub git_nested_untracked_failed: bool,
     target: String,
 }
 
@@ -314,23 +324,54 @@ fn directory_is_gitignored(dir: &str) -> Result<bool, String> {
     }
 }
 
-fn gitlink_dirs(dir: &str, complete: &mut bool) -> Vec<String> {
+/// Directories holding their own `.git` under `dir`, found by listing rather than by `git ls-files
+/// --stage`: git's own listing of the parent names a submodule's TRACKED files only, so a file
+/// written into a submodule worktree is untracked there and invisible to the parent's
+/// `--others --exclude-standard`. Those files are what this finds, so a fresh write is searchable
+/// without `refresh: true`. The walk stops at the first `.git` it meets and at this depth, so it
+/// costs a handful of readdirs and never descends a whole tree.
+const NESTED_WORKTREE_SCAN_DEPTH: usize = 2;
+const MAX_NESTED_WORKTREES: usize = 64;
+
+fn nested_worktree_dirs(dir: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let mut frontier: Vec<(String, usize)> = vec![(dir.to_string(), 0)];
+    while let Some((current, depth)) = frontier.pop() {
+        if depth >= NESTED_WORKTREE_SCAN_DEPTH || found.len() >= MAX_NESTED_WORKTREES {
+            continue;
+        }
+        for child in child_names(&current) {
+            let path = join_under(&current, &child);
+            if host_exists(&join_under(&path, ".git")) {
+                found.push(path);
+                continue;
+            }
+            if host_stat_is_directory(&path) == Some(true) {
+                frontier.push((path, depth + 1));
+            }
+        }
+    }
+    found
+}
+
+fn gitlink_dirs(dir: &str, complete: &mut bool) -> (Vec<String>, bool) {
     let mut staged = Vec::new();
     match git_list_into(dir, &["--stage"], None, 0, &mut staged) {
         Ok(c) => {
             *complete &= c;
-            staged
+            let dirs = staged
                 .iter()
                 .filter_map(|entry| {
                     let after_mode = entry.strip_prefix("160000 ")?;
                     let path = after_mode.split('\t').nth(1)?;
                     (!path.is_empty()).then(|| join_under(dir, path))
                 })
-                .collect()
+                .collect();
+            (dirs, false)
         }
         Err(_) => {
             *complete = false;
-            Vec::new()
+            (Vec::new(), true)
         }
     }
 }
@@ -361,7 +402,11 @@ fn nested_untracked(dir: &str, nesting: usize, no_ignore: bool) -> (Vec<String>,
             None => files.push(join_under(dir, &entry)),
         }
     }
-    for nested_dir in gitlink_dirs(dir, &mut complete) {
+    let (gitlink_nested, gitlink_failed) = gitlink_dirs(dir, &mut complete);
+    if gitlink_failed {
+        complete = false;
+    }
+    for nested_dir in gitlink_nested {
         let (nested_files, nested_complete) = nested_untracked(&nested_dir, nesting + 1, no_ignore);
         files.extend(nested_files);
         complete &= nested_complete;
@@ -369,12 +414,14 @@ fn nested_untracked(dir: &str, nesting: usize, no_ignore: bool) -> (Vec<String>,
     (files, complete)
 }
 
-fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec<String>, bool), String> {
+fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec<String>, bool, usize, usize, usize, bool), String> {
     let mut tracked = Vec::new();
     let mut untracked = Vec::new();
     let others_mode: &[&str] = if no_ignore { &["--others"] } else { &["--others", "--exclude-standard"] };
     let mut complete = git_list_into(dir, &["--cached", "--recurse-submodules"], None, 0, &mut tracked)?;
     complete &= git_list_into(dir, others_mode, None, 0, &mut untracked)?;
+    let mut tracked_count = tracked.len();
+    let mut nested_worktrees = 0usize;
     let mut files: Vec<String> = tracked.into_iter().map(|p| join_under(dir, &p)).collect();
     for entry in untracked {
         let Some(nested_repo) = entry.strip_suffix('/') else {
@@ -383,21 +430,43 @@ fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec
         };
         let nested_dir = join_under(dir, nested_repo);
         match (nesting < NESTED_REPO_DEPTH_LIMIT).then(|| git_worktree_files(&nested_dir, nesting + 1, no_ignore)) {
-            Some(Ok((nested_files, nested_complete))) => {
+            Some(Ok((nested_files, nested_complete, nested_tracked, _, nested_dirs, nested_failed))) => {
                 files.extend(nested_files);
-                complete &= nested_complete;
+                complete &= nested_complete && !nested_failed;
+                tracked_count += nested_tracked;
+                nested_worktrees += nested_dirs;
             }
             _ => complete = false,
         }
     }
-    for nested_dir in gitlink_dirs(dir, &mut complete) {
+    // A submodule worktree is a repository of its own, so its untracked files are not in the parent
+    // worktree's `--others` listing. They are listed inside each one and joined here, so a file
+    // written minutes ago is in the corpus without `refresh: true`. Both discovery routes are
+    // tried because either can be the one that answers: git's own gitlink listing, and a listing
+    // for the worktrees that route missed.
+    let (mut nested_dirs, _gitlink_failed) = gitlink_dirs(dir, &mut complete);
+    for found in nested_worktree_dirs(dir) {
+        if !nested_dirs.iter().any(|d| *d == found) {
+            nested_dirs.push(found);
+        }
+    }
+    // git's own gitlink listing is a second discovery route, not the one coverage rests on: the
+    // listing above names the nested worktrees whether or not git answers, so its failure costs
+    // nothing and is not reported as a blind spot. What is reported is a worktree whose own
+    // untracked files could not be listed, or a discovery that stopped at the cap.
+    let mut nested_untracked_failed = nested_dirs.len() >= MAX_NESTED_WORKTREES;
+    nested_worktrees += nested_dirs.len();
+    for nested_dir in nested_dirs {
         let (nested_files, nested_complete) = nested_untracked(&nested_dir, nesting + 1, no_ignore);
+        if !nested_complete {
+            nested_untracked_failed = true;
+        }
         files.extend(nested_files);
-        complete &= nested_complete;
     }
     files.sort_unstable();
     files.dedup();
-    Ok((files, complete))
+    let untracked_count = files.len().saturating_sub(tracked_count.min(files.len()));
+    Ok((files, complete, tracked_count, untracked_count, nested_worktrees, nested_untracked_failed))
 }
 
 fn runtime_artifact_rule(path: &str) -> Option<&'static str> {
@@ -430,7 +499,7 @@ enum WalkCause {
     TargetGitignored,
     OutsideWorktree(String),
     GitListingFailed(String),
-    GitListedNothing,
+    GitTracksNothing,
     CallerForcedDisk,
 }
 
@@ -444,11 +513,17 @@ const DEPENDENCY_WALK_SKIPS: &str = "skipping only VCS, dependency-store, cache 
 
 const NO_IGNORE_WALK_NOTE: &str = "\"no_ignore\": true, so .gitignore/.codesearchignore rules were not applied";
 
+const GIT_TRACKS_NOTHING_REASON: &str = "git tracks no file in this worktree (no commit yet, or an empty index), so its listing holds only the files the ignore rules spare; the target was walked on disk as well and its files joined with that listing";
+
+pub const CORPUS_BLIND_SPOT_REASON: &str = "git tracks no file in this worktree, so its corpus is untracked files only; the disk walk that covers the rest did not finish, so the corpus does not hold every source file here and a zero over it is not a finding";
+
+pub const NESTED_WORKTREE_BLIND_SPOT_NOTE: &str = "this corpus was listed by git, which does not hold the untracked files written inside a nested worktree (a submodule checkout): those files belong to the nested repository, not to this one. The listing of at least one nested worktree did not finish, so files written into it are missing here and a zero over this corpus is not a finding for them -- pass \"refresh\": true to walk the disk instead, or scope \"path\" to the worktree itself, before concluding a name is absent";
+
 fn walk_policy(cause: WalkCause, origin: TargetOrigin, no_ignore: bool) -> WalkPolicy {
     let project = |reason: String| WalkPolicy { honour_gitignore: true, noise: NoiseDirs::ProjectNoiseList, reason };
     let mut policy = match (cause, origin) {
         (WalkCause::GitListingFailed(e), _) => project(format!("git could not list the worktree, so it was walked directly ({e})")),
-        (WalkCause::GitListedNothing, _) => project("git lists no file under it (nothing tracked and no untracked file it does not ignore), so the untracked directory was walked from disk honouring .gitignore".to_string()),
+        (WalkCause::GitTracksNothing, _) => project(GIT_TRACKS_NOTHING_REASON.to_string()),
         (WalkCause::CallerForcedDisk, _) => project("the caller passed \"refresh\": true, so git ls-files was not consulted and the target was walked on disk".to_string()),
         (WalkCause::TargetGitignored, TargetOrigin::ProjectDefault) => project("the target is gitignored, so git lists nothing there and it was walked directly".to_string()),
         (WalkCause::OutsideWorktree(e), TargetOrigin::ProjectDefault) => project(format!("not inside a git worktree, so it was walked directly ({e})")),
@@ -627,6 +702,10 @@ pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &I
         acc.files.extend(next.files);
         acc.excluded.extend(next.excluded);
         acc.listing_complete &= next.listing_complete;
+        acc.git_tracked_files = acc.git_tracked_files.saturating_add(next.git_tracked_files);
+        acc.git_untracked_files = acc.git_untracked_files.saturating_add(next.git_untracked_files);
+        acc.git_nested_worktrees = acc.git_nested_worktrees.saturating_add(next.git_nested_worktrees);
+        acc.git_nested_untracked_failed |= next.git_nested_untracked_failed;
         if acc.walk_reason.is_none() { acc.walk_reason = next.walk_reason; }
         if acc.source != next.source { acc.source = FileSource::Walk; }
     }
@@ -644,12 +723,16 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
     };
     let named_scope = rel.is_some();
     let target = rel.as_deref().map(|r| join_under(root, r)).unwrap_or_else(|| root.to_string());
-    let universe = |files, source, listing_complete, excluded, walk_reason| ScanUniverse {
+    let universe = |files, source, listing_complete, excluded, walk_reason, tracked, untracked, nested, nested_failed| ScanUniverse {
         files,
         source,
         listing_complete,
         excluded,
         walk_reason,
+        git_tracked_files: tracked,
+        git_untracked_files: untracked,
+        git_nested_worktrees: nested,
+        git_nested_untracked_failed: nested_failed,
         target: target.clone(),
     };
     if named_scope {
@@ -659,16 +742,19 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
                 scope.unwrap_or(""),
                 absolute_root_for_message(root),
             )),
-            Some(false) => return Ok(universe(vec![target.clone()], FileSource::SingleFile, true, Vec::new(), None)),
+            Some(false) => return Ok(universe(vec![target.clone()], FileSource::SingleFile, true, Vec::new(), None, 0, 0, 0, false)),
             Some(true) => {}
         }
     }
+    // What git listed, kept aside when its tracked set is empty: the walk below then answers on the
+    // union, so an untracked tree is scanned instead of being reported as covered-but-empty.
+    let mut git_join: Option<(Vec<String>, bool)> = None;
     let cause = if force_disk {
         WalkCause::CallerForcedDisk
     } else {
         match directory_is_gitignored(&target) {
             Ok(false) => match git_worktree_files(&target, 0, no_ignore) {
-                Ok((files, complete)) => {
+                Ok((files, complete, tracked, untracked, nested_dirs, nested_failed)) => {
                     let (files, mut pruned) = if named_scope {
                         (files, Vec::new())
                     } else {
@@ -687,11 +773,11 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
                             None => kept.push(path),
                         }
                     }
-                    if kept.is_empty() {
-                        WalkCause::GitListedNothing
-                    } else {
-                        return Ok(universe(kept, FileSource::Git, complete, pruned, None));
+                    if tracked > 0 {
+                        return Ok(universe(kept, FileSource::Git, complete, pruned, None, tracked, untracked, nested_dirs, nested_failed));
                     }
+                    git_join = Some((kept, complete));
+                    WalkCause::GitTracksNothing
                 }
                 Err(e) => WalkCause::GitListingFailed(e),
             },
@@ -718,12 +804,32 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         excluded: Vec::new(),
     };
     walk.descend(&target);
+    let mut files = walk.files;
+    let mut listing_complete = !walk.reached_deadline;
+    // git contributed no tracked file here (that is why this is a walk at all), so 0 is the count
+    // the reply reports: it is the number that names the blind spot.
+    let tracked = 0usize;
+    let mut untracked = 0usize;
+    if let Some((git_files, git_complete)) = git_join {
+        listing_complete &= git_complete;
+        untracked = git_files.len();
+        let mut seen: HashSet<String> = files.iter().cloned().collect();
+        for file in git_files {
+            if seen.insert(file.clone()) {
+                files.push(file);
+            }
+        }
+    }
     Ok(universe(
-        walk.files,
+        files,
         FileSource::Walk,
-        !walk.reached_deadline,
+        listing_complete,
         walk.excluded,
         Some(policy.reason),
+        tracked,
+        untracked,
+        0,
+        false,
     ))
 }
 
