@@ -6055,6 +6055,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("count".to_string(), json!(format!(
             "{lines_with_matches} lines, {occurrence_count} occurrences, {files_with_matches} files of {files_scanned} scanned ({lines_scanned} lines read)"
         )));
+        out.insert("match_count".to_string(), json!(occurrence_count));
         out.insert("files_scanned".to_string(), json!(files_scanned));
         if matched_nothing_needs_coverage_fields {
             out.insert("files_listed".to_string(), json!(files.len()));
