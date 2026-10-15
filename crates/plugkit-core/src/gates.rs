@@ -465,6 +465,16 @@ fn extract_substitution_bodies(cmd: &str) -> Vec<String> {
 
 pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
     let policy = crate::orchestrator::fsm::graph().policy.clone();
+    if let Some(v) = await_gate(verb, &policy) {
+        return v;
+    }
+    if let Some(v) = shell_git_gate(verb, body, &policy) {
+        return v;
+    }
+    policy_gate(verb, body, &policy)
+}
+
+fn await_gate(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> Option<GateVerdict> {
     if let Some(step_id) = read_pending_step() {
         if !policy.await_allowed_verbs.iter().any(|v| v == verb) {
             log_deviation(
@@ -483,12 +493,18 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
             v.await_result = true;
             v.pending_step_id = Some(step_id.clone());
             v.pending_step_full = read_pending_step_full();
-            return v;
+            return Some(v);
         }
     }
+    None
+}
 
-    let shell_policy = policy.clone();
-    if shell_policy.deny_shell_git && shell_policy.shell_verbs.iter().any(|v| v == verb) {
+fn shell_git_gate(
+    verb: &str,
+    body: &Value,
+    policy: &crate::orchestrator::fsm::Policy,
+) -> Option<GateVerdict> {
+    if policy.deny_shell_git && policy.shell_verbs.iter().any(|v| v == verb) {
         let cmd = body
             .get("command")
             .and_then(|v| v.as_str())
@@ -528,15 +544,22 @@ pub fn check_dispatch(verb: &str, body: &Value) -> GateVerdict {
                     cmd.chars().take(80).collect::<String>()
                 ),
             );
-            return GateVerdict::deny(format!(
-                "bash-git-bypass: a `{}` verb invoking `git` is denied - git is a first-class spool surface, not a shell command. Use the git verb instead: \
+            return Some(GateVerdict::deny(format!(
+                "bash-git-bypass:a `{}` verb invoking `git` is denied - git is a first-class spool surface, not a shell command. Use the git verb instead: \
                  git_status (porcelain), git_log, git_diff, git_show, git_branch (inspect); git_add, git_commit, git_finalize (stage/commit/push in one), git_push (push w/ rebase-retry); git_checkout (switch a ref, or restore only the given paths), git_fetch, git_rm, git_revert, git_reset (mutate); git_stash, git_stash_pop, git_stash_drop, git_stash_list (shelve); git_init (turn a non-repo directory into a repo). \
                  git_finalize {{message}} bundles add->commit->porcelain-gate->push in ONE dispatch. The shell git bypasses the porcelain gate, the witness ledger, and is non-portable. Command was: `{}`",
                 verb, cmd.chars().take(120).collect::<String>()
-            )).with_next("git_finalize");
+            )).with_next("git_finalize"));
         }
     }
+    None
+}
 
+fn policy_gate(
+    verb: &str,
+    body: &Value,
+    policy: &crate::orchestrator::fsm::Policy,
+) -> GateVerdict {
     let claim_ms = now_ms();
     let submitted_at_ms = dispatch_submitted_at_ms()
         .map(|ms| ms.min(claim_ms))
