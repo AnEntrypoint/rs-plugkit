@@ -146,9 +146,13 @@ pub(super) fn dual_channel_depth(body: &Value, k: u32) -> usize {
     {
         k as usize
     } else {
-        (k as usize).saturating_mul(COMPACT_DUAL_CANDIDATE_MULTIPLIER)
+        (k as usize)
+            .saturating_mul(COMPACT_DUAL_CANDIDATE_MULTIPLIER)
+            .max(DUAL_CHANNEL_TOP_K)
     }
 }
+
+const DUAL_CHANNEL_TOP_K: usize = 20;
 
 pub(super) const LITERAL_FALLBACK_MIN_TERM_LEN: usize = 3;
 
@@ -257,7 +261,22 @@ pub(super) fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) 
     if opts.verbose {
         return raw;
     }
-    let mut compact = crate::codesearch_rank::compact_dual(query, &raw, &opts);
+    let channels = crate::codesearch_rank::dual_channels(query, &raw, &opts);
+    let mut reply = compact_dual_hits(body, query, k, &raw, &opts);
+    if let Some(map) = reply.as_object_mut() {
+        map.extend(channels);
+    }
+    reply
+}
+
+fn compact_dual_hits(
+    body: &Value,
+    query: &str,
+    k: u32,
+    raw: &Value,
+    opts: &crate::codesearch_rank::RankOptions,
+) -> Value {
+    let mut compact = crate::codesearch_rank::compact_dual(query, raw, opts);
     if compact.get("literal_matches").and_then(|v| v.as_u64()) != Some(0) {
         return compact;
     }
@@ -691,7 +710,7 @@ pub(super) fn codesearch_at_root(
             Value::Object(hit)
         })
         .collect();
-    let commits = crate::code_index::git_commit_rank_at(root, query, 10);
+    let commits = crate::code_index::git_commit_rank_at(root, query, 20);
     let commits_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let scope_paths: Vec<String> = scope.as_ref().map(|s| s.literal_scopes()).unwrap_or_default();
     let scope_refs: Vec<&str> = scope_paths.iter().map(String::as_str).collect();
@@ -2786,7 +2805,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
     };
     let bm25_ranked = corpus.bm25_rank_cfg(query, cand_k, &cfg.scoring);
     let bm25_ids: Vec<String> = bm25_ranked.iter().map(|(key, _)| key.clone()).collect();
-    let commit_ranked = crate::code_index::git_commit_rank(query, 10);
+    let commit_ranked = crate::code_index::git_commit_rank(query, 20);
     let commits: Vec<Value> = commit_ranked
         .iter()
         .map(|(hash, message, score)| json!({ "hash": hash, "message": message, "score": score }))
