@@ -549,27 +549,9 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
     if observations.len() > 256 {
         observations.drain(0..observations.len() - 256);
     }
-    let successes = observations.iter().filter(|observation| observation.succeeded()).count();
-    let failures = observations.len().saturating_sub(successes);
-    let gate_drift_failures = observations
-        .iter()
-        .filter(|observation| observation.is_gate_drift_failure())
-        .count();
-    let active_strategy = json!({
-        "observation_count": observations.len(),
-        "successful_dispatch_count": successes,
-        "failed_dispatch_count": failures,
-        "gate_drift_failure_count": gate_drift_failures,
-        "selection": if gate_drift_failures > 0 { "replay-recorded-successes-first" } else { "continue-current-exploration" },
-        "evidence": observations.iter().rev().take(8).cloned().collect::<Vec<_>>(),
-    });
     let _ = crate::pkfs::write(
         &path,
         &serde_json::to_string(&observations).unwrap_or_else(|_| "[]".to_string()),
-    );
-    let _ = crate::pkfs::write(
-        &format!(".gm/dream-rsi/{session_id}/active-strategy.json"),
-        &active_strategy.to_string(),
     );
 }
 
