@@ -1342,6 +1342,9 @@ fn push_unnamed_commits(
 }
 
 pub(super) fn git_push(body: &Value) -> u64 {
+    if push_body_requests_force(body) && !allow_rewrite_granted(body) {
+        return rewrite_refusal("git_push", "force or force_with_lease push");
+    }
     let repo = body_cwd(body).map(String::from);
     let explicit_branch = body
         .get("branch")
@@ -3169,6 +3172,23 @@ fn push_body_requests_force(body: &Value) -> bool {
         .or_else(|| body.get("force_with_lease"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
+}
+
+pub(super) fn allow_rewrite_granted(body: &Value) -> bool {
+    body.get("allow_rewrite").and_then(|v| v.as_bool()) == Some(true)
+}
+
+pub(super) fn rewrite_refusal(verb: &str, reason: &str) -> u64 {
+    err_json(
+        verb,
+        json!({
+            "error": format!("{} rewrites history or the worktree and is refused without allow_rewrite:true: {}", verb, reason),
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "flag": "allow_rewrite",
+            "reason": reason,
+            "hint": "pass allow_rewrite:true in the body to confirm the rewrite is intended"
+        }),
+    )
 }
 
 pub(super) fn remote_moved_is_same_branch_advance(
@@ -7684,7 +7704,7 @@ pub(super) fn git_revert(body: &Value) -> u64 {
 }
 
 pub(super) const GIT_RESET_MODES: &[&str] = &["soft", "mixed", "hard"];
-pub(super) const GIT_RESET_ACCEPTED_FIELDS: &[&str] = &["ref", "rev", "mode", "hard", "paths", "files"];
+pub(super) const GIT_RESET_ACCEPTED_FIELDS: &[&str] = &["ref", "rev", "mode", "hard", "paths", "files", "allow_rewrite"];
 
 pub(super) fn git_reset_refspec(body: &Value) -> Result<String, Value> {
     let mut picked: Option<&str> = None;
@@ -7790,6 +7810,12 @@ pub(super) fn git_reset(body: &Value) -> u64 {
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
+    if paths.is_empty() && !allow_rewrite_granted(body) {
+        return rewrite_refusal(
+            "git_reset",
+            "a worktree-scope reset moves HEAD (soft, mixed) or discards the worktree (hard); a paths-scoped mixed reset is index-only and needs no flag",
+        );
+    }
     if !paths.is_empty() {
         if mode != "mixed" {
             return err_json(
@@ -8002,10 +8028,13 @@ pub(super) fn git_worktree_list(body: &Value) -> u64 {
 }
 
 pub(super) fn git_worktree_remove(body: &Value) -> u64 {
-    if let Some(refusal) = refuse_unknown_fields("git_worktree_remove", body, &["path", "force", "allowOutsideRoot"]) { return refusal; }
+    if let Some(refusal) = refuse_unknown_fields("git_worktree_remove", body, &["path", "force", "allowOutsideRoot", "allow_rewrite"]) { return refusal; }
     let cwd = body_cwd(body);
     let (_, path) = match git_worktree_target(body, cwd, "git_worktree_remove") { Ok(v) => v, Err(detail) => return err_json("git_worktree_remove", detail) };
     let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    if force && !allow_rewrite_granted(body) {
+        return rewrite_refusal("git_worktree_remove", "force removes a worktree even with uncommitted or untracked work");
+    }
     let mut argv: Vec<&str> = vec!["worktree", "remove"];
     if force { argv.push("--force"); }
     argv.push(path.as_str());
