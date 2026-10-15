@@ -541,7 +541,7 @@ pub(super) fn memorize_with_raw(body: &Value, raw: &str) -> u64 {
         return err("memorize", "memory md write failed; the md corpus is the durable store, refusing an unbacked memory");
     }
     let now_ms = unsafe { host_now_ms() } as i64;
-    if let Err(e) = crate::rssearch_vectors::write(namespace, &key, text, &emb, now_ms) {
+    if let Err(e) = crate::orchestrator::memorize::write_memory_vector(namespace, &key, text, &emb, now_ms) {
         emit_event(
             "rssearch_vectors_write_failed",
             json!({

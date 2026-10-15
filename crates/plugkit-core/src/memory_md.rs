@@ -780,7 +780,7 @@ pub fn sync_index(namespaces: &[String], now_ms: i64) -> Value {
                          failed: &mut u32,
                          shadow_failed: &mut u32|
          -> i8 {
-            match crate::rssearch_vectors::write(ns, key, text, emb, updated) {
+            match crate::orchestrator::memorize::write_memory_vector(ns, key, text, emb, updated) {
                 Ok(()) => {
                     *upserted += 1;
                     0

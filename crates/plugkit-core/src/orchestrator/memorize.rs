@@ -312,7 +312,7 @@ fn drain_pending_embeddings(max_rows: usize) -> serde_json::Value {
             let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("l0");
             crate::tencentdb_memory::write(&namespace, kind, &text, &emb, now).map(|_| ())
         } else {
-            crate::rssearch_vectors::write(&namespace, &key, &text, &emb, now)
+            write_memory_vector(&namespace, &key, &text, &emb, now)
         };
         match write_result {
             Ok(()) => embedded += 1,
@@ -676,7 +676,7 @@ pub fn handle_fire(content: &str) -> (String, String, i32) {
     };
     let emb_val: serde_json::Value =
         serde_json::from_str(&emb_str).unwrap_or(serde_json::Value::Null);
-    if let Err(e) = crate::rssearch_vectors::write(&namespace, &key, &text, &emb_val, now as i64) {
+    if let Err(e) = write_memory_vector(&namespace, &key, &text, &emb_val, now as i64) {
         crate::wasm_dispatch::emit_event(
             "rssearch_vectors_write_failed",
             serde_json::json!({
@@ -803,6 +803,16 @@ fn agents_drain_obligation() -> serde_json::Value {
         "back_pressure_warning": back_pressure_warning,
         "instruction": instruction,
     })
+}
+
+pub fn write_memory_vector(
+    namespace: &str,
+    key: &str,
+    text: &str,
+    embedding: &serde_json::Value,
+    now_ms: i64,
+) -> Result<(), String> {
+    crate::rssearch_vectors::write(namespace, key, text, embedding, now_ms)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
