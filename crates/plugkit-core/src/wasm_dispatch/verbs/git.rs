@@ -4602,11 +4602,18 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         .unwrap_or("origin")
         .trim();
 
-    let branch = body
+    let requested_branch = body
         .get("branch")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .trim();
+        .trim()
+        .to_string();
+    let branch = if requested_branch.is_empty() {
+        let current = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string();
+        if current == "HEAD" { String::new() } else { current }
+    } else {
+        requested_branch
+    };
     let ff_only = match body_bool_flag(body, "ff_only", "git_pull") {
         Ok(v) => v,
         Err(detail) => return err_json("git_pull", detail),
