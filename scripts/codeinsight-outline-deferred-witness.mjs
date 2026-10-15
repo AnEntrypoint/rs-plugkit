@@ -1,23 +1,19 @@
-// Live witness: codeinsight outline must answer while the symbol refresh is incomplete only because it
-// deferred files. A scratch project of many small files exceeds one sync pass's wall budget, so the
-// first outline pass defers the tail of the listing. Requires an outline of a deferred file to answer
-// with partial:true and focus state deferred, with codeinsight_index.deferred_set naming it (or, when
-// deferred_set_truncated is true, naming a bounded prefix), and an outline of a covered file to answer
-// with current:true. Dispatches through the installed gm CLI against the running daemon, so it reflects
-// whatever plugkit build is loaded; a daemon that refuses on any deferred file prints FAIL.
-// Usage: node scripts/codeinsight-outline-deferred-witness.mjs [--files 4000] [--dir <scratch>] [--timeout 300]
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+
+const DEFAULT_FILE_COUNT = '4000';
+const DEFAULT_TIMEOUT_SECONDS = '300';
+const PROBE_ATTEMPTS = 3;
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
   const i = argv.indexOf(name);
   return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : fallback;
 };
-const fileCount = Number(opt('--files', '4000'));
-const timeoutSeconds = opt('--timeout', '300');
+const fileCount = Number(opt('--files', DEFAULT_FILE_COUNT));
+const timeoutSeconds = opt('--timeout', DEFAULT_TIMEOUT_SECONDS);
 const dir = path.resolve(
   opt('--dir', path.join(os.tmpdir(), `codeinsight-outline-deferred-witness-${process.pid}-${Date.now()}`)),
 );
@@ -100,7 +96,7 @@ const notes = [];
 let deferred = null;
 let covered = null;
 
-for (let attempt = 0; attempt < 3 && deferred === null && failures.length === 0; attempt += 1) {
+for (let attempt = 0; attempt < PROBE_ATTEMPTS && deferred === null && failures.length === 0; attempt += 1) {
   const target = names[names.length - 1 - attempt];
   const probe = summarize(dispatchOutline(target));
   if (probe.notExecuted || probe.refused || probe.ok !== 'true') {
@@ -121,7 +117,7 @@ for (let attempt = 0; attempt < 3 && deferred === null && failures.length === 0;
   }
 }
 
-for (let attempt = 0; attempt < 3 && covered === null && failures.length === 0; attempt += 1) {
+for (let attempt = 0; attempt < PROBE_ATTEMPTS && covered === null && failures.length === 0; attempt += 1) {
   const probe = summarize(dispatchOutline(names[0]));
   if (probe.notExecuted || probe.refused || probe.ok !== 'true') {
     failures.push(`outline of ${names[0]} did not answer (ok=${probe.ok} refused=${probe.refused} notExecuted=${probe.notExecuted})`);
