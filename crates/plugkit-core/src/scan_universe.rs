@@ -298,9 +298,14 @@ fn git_list_into(
 }
 
 fn directory_is_gitignored(dir: &str) -> Result<bool, String> {
-    let r = git_call_argv(&["check-ignore", "-q", "--", "."], git_cwd(dir));
+    let r = git_call_argv(&["check-ignore", "-v", "--", "."], git_cwd(dir));
     match git_exit_code(&r) {
-        0 => Ok(true),
+        0 => Ok(r
+            .get("stdout")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .lines()
+            .any(|line| !line.trim().is_empty())),
         1 => Ok(false),
         code => Err(format!(
             "git check-ignore exited {code}: {}",
@@ -425,6 +430,7 @@ enum WalkCause {
     TargetGitignored,
     OutsideWorktree(String),
     GitListingFailed(String),
+    GitListedNothing,
     CallerForcedDisk,
 }
 
@@ -442,6 +448,7 @@ fn walk_policy(cause: WalkCause, origin: TargetOrigin, no_ignore: bool) -> WalkP
     let project = |reason: String| WalkPolicy { honour_gitignore: true, noise: NoiseDirs::ProjectNoiseList, reason };
     let mut policy = match (cause, origin) {
         (WalkCause::GitListingFailed(e), _) => project(format!("git could not list the worktree, so it was walked directly ({e})")),
+        (WalkCause::GitListedNothing, _) => project("git lists no file under it (nothing tracked and no untracked file it does not ignore), so the untracked directory was walked from disk honouring .gitignore".to_string()),
         (WalkCause::CallerForcedDisk, _) => project("the caller passed \"refresh\": true, so git ls-files was not consulted and the target was walked on disk".to_string()),
         (WalkCause::TargetGitignored, TargetOrigin::ProjectDefault) => project("the target is gitignored, so git lists nothing there and it was walked directly".to_string()),
         (WalkCause::OutsideWorktree(e), TargetOrigin::ProjectDefault) => project(format!("not inside a git worktree, so it was walked directly ({e})")),
@@ -680,7 +687,11 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
                             None => kept.push(path),
                         }
                     }
-                    return Ok(universe(kept, FileSource::Git, complete, pruned, None));
+                    if kept.is_empty() {
+                        WalkCause::GitListedNothing
+                    } else {
+                        return Ok(universe(kept, FileSource::Git, complete, pruned, None));
+                    }
                 }
                 Err(e) => WalkCause::GitListingFailed(e),
             },
