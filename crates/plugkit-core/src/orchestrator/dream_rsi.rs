@@ -1718,12 +1718,227 @@ pub fn handle_seal(content: &str) -> (String, String, i32) {
 
 #[cfg(target_arch = "wasm32")]
 pub fn handle(content: &str) -> (String, String, i32) {
-    match evaluate(content) {
-        Ok(result) => (result.to_string(), String::new(), 0),
-        Err(error) => (
-            json!({ "ok": false, "error": error }).to_string(),
-            String::new(),
-            1,
-        ),
+    let replay = match evaluate(content) {
+        Ok(replay) => replay,
+        Err(error) => {
+            return (
+                json!({ "ok": false, "error": error }).to_string(),
+                String::new(),
+                1,
+            )
+        }
+    };
+    let observations = match observations_for_result() {
+        Ok(observations) => observations,
+        Err(error) => {
+            return (
+                json!({ "ok": false, "error": error }).to_string(),
+                String::new(),
+                1,
+            )
+        }
+    };
+    let mut reply = result_json(&produce_result(&observations, &replay));
+    reply["replay"] = replay;
+    (reply.to_string(), String::new(), 0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn observations_for_result() -> Result<Vec<Value>, String> {
+    let session = session_id()?;
+    let path = format!(".gm/dream-rsi/{session}/observations.json");
+    let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
+    Ok(serde_json::from_str::<Vec<Value>>(&raw).unwrap_or_default())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn record_succeeded(record: &Value) -> bool {
+    record.get("exit_code").and_then(Value::as_i64) == Some(0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn record_gate_drift_failure(record: &Value) -> bool {
+    !record_succeeded(record) && record.get("gate_drift").and_then(Value::as_bool).unwrap_or(true)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn per_verb_stats(observations: &[Value]) -> Vec<VerbStat> {
+    let mut tallies: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
+    for record in observations {
+        let verb = record
+            .get("verb")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        let tally = tallies.entry(verb).or_insert((0, 0, 0));
+        tally.0 += 1;
+        if !record_succeeded(record) {
+            tally.1 += 1;
+        }
+        if record_gate_drift_failure(record) {
+            tally.2 += 1;
+        }
     }
+    tallies
+        .into_iter()
+        .map(|(verb, (count, failures, drifts))| VerbStat {
+            verb,
+            count,
+            failure_rate: failures as f64 / count as f64,
+            gate_drift_rate: drifts as f64 / count as f64,
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn replay_proposals(replay: &Value) -> Vec<VerbProposal> {
+    let rankings = replay
+        .get("rankings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let Some(baseline) = rankings.first() else {
+        return Vec::new();
+    };
+    let baseline_id = baseline
+        .get("policy_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let baseline_score = baseline.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+    rankings
+        .iter()
+        .skip(1)
+        .filter_map(|ranking| {
+            let policy_id = ranking.get("policy_id").and_then(Value::as_str)?;
+            let score = ranking.get("score").and_then(Value::as_f64)?;
+            (score > baseline_score).then(|| VerbProposal {
+                verb: policy_id.to_owned(),
+                change: format!("replace baseline {baseline_id}"),
+                evidence: format!("replay score {score:.6} above baseline {baseline_score:.6}"),
+                target: "dream-replay".to_owned(),
+            })
+        })
+        .take(MAX_PART_A_PROPOSALS)
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn derive_part_b(observations: &[Value]) -> PartB {
+    let mut walks: BTreeMap<String, (bool, Vec<String>)> = BTreeMap::new();
+    for record in observations {
+        let Some(node) = record.get("lean_node").and_then(Value::as_str) else {
+            continue;
+        };
+        let walk = walks.entry(node.to_owned()).or_insert((false, Vec::new()));
+        if record_succeeded(record) {
+            walk.0 = true;
+        } else if let Some(dispatch_id) = record.get("dispatch_id").and_then(Value::as_str) {
+            walk.1.push(dispatch_id.to_owned());
+        }
+    }
+    let traversable_nodes = walks.len() as u64;
+    let nodes_verified = walks.values().filter(|(verified, _)| *verified).count() as u64;
+    let rejected_walks = walks
+        .iter()
+        .filter(|(_, (verified, _))| !*verified)
+        .map(|(node, (_, missing))| RejectedWalk {
+            node: node.clone(),
+            missing_dispatch_ids: missing.clone(),
+        })
+        .collect();
+    PartB {
+        traversable_nodes,
+        nodes_verified,
+        backreference_edges: 0,
+        backreferences_verified: 0,
+        forward_edge_coverage_approx: if traversable_nodes == 0 {
+            0.0
+        } else {
+            nodes_verified as f64 / traversable_nodes as f64
+        },
+        rejected_walks,
+        proposals: Vec::new(),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn produce_result(observations: &[Value], replay: &Value) -> DreamRsiResult {
+    let records = observations.len() as u64;
+    let part_a = if records < INSUFFICIENT_RECORD_THRESHOLD {
+        PartA::Insufficient { records }
+    } else {
+        PartA::Measured {
+            records,
+            per_verb: per_verb_stats(observations),
+            proposals: replay_proposals(replay),
+        }
+    };
+    DreamRsiResult {
+        status: DreamRsiStatus::Proposed,
+        part_a,
+        part_b: derive_part_b(observations),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn result_json(result: &DreamRsiResult) -> Value {
+    let part_a = match &result.part_a {
+        PartA::Insufficient { records } => json!({ "state": "insufficient", "records": records }),
+        PartA::Measured {
+            records,
+            per_verb,
+            proposals,
+        } => json!({
+            "state": "measured",
+            "records": records,
+            "per_verb": per_verb
+                .iter()
+                .map(|stat| json!({
+                    "verb": stat.verb,
+                    "count": stat.count,
+                    "failure_rate": stat.failure_rate,
+                    "gate_drift_rate": stat.gate_drift_rate,
+                }))
+                .collect::<Vec<_>>(),
+            "proposals": proposals
+                .iter()
+                .map(|proposal| json!({
+                    "verb": proposal.verb,
+                    "change": proposal.change,
+                    "evidence": proposal.evidence,
+                    "target": proposal.target,
+                }))
+                .collect::<Vec<_>>(),
+        }),
+    };
+    let part_b = &result.part_b;
+    json!({
+        "status": "proposed",
+        "part_a": part_a,
+        "part_b": {
+            "traversable_nodes": part_b.traversable_nodes,
+            "nodes_verified": part_b.nodes_verified,
+            "backreference_edges": part_b.backreference_edges,
+            "backreferences_verified": part_b.backreferences_verified,
+            "forward_edge_coverage_approx": part_b.forward_edge_coverage_approx,
+            "rejected_walks": part_b
+                .rejected_walks
+                .iter()
+                .map(|walk| json!({
+                    "node": walk.node,
+                    "missing_dispatch_ids": walk.missing_dispatch_ids,
+                }))
+                .collect::<Vec<_>>(),
+            "proposals": part_b
+                .proposals
+                .iter()
+                .map(|proposal| json!({
+                    "node": proposal.node,
+                    "walk_when": proposal.walk_when,
+                    "evidence_that_counts": proposal.evidence_that_counts,
+                }))
+                .collect::<Vec<_>>(),
+        },
+    })
 }
