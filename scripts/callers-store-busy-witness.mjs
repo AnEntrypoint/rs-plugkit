@@ -1,28 +1,27 @@
-// Store-busy witness for the callers verb. While a second process holds the shared libsql store
-// lock (the <db>.lock directory the WASI VFS serializes writes with), callers is dispatched through
-// the live spool. PASS needs a reply that reports the busy store, names its answer source, returns an
-// edges array and carries no raw store lock error, all within the budget. A reply whose index refresh
-// completed while the lock was held fails too: the lock never reached the write path, so the run
-// proves nothing. This process removes the lock it took on every path it can reach.
-// Usage: node scripts/callers-store-busy-witness.mjs [--root <project root>] [--spool <exec-spool dir>]
-//          [--budget-ms 90000] [--session <id>]
-//        node scripts/callers-store-busy-witness.mjs --evaluate <saved reply.json> [--elapsed-ms N]
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
+
+const DEFAULT_ROOT = 'C:/dev/gm/rs-plugkit';
+const DEFAULT_SPOOL_ROOT = 'C:/dev/spoint/.gm/exec-spool';
+const DEFAULT_BUDGET_MS = '90000';
+const DEFAULT_SESSION = 'callers-store-busy-witness';
+const SPOOL_IDLE_WAIT_MS = 120000;
+const HOLDER_LIFETIME_SLACK_MS = 30000;
+const REPLY_GRACE_MS = 15000;
+const RAW_LOCK_ERROR = /database is locked|\.lock\b/i;
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
   const i = argv.indexOf(name);
   return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : fallback;
 };
-const root = resolve(opt('--root', 'C:/dev/gm/rs-plugkit'));
-const spoolRoot = resolve(opt('--spool', 'C:/dev/spoint/.gm/exec-spool'));
-const budgetMs = Number(opt('--budget-ms', '90000'));
-const session = opt('--session', 'callers-store-busy-witness');
+const root = resolve(opt('--root', DEFAULT_ROOT));
+const spoolRoot = resolve(opt('--spool', DEFAULT_SPOOL_ROOT));
+const budgetMs = Number(opt('--budget-ms', DEFAULT_BUDGET_MS));
+const session = opt('--session', DEFAULT_SESSION);
 const evaluatePath = opt('--evaluate', '');
-const RAW_LOCK_ERROR = /database is locked|\.lock\b/i;
 
 function replyBody(reply) {
   return reply && reply.data && typeof reply.data === 'object' ? reply.data : reply || {};
@@ -120,14 +119,14 @@ async function run() {
   }
   const lockDir = join(root, '.gm', 'gm.db.lock');
   if (!existsSync(root)) return finish([`project root missing: ${root}`]);
-  const idleBy = Date.now() + 120000;
+  const idleBy = Date.now() + SPOOL_IDLE_WAIT_MS;
   while (!spoolIdle() && Date.now() < idleBy) await sleep(500);
   if (!spoolIdle()) return finish([`spool dispatches stayed queued for 120 s; NOT RUN, no lock taken`]);
   if (existsSync(lockDir)) {
     return finish([`store lock already present at ${lockDir}; another writer holds it, so this witness neither takes nor removes it`]);
   }
 
-  const holder = spawn(process.execPath, ['-e', holderSource, lockDir, String(budgetMs + 30000)], {
+  const holder = spawn(process.execPath, ['-e', holderSource, lockDir, String(budgetMs + HOLDER_LIFETIME_SLACK_MS)], {
     stdio: ['pipe', 'pipe', 'inherit'],
   });
   holder.stdin.on('error', () => {});
@@ -181,12 +180,12 @@ async function run() {
         return null;
       }
     },
-    budgetMs + 15000,
+    budgetMs + REPLY_GRACE_MS,
     250,
   );
   const elapsedMs = Date.now() - startedAt;
   await releaseHolderLock();
-  if (!reply) return finish([`no callers reply within ${budgetMs + 15000} ms`], `task=${task}`);
+  if (!reply) return finish([`no callers reply within ${budgetMs + REPLY_GRACE_MS} ms`], `task=${task}`);
 
   const body = replyBody(reply);
   const refresh = body.codeinsight_index || {};

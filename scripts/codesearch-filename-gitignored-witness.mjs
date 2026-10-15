@@ -1,22 +1,23 @@
-// Live witness: codesearch mode "filename" with a `path` under a gitignored directory must walk that
-// directory (file_source walk, walk_reason present) and return its files. Dispatches through the
-// installed gm CLI against the running daemon, so it reflects whatever plugkit build is loaded.
-// Usage: node scripts/codesearch-filename-gitignored-witness.mjs [--project C:/dev/spoint] [--path .gm/pool] [--query .live]
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
+
+const DEFAULT_PROJECT = 'C:/dev/spoint';
+const DEFAULT_SCOPE_PATH = '.gm/pool';
+const DEFAULT_QUERY = '.live';
+const WITNESS_SESSION_ID = 'codesearch-filename-gitignored-witness';
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
   const i = argv.indexOf(name);
   return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : fallback;
 };
-const project = opt('--project', 'C:/dev/spoint');
-const scopePath = opt('--path', '.gm/pool');
-const query = opt('--query', '.live');
+const project = opt('--project', DEFAULT_PROJECT);
+const scopePath = opt('--path', DEFAULT_SCOPE_PATH);
+const query = opt('--query', DEFAULT_QUERY);
 const cli = path.join(os.homedir(), '.gm-tools', 'gm-mcp-server.mjs');
 const body = {
-  SESSION_ID: 'codesearch-filename-gitignored-witness',
+  SESSION_ID: WITNESS_SESSION_ID,
   root: project,
   query,
   mode: 'filename',

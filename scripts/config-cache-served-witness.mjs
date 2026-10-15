@@ -1,18 +1,3 @@
-// Witness for the gm-config prose cache that the wasm instruction verb reads.
-// PASS only when the cache checkout HEAD equals the remote reference tip and the
-// entry prose the cache serves contains the standing-rules marker.
-//
-// It also measures the remote probe: `config_sync_native::ensure_current` answers
-// "what is the tip of <repo> <reference>" once per machine, not once per project
-// root, and its freshness is derived from the pin and the last known remote sha.
-// The measurement runs the real native entry point (ensure_default_cache) in N
-// concurrent processes, each with its own project root, under a `git` shim that
-// records every argv and refuses to clone. N out-of-sync roots must cost exactly
-// one `ls-remote`, and one more root already at the recorded tip must cost none.
-// Usage: node scripts/config-cache-served-witness.mjs [--cache=<dir>] [--repo=<url>]
-//        [--ref=<branch>] [--key=<prose key>] [--must=<marker>] [--probe-roots=<n>]
-// Defaults: cache = <cwd>/.gm/config-source-cache-default, the implicit default tier
-// that config::resolve() selects for a project without its own config source.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -23,8 +8,10 @@ import { WASI } from 'node:wasi';
 
 const DEFAULT_REPO = 'https://github.com/AnEntrypoint/gm-config';
 const DEFAULT_MUST = '## Parallel slots';
+const DEFAULT_PROBE_ROOTS = '8';
 const GLOBAL_PROBE_DIR = 'config-source-remote-probe';
 const STALE_HEAD = 'a'.repeat(40);
+const CARGO_BUILD_TIMEOUT_MS = 900000;
 
 function parseArgs(argv) {
   const out = {};
@@ -55,8 +42,6 @@ function fail(reason) {
   return 1;
 }
 
-// A `git` that records every invocation and refuses the ones that would move a
-// checkout: the witness measures the probe, so a clone would only add network noise.
 const SHIM_SOURCE = `use std::process::Command;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -79,8 +64,7 @@ fn main() {
 }
 `;
 
-// The real native entry point: prose.rs reads gm-config prose through it.
-const HARNESS_SOURCE = `fn main() {
+const NATIVE_ENTRY_HARNESS_SOURCE = `fn main() {
     match rs_plugkit::config_sync_native::ensure_default_cache() {
         Ok((cache, degraded)) => println!("ok cache={} degraded={}", cache, degraded.unwrap_or_else(|| "none".to_string())),
         Err(reason) => println!("err {}", reason),
@@ -114,9 +98,7 @@ function realGitPath() {
 }
 
 function ensureNativeRlib(root) {
-  // Always build: cargo is incremental, so this is a no-op when nothing changed and
-  // picks up any source newer than the artifact.
-  run('cargo', ['build', '--features', 'slim'], root, 900000);
+  run('cargo', ['build', '--features', 'slim'], root, CARGO_BUILD_TIMEOUT_MS);
   const rlib = path.join(root, 'target', 'debug', 'librs_plugkit.rlib');
   if (!fs.existsSync(rlib)) throw new Error(`no native rlib at ${rlib} after cargo build`);
   return rlib;
@@ -124,7 +106,7 @@ function ensureNativeRlib(root) {
 
 function buildHarness(root, tmp, rlib) {
   const src = path.join(tmp, 'harness.rs');
-  fs.writeFileSync(src, HARNESS_SOURCE);
+  fs.writeFileSync(src, NATIVE_ENTRY_HARNESS_SOURCE);
   const bin = path.join(tmp, process.platform === 'win32' ? 'harness.exe' : 'harness');
   run(
     'rustc',
@@ -262,10 +244,25 @@ function firstRecord(dir) {
   return null;
 }
 
-// The wasm twin (config_sync.rs) is the path the deployed plugin actually runs, so
-// the same measurement is made against the built wasm: N instances, one per project
-// root, sharing one machine-global record directory, under a host_git that records
-// every argv and refuses to move a checkout.
+function gitArgsFromHostPayload(raw) {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : String(parsed).split(/\s+/).filter(Boolean);
+  } catch {
+    return raw.split(/\s+/).filter(Boolean);
+  }
+}
+
+function answerRootProbe(args, rootPosix) {
+  if (args.includes('--show-toplevel')) {
+    return { ok: true, exit_code: 0, stdout: `${rootPosix}\n`, stderr: '' };
+  }
+  if (args.includes('--is-inside-work-tree')) {
+    return { ok: true, exit_code: 0, stdout: 'true\n', stderr: '' };
+  }
+  return null;
+}
+
 async function instantiateWasm(module, root, home, onGit, note) {
   const kv = new Map();
   const rootAbs = path.resolve(root);
@@ -381,16 +378,7 @@ async function instantiateWasm(module, root, home, onGit, note) {
     crawl_cdp: () => 0n,
     host_git: (ap, al, cp, cl) => {
       try {
-        // git_call_argv sends a JSON array; the root-resolution path sends one
-        // space-separated command string. Both reach this host call.
-        const raw = str(ap, al);
-        let args;
-        try {
-          const parsed = JSON.parse(raw);
-          args = Array.isArray(parsed) ? parsed : String(parsed).split(/\s+/).filter(Boolean);
-        } catch {
-          args = raw.split(/\s+/).filter(Boolean);
-        }
+        const args = gitArgsFromHostPayload(str(ap, al));
         const cwd = cl > 0 ? str(cp, cl) : undefined;
         return pack(JSON.stringify(onGit(args, cwd, rootPosix)));
       } catch (e) {
@@ -427,9 +415,7 @@ async function instantiateWasm(module, root, home, onGit, note) {
 }
 
 function ensureWasm(root) {
-  // Always build: cargo is incremental, so this is a no-op when nothing changed and
-  // picks up any source newer than the artifact.
-  run('cargo', ['build', '--target', 'wasm32-wasip1', '--features', 'slim'], root, 900000);
+  run('cargo', ['build', '--target', 'wasm32-wasip1', '--features', 'slim'], root, CARGO_BUILD_TIMEOUT_MS);
   const wasm = path.join(root, 'target', 'wasm32-wasip1', 'debug', 'rs_plugkit.wasm');
   if (!fs.existsSync(wasm)) throw new Error(`no wasm at ${wasm} after cargo build`);
   return wasm;
@@ -462,13 +448,8 @@ async function wasmSection(root, originTip, roots) {
     const gitCalls = [];
     const onGit = (args, cwd, rootPosix) => {
       gitCalls.push(`${args[0]}${cwd ? ` @${cwd}` : ''}`);
-      // The temp project root is not a git repo, so root resolution is answered here.
-      if (args.includes('--show-toplevel')) {
-        return { ok: true, exit_code: 0, stdout: `${rootPosix}\n`, stderr: '' };
-      }
-      if (args.includes('--is-inside-work-tree')) {
-        return { ok: true, exit_code: 0, stdout: 'true\n', stderr: '' };
-      }
+      const rootProbe = answerRootProbe(args, rootPosix);
+      if (rootProbe) return rootProbe;
       if (args[0] === 'ls-remote') probes.push(args.join(' '));
       if (args[0] === 'clone' || args[0] === 'fetch') {
         return { ok: false, exit_code: 1, stdout: '', stderr: `git ${args[0]} refused by the remote-probe witness` };
@@ -521,7 +502,7 @@ async function main() {
   const ref = args.ref || 'main';
   const key = args.key || 'entry';
   const must = args.must || DEFAULT_MUST;
-  const roots = Number.parseInt(args['probe-roots'] ?? '8', 10);
+  const roots = Number.parseInt(args['probe-roots'] ?? DEFAULT_PROBE_ROOTS, 10);
 
   let cacheHead;
   try {

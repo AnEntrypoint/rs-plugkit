@@ -86,6 +86,120 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 - Re-sync: copy both sources from the gm-config commit named by `DEFAULT_REPO_PINNED_SHA`, regenerate `lean_prose.rs` from every `prose/*.md` except `entry` and `entry-extended`, delete prose files gm-config no longer has, keep the pin on that commit.
 - A state with `"entry": true` is a graph root and skips the unreachable-state check; a configured graph that fails validation makes `instruction` and `transition` return the error. A gate with `"advisory": true` never blocks; its message appears in the `advisory` array of the `transition` reply.
 
+## Code search and symbols (crates/plugkit-core/src)
+
+### code_index.rs, codesearch_rank.rs
+
+- `ScanOutput::parse` accepts `content` as the Compact spelling of grep's `output_mode`.
+- `UNCOVERED_SCAN_BUDGET_MS` (8 s): the file universe is git or a gitignore-honouring walk, so gitignored scopes are never opened and a zero-match reply there means not searched.
+- `scan_uncovered_files` lists the scope with ignore rules off, drops files the index covered, and line-scans the rest.
+- `corpus_blind_spot` holds when git tracks no file, git reports untracked files, or the listing is incomplete; it forces `listed_files_all_read_within_scope` false.
+- `files_scanned_indexed` counts what the index read, `files_scanned_uncovered` what the disk pass added; `files_scanned` appears in both reply shapes, so an unopened scope never reads as a zero-match.
+- `file_source` and `file_source_detail` appear on every reply, naming the corpus that answered.
+- The compact codesearch_rank shape carries `path_glob`, `files_matching_glob` and `glob_matched_no_files`, so a scoped reply differs from an unscoped one.
+
+### code_symbols.rs
+
+- `package_of`: a Go package or Rust module is the basename of its defining file's directory.
+- `file_reaches_package`: a file reaches a package from one of its directories or from an import whose last segment (split on `/`, `\`, `:`) equals the package name.
+- Call edges carry bare names; a qualified `pkg.Name` pins its package before any edge is attributed.
+- `Resolved.package` and `Resolved.dirs` are set when a qualified name pins the symbol; `Resolved.merges_definitions` is set when resolution fell back to the bare name.
+- `callers` and `callees` filter only depth-1 neighbours to the qualified package; deeper hops are attributed in the reply.
+- `SELF_HEAL_SYNC_WALL_BUDGET_MS` (45 s) bounds the extra incremental passes one dispatch spends beyond the top-up pass; `SELF_HEAL_SYNC_PASS_CEILING_MS` (20 s) caps one pass; `SELF_HEAL_SYNC_MAX_PASSES` (6) bounds the loop.
+- Two passes with an equal `SELF_HEAL_PROGRESS_COUNTERS` tuple (12 counters) moved the index nowhere, which stops the loop.
+- `drive_sync_to_completion` returns the last pass's report; `self_heal_passes` counts the extra passes.
+- `outline` is exempt: it answers an incomplete index with `partial` true and decides the focus file in one pass.
+- Other actions drive the index to completion and answer, with the reason, when the budget runs out.
+- A busy store refuses the verb: another sync pass cannot fix that contention.
+
+### scan_universe.rs
+
+- `git_nested_worktrees` and `git_nested_untracked_failed` name the submodule checkouts that widen the corpus and whether their untracked listing failed; a failure is a blind spot.
+- `nested_worktree_dirs` finds nested checkouts by listing, not `git ls-files --stage`, since git's parent listing names a submodule's tracked files only; it stops at the first `.git`, at `NESTED_WORKTREE_SCAN_DEPTH` (2) and at `MAX_NESTED_WORKTREES` (64).
+- Nested discovery takes both `gitlink_dirs` and `nested_worktree_dirs`, since either can answer; untracked files inside each nested worktree join the corpus, so a new file is searchable without refresh.
+- `nested_untracked_failed` is set when discovery hits `MAX_NESTED_WORKTREES` or a nested untracked listing is incomplete; a failed gitlink listing alone is not a blind spot.
+- `scope_path_exists` tests a named scope under the root; `search.rs` answers a scope that resolves to nothing as an error, never an empty scan, because an unopened scope reads as a real zero.
+- `git_join` answers on the union of the walk and git's listing when git's tracked set is empty, so an untracked tree is scanned rather than reported as covered and empty.
+
+### crates/plugkit-core/examples/prd_yaml_guard.rs
+
+- A native harness for the YAML write guard, since `pkfs` is wasm32-only; each guard is a pure text function driven with `std::fs` on a real file.
+
+## Remote-tip probe and config sync (config.rs, config_sync.rs, config_sync_native.rs)
+
+- Without a home directory `global_probe_root` falls back to the project's `.gm` directory, keeping per-project granularity.
+- `SHARED_PROBE_WAIT_MS` (15 s): a dispatch waits for another process's in-flight probe of the same (repo, reference) before serving its checkout.
+- `UNMEASURED_REF_INTERVAL_MS` (1 h) re-probes a ref with no measured cadence; the first probe that sees a new tip stores the measured `change_interval_ms`.
+- A failure backoff caps at `PROBE_BACKOFF_MAX_MS` (1 h).
+- A project whose checkout is behind a freshly recorded tip never probes; it materializes to that tip.
+- `IN_MEMORY_REMOTE_RECORDS` is the in-memory twin of the disk record; without it a failed disk write re-runs `git ls-remote` on every dispatch.
+- `global_remote_tip_with` adopts the lock holder's recorded answer and never sleeps; a forced caller that cannot hold the lock never learns the tip and never reports success.
+- `ensure_current` skips the debounce for a forced refresh and when the clock is not sane (last probe zero or in the future).
+- A recorded Skip sha equal to the checkout returns without probe or fetch; a different sha falls through to materialize.
+
+## Row stores and PRD (orchestrator/row_store.rs, cas.rs, mutables.rs, prd.rs)
+
+- The folder is the index: `.gm/prd/<id>.yml` and `.gm/mutables/<id>.yml`, one file per row; readdir is the enumeration, and a lane writing row A cannot clobber row B.
+- `item_stem` folds characters outside `[A-Za-z0-9_.-]` to `-`, appends the id's `fnv1a64` when the stem changes (so `a/b` and `a-b` differ), and caps at `ITEM_STEM_MAX_CHARS` (80); the id stays verbatim in the body.
+- Legacy `.gm/prd.yml` and `.gm/mutables.yml` are absorbed on the first write (`maybe_absorb`): rows merge into existing item files, and a row already in the commit log is never re-split.
+- After absorption a marker (`prd.absorbed.json`, `mutables.absorbed.json`) suppresses the legacy file; the marker is written only once every group reached the folder, and the legacy file stays because projects track it.
+- `parse_blocks` accepts a hand-edited single mapping or a sequence.
+- `ReadSet` carries each item file's raw text, so `write_blocks` compare-and-swaps per item; removal is compare-and-swapped too, and a rewrite by another lane makes the operation retry.
+- `legacy_stat`: the host answers `Value::Null` for a missing file, meaning absent, never size 0.
+- `row_store::cas_retry_write_verified` is the store-backed twin of `cas::cas_retry_write_verified`; the contract is the same, written back per row.
+- `cas::cas_retry_write_verified` counts a write done only when the re-read bytes still satisfy verify; a vanished row is a lost update, never success.
+- `append_log` hash-chains entries: each carries `prev` (sha256 of the previous non-empty line) and `sha256` over the entry without that field, so truncation or edit is visible.
+- `log_row` returns the newest entry for an id as a listable row marked resolved and source, so an id stays answerable after its file is cleared.
+- Resolution moves material: `retire_to_log` appends to `.gm/prd-log.jsonl` or `.gm/mutables-log.jsonl` and removes the item file, so the folder holds open work only.
+- `is_prd_state_pathspec` covers legacy files, row folders and logs; with one file per row no git verb needs a whole-file foreign-row filter.
+- `canonical_persisted_witness_path`: `referenced_path_token` trims a leading `.`, so `.gm/witness-out/...` and `gm/witness-out/...` name one file.
+- `prd_repair.rs`: other row-writing verbs refuse an unparseable PRD file, so one unquoted scalar locks the store; `repair_prd_store` re-quotes the scalar, backs the original up, and writes only if the copy re-parses and round-trips.
+- `PIN_HISTORY_SEARCH_DEPTH` (50) bounds the pin-history walk, which also stops at the first commit that pinned a different value.
+
+## Submodule pins and YAML repair (orchestrator/submodule_drift.rs, yaml_util.rs)
+
+- `staged_gitlink_sha` is the pin the next commit lands, even before HEAD carries it.
+- `commit_present`: an object the submodule clone never fetched makes `merge-base --is-ancestor` fail; a failed check is not proof that a pin moved backwards.
+- `pin_direction_known` claims a direction only when both ends are objects this clone holds; a local-only phantom pin over a published tip is a forward correction.
+- `pin_regressions` reports backwards pins in the index (what the next commit writes) and in this repo's history.
+- `YamlFault`: line and column are 1-based, `substring` is the exact fault text, `token` the breaking token such as `": "` inside an unquoted prose value.
+- `parse_fault` reads the position from the serde_yaml message and `Error::location()`, trying both so a fault is never dropped.
+- `requote_fault` changes only the scalar owning the fault and returns None outside a `key: value` entry, so callers refuse rather than guess.
+- `serialize_checked`: a document that does not round-trip is never written.
+- `repair_text`: `max_passes` bounds the loop; prd-repair defaults it to 16.
+
+## Verb handlers (wasm_dispatch/verbs.rs, verbs/git.rs, verbs/search.rs, verbs/web.rs)
+
+- `VERB_OWNED_RESERVED_BODY_KEYS`: verbs own `_plan` (the async git replay id `git_async_entry` reads back) and `_lease_sessions`; other `_` keys are transport bookkeeping.
+- `strip_reserved_body_keys` removes `_agentplug_lane_wait_ms`, which gm-mcp stamps on every JSON body, so strict validators refuse only misspelled caller fields.
+- `APPEND_ONLY_PATH_SUFFIXES` guards only `/.gm/witness-log.md`: the witness log is the (id, hash, ts) audit primitive; a concurrent whole-file write took it from 4675 lines to 3 (measured 2026-10-10).
+- `prd.yml`, `mutables.yml` and the row folders are absent from the guard, since their verbs reconcile per row and must rewrite a row; the commit logs need no guard because a single writer appends one line under a CAS.
+- `fs_read_directory` answers a bounded listing (`FS_READ_DIRECTORY_DEFAULT_LIMIT` 100, `FS_READ_DIRECTORY_MAX_LIMIT` 500) because `host_read` returns nothing for a directory.
+- `FS_READ_DIRECTORY_ENTRY_CAP_KEYS` (`max_entries`, `entries_limit`, `entry_limit`): `limit` is a `fs_read` line-range alias.
+- `fs_append` runs `fs.appendFileSync` through `host_exec_js` with a 15000 ms timeout, since the host ABI has no append import; concurrent appenders cannot lose an update.
+- `config_sync_now_force_immediate_refresh` answers `forced_refresh_unconfirmed` with `degraded_reason` when `r.degraded` is set, so a stale graph is never reported as synced.
+- `CODEINSIGHT_SELECTOR_KEYS` reads `action`, `mode`, `verb` in that order, the first nonempty string winning; no selector returns the index overview.
+- `agentplug_runtime_rule_applies`: the `.agentplug` rule covers an empty pathspec or a spec starting `.agentplug` after stripping `./`; the `agentplug` gitlink is not runtime state.
+- `literal_scopes` are the patterns `looks_like_glob` rejects; a scan points at them directly, while a glob only filters a wider listing.
+- `hoist_glob_paths` moves a glob written under `path`, `paths` or `files` to the `glob` field; left under `path`, the scan refused outright.
+- `finish_scan_reply`: a rule exclusion costs coverage only while the excluded paths stay unread; once `uncovered_scan` reports complete, `exhaustive` keeps its result.
+- The `dual` route builds `PathScope::from_body` and resolves it with `scope_paths_resolve` under `.`; without that, ranked channels answer a scoped query with project-wide hits.
+- `fetch`: an empty converted text is a failed retrieval (`ok` false), never an empty answer.
+- `page_or_clamp`: with no page the whole-document read answers, clipped tail included; with a page the bounded read reports page fields.
+- Percent-encoding keeps search qualifiers literal (`:`, `>`, `<`, `=`, `/`, `@`, `*`, `!`, parentheses, commas), since github reads `user:`, `repo:owner/name` and `stars:>=100`.
+- The wikipedia search uses `action=query` with `list=search`, since opensearch returns only titles; a caller-supplied MediaWiki url keeps its own action.
+
+## Witness scripts (rs-plugkit/scripts)
+
+- `config-cache-served-witness.mjs`: the native harness calls `config_sync_native::ensure_default_cache`, which `prose.rs` `read_from_config_repo` uses; the wasm section measures the deployed guest.
+- It runs cargo on every call (`ensureNativeRlib`, `ensureWasm`); an incremental build is a no-op when nothing changed.
+- `SHIM_SOURCE` refuses clone and fetch, so the probe reads refs (`ls-remote`) and cannot move a checkout; `answerRootProbe` answers `--show-toplevel` and `--is-inside-work-tree` because the temporary root is not a git repository.
+- `codeinsight-outline-deferred-witness.mjs`: 4000 files exceed one sync pass's wall budget (`collect_files_within_wall_budget`), so the first outline pass defers the listing's tail.
+- `codeinsight-spool-witness.mjs`: a window holds at least one spool event, so a stalled watcher cannot pass on earlier events; a checked record that fails JSON parse fails the run.
+- `callers-store-busy-witness.mjs`: a callers reply whose refresh completed while the store lock is held fails the witness, since the write path never saw the lock.
+- `git-branch-fields-witness.mjs` checks `unknown_fields` and `accepted_fields` for `git_branch` only; `git_log`, `git_diff` and `git_show` (`orchestrator/instructions/prose/entry.md`) are not checked there.
+- `config-degraded-refresh-witness.mjs` checks the chain `RepoFetcher::refresh` (config.rs), `Freshness::Degraded` (config_sync.rs), `Resolution.degraded`, then the `config_resolve` and `instruction` replies.
+
 ## Other contracts
 
 - `dataflow::default_document` is not executed for CompiledDefault: configured pipelines run declared steps then fuse nodes, with no topological scheduler, and `plugin == "gm"` calls internal functions, not WASM self-dispatch.
