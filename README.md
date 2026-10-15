@@ -264,7 +264,9 @@ verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git
 `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`,
 `git_worktree`, `git_worktree_add`, `git_worktree_list`, `git_worktree_remove`, `git_worktree_prune`,
 `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
-GitHub Actions workflow-run query with each job's name and conclusion in `jobs`), `prd-add`/`prd-list`/`prd-resolve`/
+GitHub Actions workflow-run query with each job's name and conclusion in `jobs`) and `ci-log`
+(the run's printed text: `run_id` or `sha`, optional `job_id`, filtered by `job`, `step` and
+`pattern`, capped by `max_lines` and `max_chars`, each line split into `{n, job, step, at, text}`), `prd-add`/`prd-list`/`prd-resolve`/
 `prd-status`, `mutable-add`/`mutable-list`, `discipline-note`, `fsm-vendor`,
 `fsm-validate`, `fsm-propose-override`, `submodule-check`, `sql_open`/`sql_query`/`sql_exec`/`sql_list_dbs`/
 `sql_smoke`, `task-spawn`/`task-list`/`task-output`/`task-stop`, `wait-for-task` (`{id, timeout_ms?}`, default and max 100000; blocks until the task leaves `running` and returns its output, or returns `timed_out:true` at the deadline),
@@ -334,7 +336,7 @@ any mismatch, and a row closed by binding records `witness_binding`. A dispatch 
 that appears only inside `witness_evidence` is named in a refusal as
 `witness_dispatch_id_in_evidence` with `witness_dispatch_id_field`; it verifies only
 when passed as `witness_dispatch_id`. A verified reply names the bound id in `witness_dispatch_id_in_evidence` (null when a binding closed the row); `witness_dispatch_id_in_ledger` is true when the bound id is in this project's dispatch record: its `.gm/exec-spool/.dispatch-ledger.json`, or, once the ledger aged it out, the dispatch's own JSON in `.gm/exec-spool/out` that carries its id; `witness_dispatch_id_verified_via` names which of the two found it: `ledger` or `spool_out`. An optional `commit_comment` attaches a
-one-line resolution note to the next GM commit. `prd-list` takes `limit`, folds
+one-line resolution note to the next GM commit. `prd-list` takes `limit` and `offset` (paging; `status:"all"` lists every status), folds
 repeated blocks of an id to the last block, and replies with `total` (matches) and
 `store_total` (stored blocks).
 

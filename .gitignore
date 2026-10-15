@@ -3,6 +3,7 @@
 Cargo.lock
 .gm/exec-spool/
 .gm/gm.db
+.gm/gm.db.lock.owner
 .gm/config-source-cache-default/
 .gm/config-source-cache-default.0f97d1a3fa2b58cb.sync.json
 .gm/last-dispatch-ts
@@ -10,6 +11,8 @@ Cargo.lock
 /.agentplug-kv/
 /crates/plugkit-core/.gm/
 .gm/config-source-cache-default.*.sync.json
+.gm/config-source-cache-default.*.lock/
+.gm/.staging-*/
 .cycle-state.json
 # engine diagnostic rewritten on every gate denial; runtime state
 .gm/fsm-graph-rejected.json
@@ -19,3 +22,8 @@ Cargo.lock
 # scratch -- same transient class as .agentplug-kv/ above.
 .gm/next-step.md
 .gm/dream-rsi/
+
+# codesearch artifacts (code_index.rs publish_codesearch_artifact) and the orchestrator prompt capture (orchestrator/instructions/mod.rs): runtime state, never source.
+.gm/codesearch-result-*.json
+.gm/codesearch-result-*.json.tmp-*
+.gm/last-prompt.txt

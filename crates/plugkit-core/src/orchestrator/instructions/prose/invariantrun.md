@@ -6,7 +6,7 @@ Handover: Invariant results over call sequences are handed to METAMORPH so outpu
 
 Procedure, for each stateful module the diff touches:
 1. Read the module's stated invariant from its row. A module with no stated invariant gets a row before it is probed, and the probe waits for that row.
-2. Write one exec_js script (raw_body: first line "timeoutMs=<ms>", then Node source) that drives the real module through at least two hundred seeded sequences of at most fifty calls each. Each sequence draws its calls from a seeded pseudo-random generator, so a rerun with the same seeds repeats the same sequences.
+2. Write one exec_js script (raw_body: Node source, with the typed timeoutMs field set) that drives the real module through at least two hundred seeded sequences of at most fifty calls each. Each sequence draws its calls from a seeded pseudo-random generator, so a rerun with the same seeds repeats the same sequences.
 3. After every call, check the stated invariant against the module's state.
 4. Print the shortest failing sequence, the state before the failing call, the failing call with its arguments, and the state after it. When no sequence fails, print the seed count, the sequence count and the longest sequence length run.
 

@@ -106,7 +106,10 @@ pub fn resolve_with_degradation(key: &str, default: &str) -> (String, Option<Str
         Outcome::SourceRepoDegraded { reason }
         | Outcome::Degraded { reason }
         | Outcome::ConfigRepoUnreachable { reason } => Some(reason.clone()),
-        Outcome::LocalOverride | Outcome::SourceRepo | Outcome::CompiledDefault => None,
+        Outcome::LocalOverride => Some(
+            "served from the project-vendored .gm/instructions copy, which is edited or lacks .vendored.json and shadows the gm-config cache".to_string(),
+        ),
+        Outcome::SourceRepo | Outcome::CompiledDefault => None,
     };
     (text, degraded)
 }

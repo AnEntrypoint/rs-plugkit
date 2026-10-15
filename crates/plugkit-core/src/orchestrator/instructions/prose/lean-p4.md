@@ -2,7 +2,7 @@
 
 This is a concern of the method, not a stage of a pipeline: it is entered from whichever node the work reaches it from, and left as soon as what it asks for holds. No concern gates entry to a set of nodes.
 
-VERIFY attacks the built change with a verifier that has not read the implementation. It finds every way the change is false by live execution against real inputs, and discharges every SEC and RES obligation with a witness that names the kind discharged. The node exits when the eight adversarial classes each have a live witness, every SEC and RES mutable is resolved, a multi-file diff has an independent review witness, the sanitizer gate is clean, and transition to=PRESSURE is dispatched.
+VERIFY attacks the built change with a verifier that has not read the implementation. It finds every way the change is false by live execution against real inputs, and discharges every SEC and RES obligation with a witness that names the kind discharged. The node exits when the eight adversarial classes each have a live witness, every SEC and RES mutable is resolved, a multi-file diff has an independent review witness, the sanitizer gate is clean, and transition to=G_NET is dispatched.
 
 Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each principle's attribution is the label used in gm-config/fsm/graph.json, given in its heading below.
 
@@ -14,7 +14,7 @@ For each function the diff changes, renames or removes, dispatch callers {"symbo
 
 Shape sweeps use codesearch {"query":"<regex>","mode":"regex","root":"<absolute project root>","path_glob":"**/*.{rs,js,ts,py,md,toml,json,yml}"} for secret shapes, injection sinks and panic sites. Comment spans are swept with the gm verb grep and body {"mode":"comments"}. Mode dual is ranked and cut, so it answers "where is the code that does X" only, never an exhaustive question.
 
-Every live witness is an exec_js dispatch: raw_body is "timeoutMs=<ms>" on the first line, then Node source. The source runs real commands through require("node:child_process").execFileSync(command, args, { encoding: "utf8" }) and prints what it observed. Build checks use the project's own tools, such as execFileSync("cargo", ["check", "-p", "<crate>"]) or execFileSync("node", ["--check", "<file>"]). Never use a Bash or PowerShell tool call for a build, subprocess or process check, and run git only through git_* verbs.
+Every live witness is an exec_js dispatch: raw_body is the Node source, and the limit is the typed timeoutMs field, never a header line in the body. The source runs real commands through require("node:child_process").execFileSync(command, args, { encoding: "utf8" }) and prints what it observed. Build checks use the project's own tools, such as execFileSync("cargo", ["check", "-p", "<crate>"]) or execFileSync("node", ["--check", "<file>"]). Never use a Bash or PowerShell tool call for a build, subprocess or process check, and run git only through git_* verbs.
 
 Dispatch the eight adversarial classes one at a time, each as its own exec_js probe, reading each reply before the next. Re-dispatch instruction between mutable resolutions, after a failed exec retry, and whenever an error is unfamiliar.
 
@@ -34,7 +34,7 @@ Every SEC and RES obligation is added as a mutable when found, with obligation_k
 
 mutable-add refuses a depends_on that closes a cycle and names the cycle path. mutable-resolve refuses while a depends_on id is pending and names it; resolve dependencies first, in order, never around them. The gates sec-obligations-ready and res-obligations-ready refuse on any untyped or blocked pending kind of their family and name the offender.
 
-Each resolution's witness names the kind discharged and how. After two genuine failed attempts on one mutable, stop repeating the approach: add a fresh mutable with a new id and a narrower scope that states what the failures revealed, and transition to=SHAPE if that reshapes the plan. Closure requires mutables-all-resolved, so a pending mutable of any kind blocks it, including kinds owned by other nodes.
+Each resolution's witness names the kind discharged and how. After two genuine failed attempts on one mutable, stop repeating the approach: add a fresh mutable with a new id and a narrower scope that states what the failures revealed, and transition to=EARS if that reshapes the plan. Closure requires mutables-all-resolved, so a pending mutable of any kind blocks it, including kinds owned by other nodes.
 
 ## Security obligations
 
@@ -90,7 +90,7 @@ The eight classes, each one exec_js probe: empty, overflow and reentrant input (
 
 Handover: Property results on pure functions are handed to PBTAGENT so candidate properties are admitted only from the contract. cite QuickCheck Property-Based Testing - Claessen and Hughes.
 
-For each pure function the diff adds or changes, one exec_js script generates inputs from a seeded pseudo-random generator, runs at least one thousand cases, and on the first falsified case runs a shrink pass that reduces the input to a minimal counterexample, then prints that minimal case in full. Properties come from the contract: round trips where an inverse exists, idempotence where a row states it, invariant preservation over outputs, totality over the stated domain. A falsified property fires the backreference to ILLEGAL: transition to=CONTRACT, because the type cannot express the rule.
+For each pure function the diff adds or changes, one exec_js script generates inputs from a seeded pseudo-random generator, runs at least one thousand cases, and on the first falsified case runs a shrink pass that reduces the input to a minimal counterexample, then prints that minimal case in full. Properties come from the contract: round trips where an inverse exists, idempotence where a row states it, invariant preservation over outputs, totality over the stated domain. A falsified property fires the backreference to ILLEGAL: transition to=G_CONTRACT, because the type cannot express the rule.
 
 ### PBTAGENT - Agentic Property-Based Testing - Hypothesis agent study
 
@@ -102,7 +102,7 @@ The agent proposes candidate properties from the PRD rows and admits only those 
 
 Handover: Invariant results over call sequences are handed to METAMORPH so outputs without an oracle are checked by stated relations. cite Stateful Invariant Runs over Random Call Sequences - Foundry and Hypothesis.
 
-For each stateful module the diff touches, one exec_js script drives the real module through at least two hundred seeded sequences of at most fifty calls, checks the stated invariant after every step, and prints the shortest failing sequence with the state before and after the failing call. A module with no stated invariant gets a row before it is probed. A broken invariant fires the backreference to DBC: transition to=CONTRACT, state the rule as a signature precondition, and re-run the sequences.
+For each stateful module the diff touches, one exec_js script drives the real module through at least two hundred seeded sequences of at most fifty calls, checks the stated invariant after every step, and prints the shortest failing sequence with the state before and after the failing call. A module with no stated invariant gets a row before it is probed. A broken invariant fires the backreference to DBC: transition to=G_CONTRACT, state the rule as a signature precondition, and re-run the sequences.
 
 ### METAMORPH - Metamorphic Testing - T. Y. Chen
 
@@ -126,7 +126,7 @@ For each consumer of the changed surface found by callers, exec_js calls the sur
 
 Handover: A characterization record with no remaining contract ends this chain, so this node nominates no further node. cite Characterization Test, Legacy Only - Michael Feathers.
 
-A characterization probe is written only when the changed code has no contract left: no row, signature or invariant describes it. The agent runs the current behaviour through exec_js, records the outputs in the owning row's witness labelled as a characterization, and leaves no standing test file. When the recorded behaviour is the only description left, the backreference to SPECDRIFT fires, and the agent writes the contract the characterization implies and routes it to CONTRACT.
+A characterization probe is written only when the changed code has no contract left: no row, signature or invariant describes it. The agent runs the current behaviour through exec_js, records the outputs in the owning row's witness labelled as a characterization, and leaves no standing test file. When the recorded behaviour is the only description left, the backreference to SPECDRIFT fires, and the agent writes the contract the characterization implies and routes it to G_CONTRACT.
 
 ### AGENTQA - Agent-Native QA over MCP
 
@@ -144,7 +144,7 @@ The judge is used only where METAMORPH found no relation. It is a separate agent
 
 Handover: A passing analyser run is handed to G_NET, the net-negative gate that decides whether the change may leave VERIFY. cite Sanitizer and Static Analysis Gate.
 
-The project's analysers run through execFileSync inside exec_js with warnings treated as failures: cargo clippy with warnings denied for Rust, the project's linter and type checker for JavaScript and TypeScript, and each other language's checker for the languages in the diff. Each finding becomes a row or mutable, is fixed in the code, and is re-run until clean. A lint rule is never disabled to clear a finding. A finding the type system could have prevented fires the backreference to TOTALITY: transition to=BUILD and make the partial function total.
+The project's analysers run through execFileSync inside exec_js with warnings treated as failures: cargo clippy with warnings denied for Rust, the project's linter and type checker for JavaScript and TypeScript, and each other language's checker for the languages in the diff. Each finding becomes a row or mutable, is fixed in the code, and is re-run until clean. A lint rule is never disabled to clear a finding. A finding the type system could have prevented fires the backreference to TOTALITY: transition to=TOTALITY and make the partial function total.
 
 ## Witness
 
@@ -177,10 +177,10 @@ A recurring failure class found by a probe is persisted when confirmed: memorize
 
 ## Transition
 
-The node is entered from BUILD through G_INDEP, the gate for "verifier has not read the implementation". Its predicate lean-verifier-independent is advisory and always passes, so independence is held by dispatching a fresh verifier agent before transition {"to":"VERIFY"}, not by the gate.
+The node is entered from TOTALITY through G_INDEP, the gate for "verifier has not read the implementation". Its predicate lean-verifier-independent is advisory and always passes, so independence is held by dispatching a fresh verifier agent before transition {"to":"G_INDEP"}, not by the gate.
 
-The exit runs SANITIZE to G_NET, the gate for "change closes net-negative, or states why not", whose predicate lean-net-negative is blocking: it passes only when added lines in the working diff are at most the removed lines. Leave with transition {"to":"PRESSURE"} once every mutable and row of this node is resolved and the net count passes. A denial names next_dispatch; dispatch it first, which removes superseded or duplicated code in the same change, then re-dispatch transition {"to":"PRESSURE"}. The predicate reads no growth reason, so a growing change is refused until it shrinks.
+The exit runs SANITIZE to G_NET, the gate for "change closes net-negative, or states why not", whose predicate lean-net-negative is blocking: it passes only when added lines in the working diff are at most the removed lines. Leave with transition {"to":"G_NET"} once every mutable and row of this node is resolved and the net count passes. A denial names next_dispatch; dispatch it first, which removes superseded or duplicated code in the same change, then re-dispatch transition {"to":"G_NET"}. The predicate reads no growth reason, so a growing change is refused until it shrinks.
 
-Feedback routes each discovery to the earliest node able to fix it. A gap between spec and code routes to SHAPE. A boundary or ownership defect routes to CONTRACT when the type cannot express the rule (ILLEGAL), and to BUILD when the repair is code. A panic, unchecked error or partial-failure repair routes to BUILD. A failing invariant or property routes to CONTRACT through DBC or ILLEGAL. A sanitizer finding the type system could have prevented routes to BUILD. An assertion that mirrors the code routes to G_INDEP for a fresh verifier. Take the graph edge whose label matches the discovery and re-walk from where it lands.
+Feedback routes each discovery to the earliest node able to fix it. A gap between spec and code routes to EARS. A boundary or ownership defect routes to G_CONTRACT when the type cannot express the rule (ILLEGAL), and to TOTALITY when the repair is code. A panic, unchecked error or partial-failure repair routes to TOTALITY. A failing invariant or property routes to G_CONTRACT through DBC or ILLEGAL. A sanitizer finding the type system could have prevented routes to TOTALITY. An assertion that mirrors the code routes to G_INDEP for a fresh verifier. Take the graph edge whose label matches the discovery and re-walk from where it lands.
 
 A gate denial is never retried blind: dispatch the next_dispatch verb the denial names, then continue. An identical denial repeated three times is escalated by the repeat threshold, and the escalation is read before any further dispatch.
