@@ -1216,7 +1216,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
                 "next_dispatch_hint".to_string(),
                 json!({
                     "verb": "instruction",
-                    "body": { "SESSION_ID": session_id_opt },
+                    "session_id": prior_session_owner,
                     "reason": "session_mismatch",
                 }),
             );
