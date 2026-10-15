@@ -3963,6 +3963,25 @@ pub fn git_commit_rank(query: &str, k: usize) -> Vec<(String, String, f64)> {
     git_commit_rank_fallback(query, k)
 }
 
+fn first_changed_location(diff: &str) -> Option<(String, u64)> {
+    let mut path: Option<String> = None;
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            path = Some(rest.trim().to_string());
+        } else if line.starts_with("@@") {
+            let new_start = line
+                .split_whitespace()
+                .find_map(|tok| tok.strip_prefix('+'))
+                .and_then(|range| range.split(',').next())
+                .and_then(|n| n.parse::<u64>().ok());
+            if let (Some(p), Some(n)) = (path.as_ref(), new_start) {
+                return Some((p.clone(), n.max(1)));
+            }
+        }
+    }
+    None
+}
+
 pub fn git_commit_rank_at(root: &str, query: &str, k: usize) -> Vec<Value> {
     let q_tokens = rs_search::tokenize::tokenize(query);
     if q_tokens.is_empty() {
@@ -4010,7 +4029,7 @@ pub fn git_commit_rank_at(root: &str, query: &str, k: usize) -> Vec<Value> {
         if score == 0.0 {
             continue;
         }
-        ranked.push(json!({
+        let mut entry = json!({
             "hash": hash,
             "message": subject,
             "score": score,
@@ -4020,7 +4039,12 @@ pub fn git_commit_rank_at(root: &str, query: &str, k: usize) -> Vec<Value> {
                 "indexed_fields": ["commit_message", "code_diff"],
                 "diff_chars_examined": capped.len(),
             },
-        }));
+        });
+        if let Some((path, line)) = first_changed_location(&capped) {
+            entry["path"] = json!(path);
+            entry["line"] = json!(line);
+        }
+        ranked.push(entry);
     }
     ranked.sort_by(|a, b| {
         b.get("score")
