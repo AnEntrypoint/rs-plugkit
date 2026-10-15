@@ -538,29 +538,137 @@ pub fn compact_dual(query: &str, raw: &Value, opts: &RankOptions) -> Value {
     if docs_hidden > 0 {
         out.insert("docs_hidden".into(), json!(docs_hidden));
     }
-    if opts.include_docs {
-        let commits: Vec<Value> = raw
-            .get("commits")
-            .and_then(|v| v.as_array())
-            .map(|list| {
-                list.iter()
-                    .take(5)
-                    .map(|c| {
-                        let hash = c.get("hash").and_then(|v| v.as_str()).unwrap_or("");
-                        let message = c.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                        json!(format!(
-                            "{} {}",
-                            &hash[..hash.len().min(8)],
-                            squeeze(message, SNIPPET_CHARS)
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.insert("commits".into(), json!(commits));
-    }
     if let Some(degraded) = raw.get("degraded").filter(|v| v.as_bool() == Some(true)) {
         out.insert("degraded".into(), degraded.clone());
     }
     Value::Object(out)
+}
+
+const CHANNEL_TOP_K: usize = 20;
+const CHANNEL_SNIPPET_LINES: usize = 3;
+
+pub fn dual_channels(query: &str, raw: &Value, opts: &RankOptions) -> serde_json::Map<String, Value> {
+    let mut files: std::collections::HashMap<String, Option<Vec<String>>> =
+        std::collections::HashMap::new();
+    let mut out = serde_json::Map::new();
+    for channel in ["bm25_hits", "vector_hits"] {
+        let hits: Vec<Value> = raw
+            .get(channel)
+            .and_then(|v| v.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter(|hit| opts.include_docs || !hit_is_doc(hit, opts))
+                    .take(CHANNEL_TOP_K)
+                    .map(|hit| channel_hit(query, hit, opts, &mut files))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.insert(channel.into(), json!(hits));
+    }
+    let commits: Vec<Value> = raw
+        .get("commits")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .take(CHANNEL_TOP_K)
+                .map(|c| commit_hit(c, opts, &mut files))
+                .collect()
+        })
+        .unwrap_or_default();
+    out.insert("commits".into(), json!(commits));
+    out
+}
+
+fn hit_is_doc(hit: &Value, opts: &RankOptions) -> bool {
+    hit_location(hit).is_some_and(|(path, _, kind, _)| {
+        kind == "section" || is_doc_path(opts.relative(&path))
+    })
+}
+
+fn channel_hit(
+    query: &str,
+    hit: &Value,
+    opts: &RankOptions,
+    files: &mut std::collections::HashMap<String, Option<Vec<String>>>,
+) -> Value {
+    match hit_location(hit) {
+        Some((path, line, kind, name)) => {
+            let snip = tree_snippet(opts, &path, line, files)
+                .unwrap_or_else(|| text_snippet(hit_text(hit)));
+            json!({
+                "at": format!("{path}:{line}"),
+                "sym": if name.is_empty() { kind } else { format!("{kind} {name}") },
+                "snip": snip,
+                "lit": contains_verbatim(hit_text(hit), query),
+            })
+        }
+        None => json!({
+            "at": hit.get("key").cloned().unwrap_or(Value::Null),
+            "snip": text_snippet(hit_text(hit)),
+        }),
+    }
+}
+
+fn commit_hit(
+    commit: &Value,
+    opts: &RankOptions,
+    files: &mut std::collections::HashMap<String, Option<Vec<String>>>,
+) -> Value {
+    let hash = commit.get("hash").and_then(|v| v.as_str()).unwrap_or("");
+    let message = commit.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    let located = commit
+        .get("path")
+        .and_then(|v| v.as_str())
+        .zip(commit.get("line").and_then(|v| v.as_u64()));
+    let (at, snip) = match located {
+        Some((path, line)) => (
+            format!("{path}:{line}"),
+            tree_snippet(opts, path, line, files)
+                .unwrap_or_else(|| text_snippet(message)),
+        ),
+        None => (hash[..hash.len().min(8)].to_string(), text_snippet(message)),
+    };
+    json!({
+        "at": at,
+        "sym": format!("commit {}", &hash[..hash.len().min(8)]),
+        "snip": snip,
+        "message": squeeze(message, SNIPPET_CHARS),
+    })
+}
+
+fn tree_snippet(
+    opts: &RankOptions,
+    path: &str,
+    line: u64,
+    files: &mut std::collections::HashMap<String, Option<Vec<String>>>,
+) -> Option<Vec<String>> {
+    let lines = files
+        .entry(path.to_string())
+        .or_insert_with(|| {
+            let full = match &opts.root {
+                Some(root) if !path.starts_with('/') && !path.contains(':') => {
+                    format!("{root}/{path}")
+                }
+                _ => path.to_string(),
+            };
+            crate::pkfs::read_to_string(&full).map(|text| text.lines().map(str::to_string).collect())
+        })
+        .as_ref()?;
+    let start = (line as usize).saturating_sub(1);
+    Some(
+        lines
+            .iter()
+            .skip(start)
+            .take(CHANNEL_SNIPPET_LINES)
+            .map(|l| squeeze(l, SNIPPET_CHARS))
+            .collect(),
+    )
+}
+
+fn text_snippet(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(CHANNEL_SNIPPET_LINES)
+        .map(|l| squeeze(l, SNIPPET_CHARS))
+        .collect()
 }
