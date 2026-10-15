@@ -805,6 +805,7 @@ fn agents_drain_obligation() -> serde_json::Value {
     })
 }
 
+#[cfg(target_arch = "wasm32")]
 pub fn write_memory_vector(
     namespace: &str,
     key: &str,
