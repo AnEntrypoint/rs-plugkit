@@ -214,13 +214,6 @@ pub fn yaml_to_json(v: &Value) -> serde_json::Value {
     }
 }
 
-// ---------------------------------------------------------------------------
-// YAML write guard: a row-writing verb never emits a document it cannot re-read.
-// ---------------------------------------------------------------------------
-
-/// A place where a YAML document stopped parsing: 1-based `line`/`column`, plus
-/// the exact text at that point (`substring`) and the token that broke it
-/// (`token`, e.g. `": "` from a colon-space inside an unquoted prose value).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YamlFault {
     pub line: usize,
@@ -230,7 +223,6 @@ pub struct YamlFault {
 }
 
 impl YamlFault {
-    /// `line 245 column 826: "claim): client/hud is clean ..." (breaking token ": ")`
     pub fn describe(&self) -> String {
         format!(
             "line {} column {}: {:?} (breaking token {:?})",
@@ -239,10 +231,6 @@ impl YamlFault {
     }
 }
 
-/// Build a `YamlFault` from a parse error against the exact text that failed.
-/// serde_yaml reports the position in the error message and, on 0.9, via
-/// `Error::location()`; either source is enough, and both are tried so a fault
-/// is never silently dropped.
 pub fn parse_fault(text: &str, err: &serde_yaml::Error) -> Option<YamlFault> {
     let (line, column) = error_position(err)
         .or_else(|| error_position_from_message(&err.to_string()))?;
@@ -264,7 +252,6 @@ fn error_position(err: &serde_yaml::Error) -> Option<(usize, usize)> {
     Some((loc.line(), loc.column()))
 }
 
-/// Fallback for error strings shaped `... at line 245 column 826`.
 fn error_position_from_message(message: &str) -> Option<(usize, usize)> {
     let bytes = message.as_bytes();
     let needle = b"at line ";
@@ -293,8 +280,6 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
-/// The token at the head of `tail` that makes a plain scalar unparseable: a
-/// colon-space (a second mapping value), a ` #` comment, or a leading indicator.
 fn breaking_token(tail: &str) -> String {
     if let Some(rest) = tail.strip_prefix(':') {
         if rest.starts_with(' ') || rest.is_empty() {
@@ -318,7 +303,6 @@ fn breaking_token(tail: &str) -> String {
     }
 }
 
-/// True when `value` cannot be written as a YAML plain scalar.
 pub fn needs_quoting(value: &str) -> bool {
     if value.is_empty() {
         return true;
@@ -355,9 +339,6 @@ pub fn needs_quoting(value: &str) -> bool {
     )
 }
 
-/// Render `value` as a YAML scalar that cannot be misread regardless of its
-/// content: single-quoted (`'` doubled) for one-line prose, double-quoted with
-/// escapes when it carries a newline, tab or other control character.
 pub fn quote_scalar(value: &str) -> String {
     if value
         .chars()
@@ -392,10 +373,6 @@ pub fn quote_scalar(value: &str) -> String {
     out
 }
 
-/// Serialize `doc` and prove the bytes written are the document intended: the
-/// emitted text must parse back to a document equal to `doc`. A document that
-/// does not round-trip is never written, so no verb can leave an unreadable file
-/// behind.
 pub fn serialize_checked(doc: &Value) -> Result<String, String> {
     let raw = serde_yaml::to_string(doc)
         .map_err(|e| format!("the updated document did not serialize ({e})"))?;
@@ -414,9 +391,6 @@ pub fn serialize_checked(doc: &Value) -> Result<String, String> {
     Ok(raw)
 }
 
-/// Re-quote the scalar that owns the fault at `line`/`column`, changing nothing
-/// else in `text`. Returns `None` when the fault is not inside a `key: value`
-/// entry, so the caller can refuse instead of guessing.
 pub fn requote_fault(text: &str, line: usize, column: usize) -> Option<(String, YamlFault)> {
     let lines: Vec<&str> = text.split('\n').collect();
     let fault_index = line.checked_sub(1)?;
@@ -465,7 +439,6 @@ struct Entry<'a> {
     value: &'a str,
 }
 
-/// `  why: <value>` / `- id: <value>` -> its indent, optional `- ` prefix, key and raw value.
 fn parse_entry(line: &str) -> Option<Entry<'_>> {
     let body = line.trim_start_matches([' ', '\t']);
     let indent = &line[..line.len() - body.len()];
@@ -524,7 +497,6 @@ fn is_continuation(line: &str, indent: &str) -> bool {
     own_indent.len() > indent.len() && parse_entry(line).is_none()
 }
 
-/// Walk back from the fault line to the `key: value` entry that owns it.
 fn owning_entry_index(lines: &[&str], fault_index: usize) -> Option<usize> {
     if let Some(entry) = parse_entry(lines[fault_index]) {
         if !entry.value.trim().is_empty() {
@@ -548,8 +520,6 @@ fn owning_entry_index(lines: &[&str], fault_index: usize) -> Option<usize> {
     None
 }
 
-/// Strip an existing (possibly truncated) quoting so the value can be re-emitted
-/// whole: `'a''b'` -> `a'b`, `"a\"b"` -> `a"b`.
 fn unwrap_quoted(value: &str) -> String {
     let trimmed = value.trim();
     if let Some(inner) = trimmed
@@ -564,7 +534,6 @@ fn unwrap_quoted(value: &str) -> String {
     trimmed.to_string()
 }
 
-/// Outcome of one repair attempt over a document's raw bytes.
 #[derive(Debug, Clone)]
 pub struct RepairPlan {
     pub repaired: String,
@@ -573,9 +542,6 @@ pub struct RepairPlan {
     pub changed: bool,
 }
 
-/// Re-quote every unparseable scalar in `text` until the whole document parses,
-/// preserving every other byte. `max_passes` bounds the loop so a document that
-/// cannot be repaired fails instead of spinning.
 pub fn repair_text(
     text: &str,
     max_passes: usize,

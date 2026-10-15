@@ -261,9 +261,6 @@ pub fn fetch(body: &Value) -> u64 {
         Err(reply) => return reply,
     };
     if converted.trim().is_empty() {
-        // No text to answer against: the transport answered with an empty body, or the conversion
-        // stripped everything. That is a failed retrieval, and an empty answer must never be
-        // indistinguishable from a page that genuinely holds no passage matching the prompt.
         data["ok"] = json!(false);
         data["error"] = json!(format!(
             "no prompt can be answered here: {} answered status {} with {} body character(s), which converted to {} character(s) of text, so there was nothing to match \"{}\" against; this is a retrieval or conversion failure, not a finding that the page lacks the answer -- re-dispatch this fetch, or pass raw:true with no prompt to see exactly what arrived, and never read an empty answer over an empty source as \"absent\"",
@@ -806,8 +803,6 @@ fn merge_page_fields(data: &mut Value, fields: Value) {
     }
 }
 
-/// Returns the text to hand back, whether it is not the whole document, and the page fields a
-/// bounded read reports. With no page the old whole-document read answers, clipped tail included.
 fn page_or_clamp(text: &str, page: Option<&FetchPage>, cap: usize) -> (String, bool, Option<Value>) {
     let Some(page) = page else {
         let (clipped, truncated) = clamp_chars(text, cap);
@@ -1724,9 +1719,6 @@ fn percent_encode(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char)
             }
-            // A search qualifier keeps its punctuation: github reads user:lanmower,
-            // repo:owner/name and stars:>=100, and every server decodes the escaped form,
-            // so leaving them literal costs nothing and keeps the query readable.
             b':' | b'>' | b'<' | b'=' | b'/' | b'@' | b'*' | b'!' | b'(' | b')' | b',' => {
                 out.push(b as char)
             }
@@ -2318,9 +2310,6 @@ fn json_candidate(
             "{HN_SEARCH_API}?query={}&tags=story&hitsPerPage={per_page}",
             percent_encode(query)
         ),
-        // action=query&list=search answers a real snippet per hit; opensearch answers only titles,
-        // so a row would carry a url and nothing to read. Both shapes stay parseable, because a
-        // caller passing its own MediaWiki url as url gets whichever action it named.
         "wikipedia" => format!(
             "https://{}/w/api.php?action=query&list=search&srsearch={}&srlimit={per_page}&srprop=snippet&format=json",
             wiki_host(body),

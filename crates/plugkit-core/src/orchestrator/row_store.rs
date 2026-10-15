@@ -1,20 +1,3 @@
-//! One file per row: the folder IS the index.
-//!
-//! A PRD row lives at `.gm/prd/<id>.yml` and a mutable at `.gm/mutables/<id>.yml`.
-//! There is no second list to rebuild: `readdir` of the folder is the enumeration, and
-//! `item_stem(id)` maps an id to its file, so a lane writing row A cannot clobber row B
-//! even when both run at the same instant. The old single-file stores
-//! (`.gm/prd.yml`, `.gm/mutables.yml`) are still read and are absorbed into the folder
-//! on the first write, so a project mid-flight loses no row; once absorbed a legacy row
-//! is suppressed by a marker, and the folder alone is the store.
-//!
-//! Resolving an item moves it: its material is appended to the commit log
-//! (`.gm/prd-log.jsonl` / `.gm/mutables-log.jsonl`) and the item file is removed, so
-//! resolution is a move, not a flag left on a row forever.
-//!
-//! Every write is `pkfs::cas_write`, which is a temp-file-plus-rename under a per-path
-//! lock on the host: a partial write cannot leave a row unreadable.
-
 use crate::pkfs;
 use serde_yaml::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -25,9 +8,7 @@ use super::yaml_util::{serialize_checked, yaml_to_json};
 const BOM: char = '\u{feff}';
 const LOG_VERSION: u32 = 1;
 const ITEM_SUFFIX: &str = ".yml";
-/// A stem is capped so every platform's filename limit holds; the id itself is never
-/// truncated away because the file body carries it verbatim.
-const STEM_MAX_CHARS: usize = 80;
+const ITEM_STEM_MAX_CHARS: usize = 80;
 #[cfg(windows)]
 const RESERVED_STEMS: &[&str] = &[
     "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
@@ -36,8 +17,6 @@ const RESERVED_STEMS: &[&str] = &[
 #[cfg(not(windows))]
 const RESERVED_STEMS: &[&str] = &[];
 
-/// Which store: it fixes the folder, the legacy file it absorbs, the commit log it
-/// appends to and the marker that records the absorption.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Kind {
     Prd,
@@ -75,11 +54,9 @@ impl Kind {
             Kind::Mutables => "mutables",
         }
     }
-    /// The legacy single-file path, relative to the project root.
     pub fn legacy_rel(&self) -> String {
         format!(".gm/{}", self.legacy_name())
     }
-    /// The folder, relative to the project root.
     pub fn dir_rel(&self) -> String {
         format!(".gm/{}", self.dir_name())
     }
@@ -111,7 +88,6 @@ impl Store {
     pub fn mutables() -> Self {
         Self::new(Kind::Mutables)
     }
-    /// The same store rooted at another project, for the git verbs that are handed a cwd.
     pub fn for_cwd(kind: Kind, cwd: Option<&str>) -> Self {
         match cwd {
             Some(c) if !c.trim().is_empty() => {
@@ -143,10 +119,6 @@ fn sha256_hex(s: &str) -> String {
     format!("{:x}", Sha256::digest(s.as_bytes()))
 }
 
-/// The file stem for an id. Deterministic, filesystem-safe on every platform and
-/// injective enough that two ids cannot land on one file: anything the filesystem
-/// would mangle is folded to `-` and the original id is appended as a hash, so
-/// `a/b` and `a-b` get different files.
 pub fn item_stem(id: &str) -> String {
     let trimmed = id.trim();
     let mut out = String::new();
@@ -172,10 +144,10 @@ pub fn item_stem(id: &str) -> String {
     } else {
         format!("{}-{:08x}", out, fnv1a64(trimmed))
     };
-    let capped = if suffixed.chars().count() > STEM_MAX_CHARS {
+    let capped = if suffixed.chars().count() > ITEM_STEM_MAX_CHARS {
         format!(
             "{}-{:08x}",
-            suffixed.chars().take(STEM_MAX_CHARS).collect::<String>(),
+            suffixed.chars().take(ITEM_STEM_MAX_CHARS).collect::<String>(),
             fnv1a64(trimmed)
         )
     } else {
@@ -205,8 +177,6 @@ pub fn block_id(block: &Value) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// A hand-edited file may hold one mapping or a sequence of blocks; both are accepted
-/// so the per-item file stays editable by hand.
 fn parse_blocks(path: &str, text: &str) -> Result<Vec<Value>, (String, i32)> {
     if text.trim().is_empty() {
         return Ok(Vec::new());
@@ -227,8 +197,6 @@ fn parse_blocks(path: &str, text: &str) -> Result<Vec<Value>, (String, i32)> {
     })
 }
 
-/// One block is written as a bare mapping so the file reads as a document; more than
-/// one is written as the sequence it is.
 pub fn serialize_blocks(blocks: &[Value]) -> Result<String, String> {
     let doc = if blocks.len() == 1 {
         blocks[0].clone()
@@ -238,12 +206,13 @@ pub fn serialize_blocks(blocks: &[Value]) -> Result<String, String> {
     serialize_checked(&doc)
 }
 
-/// What one read of the store saw: the blocks in folder order, and the exact bytes of
-/// each item file at read time so `write_blocks` can compare-and-swap per item.
 pub struct ReadSet {
     pub blocks: Vec<Value>,
-    /// file stem -> raw text of that file at read time.
     pub raw: BTreeMap<String, String>,
+}
+
+fn is_item_file_name(name: &str) -> bool {
+    !(name.starts_with('.') || name.contains(".tmp-") || !name.ends_with(ITEM_SUFFIX))
 }
 
 fn listing_stems(store: &Store) -> Vec<String> {
@@ -259,8 +228,7 @@ fn listing_stems(store: &Store) -> Vec<String> {
             Some(n) => n,
             None => continue,
         };
-        // Dotfiles hold no row; `.tmp-<pid>` is a half-finished rename.
-        if name.starts_with('.') || name.contains(".tmp-") || !name.ends_with(ITEM_SUFFIX) {
+        if !is_item_file_name(name) {
             continue;
         }
         stems.push(name[..name.len() - ITEM_SUFFIX.len()].to_string());
@@ -270,7 +238,6 @@ fn listing_stems(store: &Store) -> Vec<String> {
 }
 
 fn legacy_stat(store: &Store) -> Option<(u64, u64)> {
-    // A missing file answers Value::Null on the host; that means absent, never size 0.
     let v = pkfs::stat(&store.legacy).filter(|v| !v.is_null())?;
     let size = v.get("size").and_then(|x| x.as_u64())?;
     let mtime = v
@@ -340,10 +307,6 @@ fn merge_blocks(existing: Vec<Value>, incoming: Vec<Value>) -> Vec<Value> {
     out
 }
 
-/// Split the legacy single file into the folder. Rows whose file already exists are
-/// merged into it instead of skipped, so a later append to the legacy file by an older
-/// binary is not dropped when it is finally absorbed. The legacy file is left in place:
-/// projects track and commit it, and every later read suppresses it through the marker.
 pub fn maybe_absorb(store: &Store) {
     if marker_matches(store) {
         return;
@@ -363,8 +326,6 @@ pub fn maybe_absorb(store: &Store) {
         let resolved = resolved_stems(store);
         let mut landed = true;
         for (stem, blocks) in groups {
-            // A row already moved into the commit log is never re-split out of the legacy
-            // file: re-materialising it would resurrect closed work as open work.
             if resolved.contains(&stem) {
                 continue;
             }
@@ -378,9 +339,6 @@ pub fn maybe_absorb(store: &Store) {
             if raw == existing {
                 continue;
             }
-            // The marker is written only once every group has reached the folder, so a
-            // group that failed to land keeps the legacy file authoritative instead of
-            // being suppressed with nothing behind it.
             if !matches!(
                 pkfs::cas_write(&path, &existing, &raw),
                 pkfs::CasWriteOutcome::Swapped
@@ -430,14 +388,10 @@ pub fn read_blocks(store: &Store) -> Result<ReadSet, (String, i32)> {
 }
 
 pub enum WriteErr {
-    /// Another lane changed one of the items this write touches.
     Conflict,
     Fatal(String),
 }
 
-/// Write only the items whose bytes changed, each compare-and-swapped against what this
-/// read saw, and remove the files of ids that are gone. Two lanes editing different rows
-/// never contend; two editing the same row resolve through the retry loop.
 pub fn write_blocks(store: &Store, read: &ReadSet, new_blocks: &[Value]) -> Result<(), WriteErr> {
     let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for block in new_blocks {
@@ -467,8 +421,6 @@ pub fn write_blocks(store: &Store, read: &ReadSet, new_blocks: &[Value]) -> Resu
             }
         }
     }
-    // A removal is a compare-and-swap too: if another lane rewrote this file since this
-    // read, its version is not ours to delete and the whole operation retries.
     for stem in read.raw.keys() {
         if groups.contains_key(stem) {
             continue;
@@ -496,8 +448,6 @@ pub fn cas_retry_write<T>(
     cas_retry_write_verified(store, max_attempts, verb, modify, |_doc| true)
 }
 
-/// The store-backed twin of `cas::cas_retry_write_verified`: identical contract, but the
-/// document is materialised from the folder and written back per row.
 pub fn cas_retry_write_verified<T>(
     store: &Store,
     max_attempts: u32,
@@ -568,7 +518,6 @@ pub fn cas_retry_write_verified<T>(
     }
 }
 
-/// The blocks of one id, read from its own file.
 pub fn item_blocks(store: &Store, id: &str) -> Vec<Value> {
     let path = item_path(store, id);
     match pkfs::read_to_string(&path) {
@@ -581,7 +530,6 @@ pub fn remove_item(store: &Store, id: &str) -> bool {
     pkfs::remove_file(&item_path(store, id))
 }
 
-/// Every commit-log entry, oldest first.
 pub fn log_entries(store: &Store) -> Vec<serde_json::Value> {
     let Some(raw) = pkfs::read_to_string(&store.log) else {
         return Vec::new();
@@ -607,8 +555,6 @@ fn resolved_stems(store: &Store) -> BTreeSet<String> {
         .collect()
 }
 
-/// The newest log entry for `id`, as a row a listing can return: the row material with
-/// `resolved` and `source` marked, so an id stays resolvable after its file is cleared.
 pub fn log_row(store: &Store, id: &str) -> Option<serde_json::Value> {
     let mut found: Option<serde_json::Value> = None;
     for entry in log_entries(store) {
@@ -642,7 +588,6 @@ pub fn log_row(store: &Store, id: &str) -> Option<serde_json::Value> {
     Some(row)
 }
 
-/// Log rows whose status matches, newest last, for listings that filter on a closed status.
 pub fn log_rows_with_status(store: &Store, statuses: &[String]) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     for entry in log_entries(store) {
@@ -696,9 +641,6 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// Append one entry to the commit log. The log is append-only and hash-chained: each
-/// line carries the sha256 of the line before it, so a truncation or an edit is visible
-/// instead of silent.
 pub fn append_log(store: &Store, mut entry: serde_json::Value) -> Result<serde_json::Value, String> {
     let ts_ms = super::state::now_ms();
     {
@@ -752,8 +694,6 @@ pub fn append_log(store: &Store, mut entry: serde_json::Value) -> Result<serde_j
     Err(format!("append to {} failed: concurrent writer", store.log))
 }
 
-/// Move a resolved item out of the store: its material is appended to the commit log and
-/// its file is removed, so the folder holds open work only.
 pub fn retire_to_log(
     store: &Store,
     id: &str,

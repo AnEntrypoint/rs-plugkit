@@ -11,12 +11,10 @@ pub fn mutables_path() -> std::path::PathBuf {
     gm_dir().join("mutables.yml")
 }
 
-/// The folder that holds one file per mutable: the index, read on every access.
 pub fn mutables_dir() -> std::path::PathBuf {
     gm_dir().join("mutables")
 }
 
-/// The append-only commit log a resolved mutable's material is moved into.
 pub fn mutables_log_path() -> std::path::PathBuf {
     gm_dir().join("mutables-log.jsonl")
 }
@@ -459,8 +457,6 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
             id_ok && status_ok
         })
         .collect();
-    // A resolved mutable is moved out of the folder into the commit log, so an id
-    // stays answerable here: the log is searched for any id the folder no longer holds.
     let store = row_store::Store::mutables();
     if !wanted_ids.is_empty() {
         for want in &wanted_ids {
@@ -884,8 +880,6 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         Ok(v) => v,
         Err((out, err, rc)) => return (out, err, rc),
     };
-    // Resolution moves the material: the mutable's content is appended to the commit
-    // log and its file is cleared, so the folder holds open work only.
     let filed_id = resolved_id.clone().unwrap_or_else(|| trimmed.to_string());
     let filed = match row_store::retire_to_log(
         &store,

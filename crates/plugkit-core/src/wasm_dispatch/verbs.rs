@@ -19,9 +19,6 @@ mod web;
 use git::*;
 use web::{fetch, websearch};
 
-/// `_`-prefixed keys a verb owns itself and must keep receiving: the async git replay id
-/// (`git_async_entry` reads it back to resume a parked plan) and the instruction lease list.
-/// Every other `_`-prefixed key is transport bookkeeping no verb is allowed to see.
 const VERB_OWNED_RESERVED_BODY_KEYS: &[&str] = &["_plan", "_lease_sessions"];
 pub(crate) use git::GIT_PROTECTED_PATHSPECS;
 use search::*;
@@ -214,13 +211,6 @@ pub const ERR_CODE_DANGLING_SCAN_UNREADABLE: &str = "dangling_scan_unreadable";
 pub const ERR_CODE_APPEND_ONLY_SHRINK: &str = "append_only_shrink_refused";
 pub const ERR_CODE_APPEND_ONLY_REWRITE: &str = "append_only_rewrite_refused";
 
-/// Files no lane may shorten: the witness log is the (id, hash, ts) audit primitive, so a run adds
-/// one line and never rewrites the file. Measured 2026-10-10 by session orch-main-r86-witness-1:
-/// a concurrent whole-file write took `.gm/witness-log.md` from 4675 lines to 3. `prd.yml`,
-/// `mutables.yml` and the one-file-per-row folders are absent on purpose: their verbs reconcile
-/// per row and must keep rewriting a row. The resolved-row commit logs
-/// (`.gm/prd-log.jsonl`, `.gm/mutables-log.jsonl`) are append-only by construction -- the only
-/// writer appends one line under a CAS, so they need no guard here.
 const APPEND_ONLY_PATH_SUFFIXES: &[&str] = &["/.gm/witness-log.md"];
 
 fn shared_store_contract() -> Value {
@@ -932,11 +922,9 @@ fn fs_read(body: &Value) -> u64 {
     }
 }
 
-// A directory has no contents to read, so `host_read` returns nothing for one and the caller was
-// told only "file read failed": no reason, no listing, and no verb to turn to. Listing it here
-// answers the question the caller actually asked, bounded so a wide directory cannot fill a reply.
 const FS_READ_DIRECTORY_DEFAULT_LIMIT: usize = 100;
 const FS_READ_DIRECTORY_MAX_LIMIT: usize = 500;
+const FS_READ_DIRECTORY_ENTRY_CAP_KEYS: &[&str] = &["max_entries", "entries_limit", "entry_limit"];
 
 fn fs_read_directory(path: &str, body: &Value) -> u64 {
     let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
@@ -957,10 +945,7 @@ fn fs_read_directory(path: &str, body: &Value) -> u64 {
             )
         }
     };
-    // `limit` is already spoken for: it is one of fs_read's line-range aliases, so a caller asking
-    // for five entries would be asking for five lines of a file that has none. The cap on entries
-    // therefore has its own key, and it stays capped so a wide directory cannot fill a reply.
-    let limit = ["max_entries", "entries_limit", "entry_limit"]
+    let limit = FS_READ_DIRECTORY_ENTRY_CAP_KEYS
         .iter()
         .find_map(|key| body.get(*key).and_then(Value::as_u64))
         .filter(|n| *n > 0)
@@ -1153,10 +1138,6 @@ fn append_only_bytes_on_disk(path: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Open for append, write, close. The host ABI has no append import, so this runs through
-/// `host_exec_js` exactly as `config_sync.rs` does for `fs.renameSync`: the file is opened in
-/// append mode, written and closed in one call, so three concurrent appenders cannot interleave
-/// into a lost update and no read of the file is ever involved.
 fn fs_append(path: &str, content: &str) -> u64 {
     let Ok(target) = serde_json::to_string(&crate::pkfs::anchor(path)) else {
         return err("fs_write", "append failed: the path is not encodable");
@@ -2256,11 +2237,6 @@ fn config_sync_now_force_immediate_refresh(_body: &Value) -> u64 {
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("forced".to_string(), json!(true));
     }
-    // "Force immediate refresh" is a promise about the files on disk, not about the
-    // dispatch: the verb is the one caller that may not answer ok while the vendored
-    // config is still the previous version. A forced refresh that could not confirm
-    // the checkout stands at the published tip reports that as a failure naming why,
-    // so a stale graph cannot be mistaken for a synced one.
     match r.degraded.clone() {
         Some(reason) => err_json(
             "config-sync-now",
@@ -2792,15 +2768,6 @@ fn raw_file_body_as_json(verb: &str, body_s: &str) -> Option<Value> {
 }
 
 
-/// Drops the reserved `_` namespace from a body before any verb validates it.
-///
-/// gm-mcp stamps the lane-wait budget it is going to poll for onto every JSON body it publishes
-/// (`_agentplug_lane_wait_ms`, mirrored by `LANE_WAIT_MS_BODY_KEY` in agentplug-runner) so the
-/// runner can bound the lane wait by the caller's budget. The caller never writes those keys, so
-/// a strict per-verb field validator that has never heard of the transport refused bodies it
-/// should have served: codesearch and the git verbs answered `unknown body fields` for
-/// bookkeeping alone. Stripping here, at the one point every body passes through, keeps a
-/// misspelled caller field refused while the host's own keys never reach a validator.
 fn strip_reserved_body_keys(body: &mut Value) {
     if let Some(map) = body.as_object_mut() {
         map.retain(|key, _| {
@@ -2936,10 +2903,6 @@ fn codeinsight_action(verb: &str, action: &str, body: &Value) -> u64 {
     }
 }
 
-// `verb` is the selector the docs and the skill prose send (`{"verb":"callers","symbol":"..."}`);
-// `action` and `mode` are the same selector under its older spellings and stay authoritative when
-// both arrive. Reading none of the three is the index overview, which is the reply that used to
-// answer every call because `verb` was never read.
 const CODEINSIGHT_SELECTOR_KEYS: &[&str] = &["action", "mode", "verb"];
 
 fn codeinsight(body: &Value) -> u64 {
