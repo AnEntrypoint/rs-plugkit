@@ -2168,6 +2168,28 @@ pub(super) fn git_amend(body: &Value) -> u64 {
     git_commit(&amended)
 }
 
+pub(super) fn commit_message_shape(message: &str) -> Result<(), String> {
+    let mut lines = message.lines();
+    let subject_len = lines.next().unwrap_or("").chars().count();
+    if subject_len > 50 {
+        return Err(format!(
+            "subject is {} characters; the 50/72 rule allows at most 50. Re-draft the subject.",
+            subject_len
+        ));
+    }
+    for (index, line) in lines.enumerate() {
+        let width = line.chars().count();
+        if width > 72 {
+            return Err(format!(
+                "body line {} is {} characters; the 50/72 rule wraps the body at 72. Re-wrap it.",
+                index + 2,
+                width
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn git_commit(body: &Value) -> u64 {
     git_async_entry("git_commit", body, |body, plan| {
         let cwd = body_cwd(body);
@@ -2178,6 +2200,9 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             .trim();
         if message.is_empty() {
             return Ok(err("git_commit", "message required"));
+        }
+        if let Err(reason) = commit_message_shape(message) {
+            return Ok(err("git_commit", &reason));
         }
         let allow_empty = body
             .get("allow_empty")
