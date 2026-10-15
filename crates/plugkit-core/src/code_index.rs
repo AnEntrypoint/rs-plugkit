@@ -4136,7 +4136,10 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
     } else {
         split_lines_at_budget(paths, budget)
     };
-    let exhaustive = !files_truncated && !matches_truncated && universe.listing_complete;
+    let corpus_blind_spot = universe.git_tracked_files == 0
+        && universe.git_untracked_files > 0
+        && !universe.listing_complete;
+    let exhaustive = !files_truncated && !matches_truncated && universe.listing_complete && !corpus_blind_spot;
     let mut out = serde_json::Map::new();
     out.insert("ok".to_string(), json!(true));
     out.insert("mode".to_string(), json!("filename"));
@@ -4164,6 +4167,28 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
     out.insert("returned_count".to_string(), json!(returned_count));
     out.insert("scanned".to_string(), json!(full_files.len()));
     out.insert("file_source".to_string(), json!(universe.source.label()));
+    if universe.source == crate::scan_universe::FileSource::Git
+        || universe.git_tracked_files > 0
+        || universe.git_untracked_files > 0
+    {
+        out.insert("tracked_files_listed".to_string(), json!(universe.git_tracked_files));
+        out.insert(
+            "untracked_files_listed".to_string(),
+            json!(universe.git_untracked_files),
+        );
+    }
+    insert_nested_worktree_fields(&mut out, universe.git_nested_worktrees, universe.git_nested_untracked_failed);
+    if corpus_blind_spot {
+        out.insert(
+            "corpus_blind_spot".to_string(),
+            json!({
+                "tracked_files_listed": universe.git_tracked_files,
+                "untracked_files_listed": universe.git_untracked_files,
+                "reason": crate::scan_universe::CORPUS_BLIND_SPOT_REASON,
+                "note": "this corpus does not hold every source file here, so a zero over it is not a finding: re-scope with path, or pass refresh: true to walk the disk, before concluding the name is absent"
+            }),
+        );
+    }
     out.insert("exhaustive".to_string(), json!(exhaustive));
     insert_excluded_by_rule(&mut out, &universe.excluded);
     if matches_truncated {
@@ -4775,6 +4800,20 @@ where
     }
     out.sort_unstable();
     out
+}
+
+fn insert_nested_worktree_fields(out: &mut serde_json::Map<String, Value>, nested_worktrees: usize, untracked_failed: bool) {
+    if nested_worktrees == 0 && !untracked_failed {
+        return;
+    }
+    out.insert("nested_worktrees".to_string(), json!(nested_worktrees));
+    if untracked_failed {
+        out.insert("nested_worktrees_unlisted".to_string(), json!(true));
+        out.insert(
+            "nested_worktrees_note".to_string(),
+            json!(crate::scan_universe::NESTED_WORKTREE_BLIND_SPOT_NOTE),
+        );
+    }
 }
 
 fn insert_excluded_by_rule(
@@ -5653,6 +5692,16 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         && !glob_matched_no_files
         && glob_outside_path.is_empty()
         && !split_form_truncated;
+    // A worktree git tracks nothing in is walked as well, so its corpus covers the tree. When that
+    // walk could not finish, the corpus does not hold every source file here and a zero over it
+    // must not be reported as complete: it would read as "the symbol is absent" when it means "the
+    // files that could hold it were never listed".
+    let corpus_blind_spot = universe.git_tracked_files == 0
+        && universe.git_untracked_files > 0
+        && !universe.listing_complete;
+    if corpus_blind_spot {
+        listed_files_all_read_within_scope = false;
+    }
     if budget_exhausted && files_scanned == 0 {
         return json!({
             "ok": false,
@@ -5789,12 +5838,35 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     }
     if has_glob_filter && (req.verbose || matched_nothing_needs_coverage_fields || glob_matched_no_files) { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
     if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
+    // The corpus source is reported on every reply, not only on an empty one: a git corpus over a
+    // worktree git tracks nothing in is the blind spot that makes a zero read as "absent", so the
+    // caller has to be able to see which corpus answered and how much of it git actually tracked.
     let file_source = universe.source.label();
-    if req.verbose || matched_nothing_needs_coverage_fields || file_source != "git" || req.no_ignore {
-        out.insert("file_source".to_string(), json!(file_source));
+    out.insert("file_source".to_string(), json!(file_source));
+    out.insert(
+        "file_source_detail".to_string(),
+        json!(universe.source.detail()),
+    );
+    if universe.source == crate::scan_universe::FileSource::Git
+        || universe.git_tracked_files > 0
+        || universe.git_untracked_files > 0
+    {
+        out.insert("tracked_files_listed".to_string(), json!(universe.git_tracked_files));
         out.insert(
-            "file_source_detail".to_string(),
-            json!(universe.source.detail()),
+            "untracked_files_listed".to_string(),
+            json!(universe.git_untracked_files),
+        );
+    }
+    insert_nested_worktree_fields(&mut out, universe.git_nested_worktrees, universe.git_nested_untracked_failed);
+    if corpus_blind_spot {
+        out.insert(
+            "corpus_blind_spot".to_string(),
+            json!({
+                "tracked_files_listed": universe.git_tracked_files,
+                "untracked_files_listed": universe.git_untracked_files,
+                "reason": crate::scan_universe::CORPUS_BLIND_SPOT_REASON,
+                "note": "this corpus does not hold every source file here, so a zero over it is not a finding: re-scope with path, or pass refresh: true to walk the disk, before concluding the symbol is absent"
+            }),
         );
     }
     if req.refresh {
@@ -5809,9 +5881,12 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     }
     if !universe.listing_complete {
         out.insert("listing_incomplete".to_string(), json!(true));
-        if let Some(reason) = &universe.walk_reason {
-            out.insert("walk_reason".to_string(), json!(reason));
-        }
+    }
+    // Why this corpus is a walk at all rides on every reply, not only on a cut one: "git tracks no
+    // file in this worktree" is the reason the corpus is not git's view, and a caller weighing a
+    // zero needs it as much as a caller weighing an incomplete listing.
+    if let Some(reason) = &universe.walk_reason {
+        out.insert("walk_reason".to_string(), json!(reason));
     }
     insert_excluded_by_rule(&mut out, &universe.excluded);
     out.insert("term_combination".to_string(), json!(combination.label()));
