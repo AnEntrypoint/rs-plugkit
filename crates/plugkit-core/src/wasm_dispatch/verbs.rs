@@ -3037,7 +3037,14 @@ fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
 fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
     #[cfg(target_arch = "wasm32")]
     let dispatch_start_ms = unsafe { host_now_ms() };
-    let gate = crate::gates::check_dispatch(verb, body);
+    let synthesized_gate_body;
+    let gate_body = if body.is_null() {
+        synthesized_gate_body = serde_json::json!({ "command": body_s });
+        &synthesized_gate_body
+    } else {
+        body
+    };
+    let gate = crate::gates::check_dispatch(verb, gate_body);
     if !gate.allowed {
         return pack(gate.to_denial_json(verb).to_string());
     }
