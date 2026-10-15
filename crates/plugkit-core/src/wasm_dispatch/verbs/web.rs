@@ -11,8 +11,10 @@ use super::{err, err_coded, err_json, ok, ERR_CODE_INVALID_ARGS};
 pub const FETCH_DEFAULT_MAX_CHARS: usize = 6_000;
 pub const FETCH_RAW_DEFAULT_MAX_CHARS: usize = 1_000_000;
 pub const FETCH_MAX_MAX_CHARS: usize = 4_000_000;
+pub const FETCH_PAGE_DEFAULT_MAX_CHARS: usize = 24_000;
 pub const FETCH_DEFAULT_ANSWER_CHARS: usize = 4_000;
 pub const FETCH_MAX_ANSWER_CHARS: usize = 200_000;
+pub const FETCH_EMPTY_SOURCE_ERROR_CODE: &str = "fetch_empty_source";
 
 pub const WEBSEARCH_DEFAULT_LIMIT: usize = 8;
 pub const WEBSEARCH_MAX_LIMIT: usize = 25;
@@ -51,7 +53,7 @@ pub const WEBSEARCH_USER_AGENT: &str =
 pub const GITHUB_ACCEPT_HEADER: &str = "application/vnd.github+json";
 
 pub const FETCH_HELP: &str = "\
-fetch {url, | query, prompt?, max_chars?, raw?, method?, headers?, body?, timeoutMs?, answer_max_chars?}.
+fetch {url, | query, prompt?, max_chars?, raw?, method?, headers?, body?, timeoutMs?, answer_max_chars?, offset?, length?, start_line?, end_line?, lines?}.
   url: the page to fetch; https:// and http:// only, no whitespace, at most 2048 bytes.
   The reply is the READABLE page, not the transport payload: HTML is converted to markdown before
   it is returned (head, script, style, svg, nav, header, footer, aside, form and iframe blocks are
@@ -74,17 +76,33 @@ fetch {url, | query, prompt?, max_chars?, raw?, method?, headers?, body?, timeou
   prompt: when present, the reply answers it instead of carrying the page. The answer is the set of
           passages of the converted page that best match the prompt, so it is compact and verbatim:
           gm has no outbound model dependency, and answer_mode is always \"extractive\". Pass no
-          prompt, or raw:true, to get the page itself.
+          prompt, or raw:true, to get the page itself. The reply's answer_status separates the two
+          ways an answer can be empty: \"matched\" means passages were selected, \"no_match\" means
+          the page has text and none of it scored against the prompt, and \"empty_source\" means the
+          retrieval or the conversion produced no text at all, which is a failure and not a finding
+          -- it comes back with ok:false and error_code \"fetch_empty_source\", so an empty answer is
+          never indistinguishable from a failed one.
   max_chars: cap on characters returned (default 6000, ceiling 4000000). One fetch can therefore
              never dump a whole 280k-character page into the reply; the default is small enough to
              read inline, and a clipped tail names how many characters were dropped.
+  offset/length: read one bounded page of the document instead of its head, so a document longer
+             than the cap is readable end to end. offset is a 0-based character offset and length
+             the number of characters to return; a page defaults to 24000 characters, not 6000, and
+             an explicit max_chars still caps it. start_line/end_line (1-based, inclusive) or
+             start_line plus lines (a count) do the same by line. A page reply carries offset,
+             length, total_chars, has_more and next_offset, or start_line, end_line, total_lines,
+             has_more and next_start_line, so the next page is one dispatch away. Do not mix the
+             character keys with the line keys in one call; a page is never padded with the
+             \"...[+N chars clipped]\" tail a clipped whole-document read carries.
   answer_max_chars: cap on the prompt answer (default 4000).
   raw: true (aliases full_response, fullResponse) returns the original body with no conversion and
        no prompt answering; its default max_chars is 1000000.
   method, headers, body, opts, timeoutMs: passed to the transport; timeoutMs defaults to 60000,
        ceiling 600000.
 Reply fields: url, status, content_type, body_chars, converted, max_chars, truncated, and either
-content (the markdown) or prompt/answer/answer_mode/answer_chars/passages. help:true returns this
+content (the markdown) or prompt/answer/answer_mode/answer_status/answer_chars/passages; a paged
+read adds offset/length/total_chars/has_more/next_offset or
+start_line/end_line/total_lines/has_more/next_start_line. help:true returns this
 text and sends no request.";
 
 pub const WEBSEARCH_HELP: &str = "\
@@ -151,8 +169,14 @@ pub fn fetch(body: &Value) -> u64 {
         Err(reply) => return reply,
     };
     let raw_requested = flag(body, &["raw", "full_response", "fullResponse"]);
+    let page = match fetch_page(body, "fetch") {
+        Ok(page) => page,
+        Err(reply) => return reply,
+    };
     let max_default = if raw_requested {
         FETCH_RAW_DEFAULT_MAX_CHARS
+    } else if page.is_some() {
+        FETCH_PAGE_DEFAULT_MAX_CHARS.max(page.as_ref().and_then(|p| p.length).unwrap_or(0))
     } else {
         FETCH_DEFAULT_MAX_CHARS
     };
@@ -197,9 +221,12 @@ pub fn fetch(body: &Value) -> u64 {
     }
 
     if raw_requested || !encoding.is_empty() {
-        let (text, truncated) = clamp_chars(original, max_chars);
+        let (text, truncated, page_fields) = page_or_clamp(original, page.as_ref(), max_chars);
         data["body"] = json!(text);
         data["truncated"] = json!(truncated);
+        if let Some(fields) = page_fields {
+            merge_page_fields(&mut data, fields);
+        }
         return ok("fetch", data);
     }
 
@@ -213,9 +240,12 @@ pub fn fetch(body: &Value) -> u64 {
     data["content_chars"] = json!(converted.chars().count());
 
     if prompt.is_empty() {
-        let (text, truncated) = clamp_chars(&converted, max_chars);
+        let (text, truncated, page_fields) = page_or_clamp(&converted, page.as_ref(), max_chars);
         data["content"] = json!(text);
         data["truncated"] = json!(truncated);
+        if let Some(fields) = page_fields {
+            merge_page_fields(&mut data, fields);
+        }
         return ok("fetch", data);
     }
 
@@ -230,10 +260,36 @@ pub fn fetch(body: &Value) -> u64 {
         Ok(n) => n,
         Err(reply) => return reply,
     };
+    if converted.trim().is_empty() {
+        // No text to answer against: the transport answered with an empty body, or the conversion
+        // stripped everything. That is a failed retrieval, and an empty answer must never be
+        // indistinguishable from a page that genuinely holds no passage matching the prompt.
+        data["ok"] = json!(false);
+        data["error"] = json!(format!(
+            "no prompt can be answered here: {} answered status {} with {} body character(s), which converted to {} character(s) of text, so there was nothing to match \"{}\" against; this is a retrieval or conversion failure, not a finding that the page lacks the answer -- re-dispatch this fetch, or pass raw:true with no prompt to see exactly what arrived, and never read an empty answer over an empty source as \"absent\"",
+            url,
+            v.get("status").and_then(|s| s.as_u64()).map(|n| n.to_string()).unwrap_or_else(|| "unknown".to_string()),
+            original.chars().count(),
+            converted.chars().count(),
+            prompt,
+        ));
+        data["error_code"] = json!(FETCH_EMPTY_SOURCE_ERROR_CODE);
+        data["next_dispatch_hint"] = json!("instruction");
+        data["prompt"] = json!(prompt);
+        data["answer"] = json!("");
+        data["answer_status"] = json!("empty_source");
+        data["answer_chars"] = json!(0);
+        data["answer_mode"] = json!("extractive");
+        data["passages"] = json!(Vec::<Value>::new());
+        data["answer_note"] = json!("an empty source answers no prompt: answer_status \"empty_source\" means the retrieval or the conversion produced no text, so the empty answer is a failure and not a finding; \"no_match\" is the status that means the page holds no passage matching the prompt");
+        return err_json("fetch", data);
+    }
     let (answer, passages) = extractive_answer(&converted, &prompt, budget);
+    let matched = !answer.trim().is_empty();
     data["prompt"] = json!(prompt);
     data["answer"] = json!(answer);
     data["answer_mode"] = json!("extractive");
+    data["answer_status"] = json!(if matched { "matched" } else { "no_match" });
     data["answer_chars"] = json!(answer.chars().count());
     data["passages"] = json!(passages);
     data["answer_note"] = json!("gm holds no outbound model credential, so a prompt is answered by selecting the passages of the converted page that match it best, verbatim. Pass no prompt for the page, or raw:true for the untouched response body.");
@@ -634,6 +690,192 @@ fn host_matches_any(host: &str, domains: &[String]) -> bool {
     domains
         .iter()
         .any(|d| host == d.as_str() || host.ends_with(&format!(".{d}")))
+}
+
+const FETCH_OFFSET_KEYS: &[&str] = &["offset"];
+const FETCH_LENGTH_KEYS: &[&str] = &["length", "len"];
+const FETCH_START_LINE_KEYS: &[&str] = &["start_line", "startLine"];
+const FETCH_END_LINE_KEYS: &[&str] = &["end_line", "endLine"];
+const FETCH_LINES_KEYS: &[&str] = &["lines", "line_count", "lineCount"];
+const FETCH_PAGE_KEYS: &str = "offset/length (characters, offset 0-based) or start_line/end_line (1-based, inclusive), where lines is a line count after start_line";
+
+struct FetchPage {
+    offset: Option<usize>,
+    length: Option<usize>,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    lines: Option<usize>,
+}
+
+impl FetchPage {
+    fn line_mode(&self) -> bool {
+        self.start_line.is_some() || self.end_line.is_some() || self.lines.is_some()
+    }
+}
+
+fn optional_usize(
+    body: &Value,
+    keys: &[&str],
+    verb: &str,
+    label: &str,
+) -> Result<Option<usize>, u64> {
+    for key in keys {
+        let raw = match body.get(*key) {
+            None | Some(Value::Null) => continue,
+            Some(v) => v,
+        };
+        let parsed = match raw {
+            Value::Number(n) => n.as_u64().map(|n| n as usize),
+            Value::String(s) => s.trim().parse::<u64>().ok().map(|n| n as usize),
+            _ => None,
+        };
+        return match parsed {
+            None => Err(err_json(
+                verb,
+                json!({ "error": format!("{label} must be a non-negative integer"), "field": key }),
+            )),
+            Some(n) if n > FETCH_MAX_MAX_CHARS => Err(err_json(
+                verb,
+                json!({ "error": format!("{label} above ceiling"), "field": key, "max": FETCH_MAX_MAX_CHARS, "received": n }),
+            )),
+            Some(n) => Ok(Some(n)),
+        };
+    }
+    Ok(None)
+}
+
+fn fetch_page(body: &Value, verb: &str) -> Result<Option<FetchPage>, u64> {
+    let page = FetchPage {
+        offset: optional_usize(body, FETCH_OFFSET_KEYS, verb, "offset")?,
+        length: optional_usize(body, FETCH_LENGTH_KEYS, verb, "length")?,
+        start_line: optional_usize(body, FETCH_START_LINE_KEYS, verb, "start_line")?,
+        end_line: optional_usize(body, FETCH_END_LINE_KEYS, verb, "end_line")?,
+        lines: optional_usize(body, FETCH_LINES_KEYS, verb, "lines")?,
+    };
+    let asked_for_a_page = page.offset.is_some()
+        || page.length.is_some()
+        || page.start_line.is_some()
+        || page.end_line.is_some()
+        || page.lines.is_some();
+    if !asked_for_a_page {
+        return Ok(None);
+    }
+    if (page.offset.is_some() || page.length.is_some()) && page.line_mode() {
+        return Err(err_json(
+            verb,
+            json!({
+                "error": format!("fetch reads one page at a time: pass {FETCH_PAGE_KEYS}, never a character key and a line key together"),
+                "field": "offset",
+            }),
+        ));
+    }
+    if page.start_line == Some(0) {
+        return Err(err_json(
+            verb,
+            json!({ "error": "start_line is 1-based, so 0 is not a line; the first line is 1", "field": "start_line" }),
+        ));
+    }
+    if page.end_line == Some(0) {
+        return Err(err_json(
+            verb,
+            json!({ "error": "end_line is 1-based, so 0 is not a line; the first line is 1", "field": "end_line" }),
+        ));
+    }
+    if page.lines == Some(0) {
+        return Err(err_json(
+            verb,
+            json!({ "error": "lines is a count of lines, so it must be at least 1", "field": "lines" }),
+        ));
+    }
+    if let (Some(start), Some(end)) = (page.start_line, page.end_line) {
+        if end < start {
+            return Err(err_json(
+                verb,
+                json!({ "error": format!("end_line ({end}) is before start_line ({start}); both are 1-based and inclusive"), "field": "end_line" }),
+            ));
+        }
+    }
+    Ok(Some(page))
+}
+
+fn merge_page_fields(data: &mut Value, fields: Value) {
+    if let (Some(target), Some(source)) = (data.as_object_mut(), fields.as_object()) {
+        for (key, value) in source {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+/// Returns the text to hand back, whether it is not the whole document, and the page fields a
+/// bounded read reports. With no page the old whole-document read answers, clipped tail included.
+fn page_or_clamp(text: &str, page: Option<&FetchPage>, cap: usize) -> (String, bool, Option<Value>) {
+    let Some(page) = page else {
+        let (clipped, truncated) = clamp_chars(text, cap);
+        return (clipped, truncated, None);
+    };
+    let total_chars = text.chars().count();
+    if page.line_mode() {
+        let lines: Vec<&str> = text.split('\n').collect();
+        let total_lines = lines.len();
+        let start = page.start_line.unwrap_or(1).max(1);
+        let requested_end = page
+            .end_line
+            .or_else(|| page.lines.map(|n| start + n - 1))
+            .unwrap_or(total_lines);
+        let end = requested_end.min(total_lines);
+        let mut out = if start > total_lines {
+            String::new()
+        } else {
+            lines[start - 1..end].join("\n")
+        };
+        let clipped = out.chars().count() > cap;
+        if clipped {
+            out = take_chars(&out, cap);
+        }
+        let mut fields = json!({
+            "start_line": start,
+            "end_line": end,
+            "lines": if out.is_empty() { 0 } else { out.split('\n').count() },
+            "total_lines": total_lines,
+            "has_more": end < total_lines,
+        });
+        if end < requested_end {
+            fields["end_line_requested"] = json!(requested_end);
+        }
+        if end < total_lines {
+            fields["next_start_line"] = json!(end + 1);
+        }
+        if clipped {
+            fields["page_clipped_at_max_chars"] = json!(true);
+        }
+        fields["returned_chars"] = json!(out.chars().count());
+        let truncated = total_lines == 0 || start > 1 || end < total_lines || clipped;
+        return (out, truncated, Some(fields));
+    }
+    let offset = page.offset.unwrap_or(0).min(total_chars);
+    let wanted = page
+        .length
+        .unwrap_or_else(|| total_chars.saturating_sub(offset));
+    let end = offset.saturating_add(wanted).min(total_chars);
+    let mut out: String = text.chars().skip(offset).take(end - offset).collect();
+    let clipped = out.chars().count() > cap;
+    if clipped {
+        out = take_chars(&out, cap);
+    }
+    let mut fields = json!({
+        "offset": offset,
+        "length": out.chars().count(),
+        "total_chars": total_chars,
+        "has_more": end < total_chars,
+    });
+    if end < total_chars {
+        fields["next_offset"] = json!(end);
+    }
+    if clipped {
+        fields["page_clipped_at_max_chars"] = json!(true);
+    }
+    let truncated = offset > 0 || end < total_chars || clipped;
+    (out, truncated, Some(fields))
 }
 
 pub fn clamp_chars(s: &str, max: usize) -> (String, bool) {
@@ -1155,13 +1397,62 @@ fn prompt_terms(prompt: &str) -> Vec<String> {
     out
 }
 
-fn split_blocks(markdown: &str) -> Vec<String> {
-    markdown
-        .split("\n\n")
-        .map(|b| b.trim())
-        .filter(|b| b.chars().count() >= 40)
-        .map(|b| b.to_string())
-        .collect()
+const PASSAGE_MIN_CHARS: usize = 40;
+const PASSAGE_SOFT_CHARS: usize = 700;
+const PASSAGE_HARD_CHARS: usize = 1_200;
+const PASSAGE_MAX_COUNT: usize = 8;
+
+fn split_passages(markdown: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for block in markdown.split("\n\n") {
+        let block = block.trim();
+        let len = block.chars().count();
+        if len < PASSAGE_MIN_CHARS {
+            continue;
+        }
+        if len <= PASSAGE_HARD_CHARS {
+            out.push(block.to_string());
+        } else {
+            out.extend(split_long_block(block));
+        }
+    }
+    out
+}
+
+fn split_long_block(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out: Vec<String> = Vec::new();
+    let mut start = 0usize;
+    while start < n {
+        let soft = (start + PASSAGE_SOFT_CHARS).min(n);
+        let mut end = soft;
+        if soft < n {
+            let hard = (start + PASSAGE_HARD_CHARS).min(n);
+            let mut cut = None;
+            let mut space = None;
+            let mut i = soft;
+            while i < hard {
+                let c = chars[i];
+                if c == '\n' || c == ',' || c == ';' || c == '}' || c == ']' || c == '.' {
+                    cut = Some(i + 1);
+                    break;
+                }
+                if space.is_none() && c.is_whitespace() {
+                    space = Some(i + 1);
+                }
+                i += 1;
+            }
+            end = cut.or(space).unwrap_or(soft);
+        }
+        let piece: String = chars[start..end].iter().collect();
+        let piece = piece.trim().to_string();
+        if piece.chars().count() >= PASSAGE_MIN_CHARS {
+            out.push(piece);
+        }
+        start = end;
+    }
+    out
 }
 
 fn document_frequencies(blocks: &[String], terms: &[String]) -> HashMap<String, usize> {
@@ -1186,42 +1477,45 @@ fn matched_terms(block: &str, terms: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn score_block(block: &str, terms: &[String], df: &HashMap<String, usize>, total: f64) -> f64 {
-    let low = block.to_ascii_lowercase();
-    let mut score = 0.0f64;
-    let mut hits = 0usize;
+fn score_passage(passage: &str, terms: &[String], df: &HashMap<String, usize>, total: f64) -> f64 {
+    let low = passage.to_ascii_lowercase();
+    let mut idf_sum = 0.0f64;
+    let mut distinct = 0usize;
+    let mut occurrences = 0usize;
     for t in terms {
-        if low.contains(t.as_str()) {
-            hits += 1;
-            let d = *df.get(t).unwrap_or(&1) as f64;
-            score += 1.0 + (total / (1.0 + d)).ln().max(0.0);
+        let hits = low.match_indices(t.as_str()).count();
+        if hits == 0 {
+            continue;
         }
+        distinct += 1;
+        occurrences += hits;
+        let d = *df.get(t).unwrap_or(&1) as f64;
+        idf_sum += 1.0 + (total / (1.0 + d)).ln().max(0.0);
     }
-    if hits == 0 {
+    if distinct == 0 {
         return 0.0;
     }
-    score += hits as f64 * 0.5;
-    if block.chars().count() < 1200 {
-        score += 0.5;
-    }
+    let coverage = distinct as f64 / terms.len() as f64;
+    let per_1000 = occurrences as f64 / (passage.chars().count() as f64 / 1000.0).max(0.05);
+    let mut score = idf_sum * (0.5 + coverage) + (1.0 + per_1000).ln();
     if low.starts_with('#') {
-        score += 0.75;
+        score += 0.25;
     }
     score
 }
 
 pub fn extractive_answer(markdown: &str, prompt: &str, budget: usize) -> (String, Vec<Value>) {
     let terms = prompt_terms(prompt);
-    let blocks = split_blocks(markdown);
-    if terms.is_empty() || blocks.is_empty() {
+    let candidates = split_passages(markdown);
+    if terms.is_empty() || candidates.is_empty() {
         return (take_chars(markdown, budget), Vec::new());
     }
-    let total = blocks.len() as f64;
-    let df = document_frequencies(&blocks, &terms);
-    let mut scored: Vec<(usize, f64)> = blocks
+    let total = candidates.len() as f64;
+    let df = document_frequencies(&candidates, &terms);
+    let mut scored: Vec<(usize, f64)> = candidates
         .iter()
         .enumerate()
-        .map(|(idx, b)| (idx, score_block(b, &terms, &df, total)))
+        .map(|(idx, b)| (idx, score_passage(b, &terms, &df, total)))
         .filter(|(_, s)| *s > 0.0)
         .collect();
     scored.sort_by(|a, b| {
@@ -1233,14 +1527,14 @@ pub fn extractive_answer(markdown: &str, prompt: &str, budget: usize) -> (String
     let mut passages: Vec<Value> = Vec::new();
     let mut used = 0usize;
     for (idx, score) in scored {
-        if used >= budget || passages.len() >= 8 {
+        if used >= budget || passages.len() >= PASSAGE_MAX_COUNT {
             break;
         }
         let room = budget.saturating_sub(used);
         if room < 80 {
             break;
         }
-        let piece = take_chars(&blocks[idx], room);
+        let piece = take_chars(&candidates[idx], room);
         if piece.is_empty() {
             continue;
         }
@@ -1252,7 +1546,7 @@ pub fn extractive_answer(markdown: &str, prompt: &str, budget: usize) -> (String
         passages.push(json!({
             "chars": piece.chars().count(),
             "score": (score * 100.0).round() / 100.0,
-            "matched_terms": matched_terms(&blocks[idx], &terms),
+            "matched_terms": matched_terms(&candidates[idx], &terms),
         }));
     }
     if passages.is_empty() {
