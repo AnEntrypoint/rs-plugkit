@@ -2464,7 +2464,55 @@ pub(super) fn codesearch(body: &Value) -> u64 {
     if let (Some(note), Some(map)) = (split_form_not_searched_note(body), v.as_object_mut()) {
         map.insert("split_form_not_searched".to_string(), json!(note));
     }
+    add_match_accounting(body, &mut v);
     pack(v.to_string())
+}
+
+fn add_match_accounting(body: &Value, v: &mut Value) {
+    let (listed, total, files_scanned, scan_truncated) = {
+        let source: &Value = if v.get("data").is_some_and(|d| d.is_object()) {
+            &v["data"]
+        } else {
+            &*v
+        };
+        let Some(listed) = source.get("matches").and_then(|m| m.as_array()).map(|m| m.len()) else {
+            return;
+        };
+        let total = source
+            .get("total")
+            .or_else(|| source.get("match_count"))
+            .and_then(|n| n.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(listed)
+            .max(listed);
+        let files_scanned = source.get("files_scanned").and_then(|n| n.as_u64()).unwrap_or(0);
+        let scan_truncated = source.get("matches_truncated").and_then(|b| b.as_bool()) == Some(true);
+        (listed, total, files_scanned, scan_truncated)
+    };
+    let truncated = scan_truncated || v.get("partial").and_then(|b| b.as_bool()) == Some(true);
+    let scoped = PathScope::from_body(body).ok().flatten().is_some();
+    let named = scan_target_paths(body).unwrap_or_default().join(", ");
+    let Some(map) = v.as_object_mut() else {
+        return;
+    };
+    map.insert("returned".to_string(), json!(listed));
+    map.insert("total_matches".to_string(), json!(total));
+    map.insert("truncated".to_string(), json!(truncated));
+    if truncated {
+        map.insert("dropped".to_string(), json!(total.saturating_sub(listed)));
+        map.insert(
+            "narrow".to_string(),
+            json!("matches were dropped by the cap: add path/paths/glob to narrow the scope, or raise max_matches/k (the dropped count is in dropped)"),
+        );
+    }
+    if scoped && total == 0 {
+        map.insert(
+            "scope_note".to_string(),
+            json!(format!(
+                "no match in the named path ({named}): {files_scanned} file(s) scanned; nothing outside it was searched and no ranked neighbour rows are shown; drop the path to search the whole project."
+            )),
+        );
+    }
 }
 
 fn split_form_not_searched_note(body: &Value) -> Option<&'static str> {
@@ -2611,6 +2659,9 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         if let Err(e) = scope_paths_resolve(".", scope) {
             return err("codesearch", &e);
         }
+    }
+    if mode == "dual" && scope.is_some() {
+        return codesearch_exhaustive(body, query, false, &cfg, if limit_was_explicit { Some(k) } else { None });
     }
     if let Some(root) = root {
         return codesearch_at_root(body, &root, query, k, &cfg);
