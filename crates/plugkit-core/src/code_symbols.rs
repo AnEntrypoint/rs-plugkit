@@ -2210,9 +2210,6 @@ fn edge_line(e: &Edge) -> String {
     format!("{}:{} {} -> {}", e.path, e.line, e.caller, e.callee)
 }
 
-// The package (Go) or module (Rust) a symbol is qualified by: the basename of the directory its
-// defining file sits in. `internal/catbuild/catbuild.go` is package `catbuild`, which is the
-// trailing segment of the import path any caller of `catbuild.Build` has to name.
 fn package_of(path: &str) -> &str {
     let dir = path_dir(path);
     if dir.is_empty() {
@@ -2228,10 +2225,6 @@ fn definitions_in_package(db: &str, package: &str, name: &str) -> Vec<Value> {
         .collect()
 }
 
-// A call site can only be a call into `package` when it lives in one of that package's own
-// directories or imports a spec whose trailing segment is the package name. Go import paths end
-// in their package name and Rust `use` paths in their module name, so the trailing segment is
-// what a qualified `pkg.Name` is actually qualified by.
 fn file_reaches_package(db: &str, file: &str, package: &str, dirs: &[String]) -> bool {
     if dirs.iter().any(|dir| file.starts_with(&format!("{dir}/"))) {
         return true;
@@ -2253,26 +2246,18 @@ fn file_reaches_package(db: &str, file: &str, package: &str, dirs: &[String]) ->
     })
 }
 
-// How a requested symbol was turned into the name call edges are keyed by, and which of that
-// name's definitions the answer is about. Call edges carry unqualified caller and callee names,
-// so `Build` alone names three different functions here; a qualified `catbuild.Build` has to be
-// pinned to its own package before any edge can be attributed to it.
 struct Resolved {
     requested: String,
-    // The name edges are matched on.
     name: String,
-    // Set when the qualification pinned the symbol to a package.
     package: Option<String>,
-    // The package's directories; empty means every edge of `name` is in scope.
     dirs: Vec<String>,
     defined_at: Vec<String>,
     explanation: Option<String>,
-    // Set when the answer had to fall back to the bare name and therefore merges definitions.
-    warns: bool,
+    merges_definitions: bool,
 }
 
 fn resolve_symbol(db: &str, edges: &[Edge], symbol: &str) -> Resolved {
-    let bare = |name: &str, defined_at: Vec<String>, explanation: Option<String>, warns: bool| {
+    let bare = |name: &str, defined_at: Vec<String>, explanation: Option<String>, merges_definitions: bool| {
         Resolved {
             requested: symbol.to_string(),
             name: name.to_string(),
@@ -2280,7 +2265,7 @@ fn resolve_symbol(db: &str, edges: &[Edge], symbol: &str) -> Resolved {
             dirs: Vec::new(),
             defined_at,
             explanation,
-            warns,
+            merges_definitions,
         }
     };
     let has_edge = |name: &str| edges.iter().any(|e| e.callee == name || e.caller == name);
@@ -2309,7 +2294,7 @@ fn resolve_symbol(db: &str, edges: &[Edge], symbol: &str) -> Resolved {
                     explanation: Some(format!(
                         "{symbol} resolved to {count} definition(s) of `{tail}` in package `{qualifier}`; only call sites that live in that package or import it are listed"
                     )),
-                    warns: count > 1,
+                    merges_definitions: count > 1,
                 };
             }
             if has_edge(tail) {
@@ -2378,7 +2363,7 @@ fn callers_or_callees(
     if r.defined_at.len() == 1 {
         out["resolved_definition"] = json!(r.defined_at[0]);
     }
-    if r.warns && r.package.is_none() {
+    if r.merges_definitions && r.package.is_none() {
         out["merged_definitions"] = json!(true);
     }
     if dropped > 0 {
@@ -2461,9 +2446,6 @@ fn reach(
             if *node != symbol && !through_ambiguous && is_ambiguous(node) {
                 continue;
             }
-            // Depth 1 is the direct callers (or callees) of the symbol itself, so a qualified
-            // symbol can hold them to its own package. Deeper hops are reached through names
-            // only, so they are not filtered: they are attributed in the reply instead.
             let neighbours: Vec<&str> = match seed {
                 Some(filter) if depth == 1 => edges
                     .iter()
@@ -2715,18 +2697,9 @@ fn stale_index_refusal(action: &str, root: Option<&str>, refresh: &Value, answer
     )
 }
 
-/// How much wall time, on top of the single top-up pass every answering action already
-/// runs, one dispatch may spend driving further incremental sync passes to make its own
-/// index complete. The host dispatch call deadline is 120 s, so this stays well inside it
-/// even when the caller's own queue wait is added on top.
 const SELF_HEAL_SYNC_WALL_BUDGET_MS: u64 = 45_000;
-/// One self-heal pass never spends more than this, so a slow pass cannot swallow the whole
-/// self-heal budget where two shorter ones would have converged.
 const SELF_HEAL_SYNC_PASS_CEILING_MS: u64 = 20_000;
-/// The loop ends after this many passes even when every pass reports progress.
 const SELF_HEAL_SYNC_MAX_PASSES: u32 = 6;
-/// The counters whose tuple identifies a pass. Two passes with the same tuple moved the
-/// index nowhere, which is the loop's own stop signal.
 const SELF_HEAL_PROGRESS_COUNTERS: [&str; 12] = [
     "files_listed",
     "listing_complete",
@@ -2766,12 +2739,6 @@ fn refresh_counters(refresh: &Value) -> String {
         .join(" ")
 }
 
-/// A further pass can only help while the root is answerable and files are still being
-/// deferred. A store another writer holds, a root the host does not grant, an error report
-/// and an index that is incomplete for any other reason (an oversized or unreadable file, a
-/// tree-sitter failure, a store failure) are all states another pass cannot spend its way
-/// out of, and re-running one would spend the caller's wall clock to reproduce the same
-/// counters.
 fn refresh_can_advance(refresh: &Value) -> bool {
     refresh.get("store_busy").and_then(Value::as_bool) != Some(true)
         && refresh.get("root_granted").and_then(Value::as_bool) != Some(false)
@@ -2779,11 +2746,6 @@ fn refresh_can_advance(refresh: &Value) -> bool {
         && refresh_deferred_files(refresh) > 0
 }
 
-/// Drive incremental sync passes until the index is complete, the wall budget for this
-/// dispatch runs out, or a pass stops moving the index. A sync pass is incremental, so a
-/// sequence of them converges where one cannot; the verb used to refuse instead, leaving the
-/// caller three round trips for one answer. The returned report is the last pass's, with
-/// `self_heal_passes` naming how many extra passes this dispatch paid for.
 fn drive_sync_to_completion(
     cfg: &crate::ragconfig::RagConfig,
     project_path: Option<&str>,
@@ -2823,8 +2785,6 @@ fn drive_sync_to_completion(
 
 pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     clear_store_busy();
-    // `verb` is the spelling the docs and the skill prose send; `action` and `mode` are the older
-    // ones and win when a body carries more than one.
     let action = text_field(body, &["action", "mode", "verb"]).unwrap_or("overview");
     let project_root = text_field(body, &["root", "projectPath"]).map(crate::pkfs::anchor);
     let project_path = project_root.as_deref();
@@ -2875,11 +2835,8 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
         cfg.index.incremental_topup_wall_budget_ms,
         focus.as_deref(),
     );
-    // `outline` is exempt: it already answers an incompletely-synced index with partial:true
-    // and its own focus state, and its contract is that one pass decides the focus file's
-    // state. Every other action used to refuse here, so drive the index to completion
-    // instead and answer even when the budget runs out first.
-    if action != "outline" {
+    let outline_is_exempt = action == "outline";
+    if !outline_is_exempt {
         refresh = drive_sync_to_completion(
             &cfg,
             project_path,
@@ -2890,21 +2847,16 @@ pub(crate) fn handle(body: &Value) -> Result<Value, String> {
     }
     let refresh_complete = refresh_is_complete(&refresh);
     let answer_from_index = refresh.get("store_busy").and_then(Value::as_bool) == Some(true) && action == "callers";
-    if !refresh_complete && action != "outline" && !answer_from_index {
+    if !refresh_complete && !outline_is_exempt && !answer_from_index {
         if refresh.get("root_granted").and_then(Value::as_bool) == Some(false) {
             return Err(format!(
                 "root '{}' is not a directory the host grants access to, so {action} read no index for it; a retry does not grant access",
                 project_path.unwrap_or_default()
             ));
         }
-        // A busy store is contention another pass cannot sync its way out of, so it still
-        // refuses rather than answering from a store this dispatch could not write.
         if refresh.get("store_busy").and_then(Value::as_bool) == Some(true) {
             return Err(stale_index_refusal(action, project_path, &refresh, false));
         }
-        // Otherwise the index is incomplete but readable: answer with what it has, carrying
-        // the same reason the refusal used to be, instead of returning no answer at all
-        // after the whole wait.
     }
     let limit = body
         .get("limit")

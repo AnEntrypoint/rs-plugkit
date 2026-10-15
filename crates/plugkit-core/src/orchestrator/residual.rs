@@ -42,7 +42,6 @@ fn status_is_open(s: Option<&str>) -> bool {
 
 #[cfg(target_arch = "wasm32")]
 fn prd_empty_or_missing() -> bool {
-    // One file per row under .gm/prd/ plus any legacy .gm/prd.yml not yet absorbed.
     let blocks = match super::row_store::read_blocks(&super::row_store::Store::prd()) {
         Ok(read) => read.blocks,
         Err(_) => return true,

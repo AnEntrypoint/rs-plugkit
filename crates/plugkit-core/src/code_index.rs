@@ -4354,8 +4354,6 @@ pub enum ScanOutput {
 impl ScanOutput {
     pub fn parse(name: &str) -> Option<ScanOutput> {
         match name {
-            // "content" is the spelling `grep`'s `output_mode` documents for the same shape, so
-            // codesearch answers the name a caller crossing between the two verbs already uses.
             "matches" | "full" => Some(ScanOutput::Matches),
             "compact" | "content" => Some(ScanOutput::Compact),
             "files" => Some(ScanOutput::Files),
@@ -4963,12 +4961,6 @@ fn quoted_argument_runs_spelling_path_segments(
     out
 }
 
-// A scan universe built from git, or from a walk that honours .gitignore, does not hold every file
-// in the requested scope: a downloaded fixture, a vendored map body or a build output is
-// gitignored, so a zero-match reply over such a scope reads as "the text is absent" when it really
-// means "those files were never opened". scan_uncovered_files lists the same scope with the ignore
-// rules off, drops what the universe already covered and line-scans the rest with the same matcher,
-// so the reply can name how many files each mechanism read.
 const UNCOVERED_SCAN_BUDGET_MS: u64 = 8_000;
 
 const UNCOVERED_SCAN_LIST_CAP: usize = 20_000;
@@ -5692,10 +5684,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         && !glob_matched_no_files
         && glob_outside_path.is_empty()
         && !split_form_truncated;
-    // A worktree git tracks nothing in is walked as well, so its corpus covers the tree. When that
-    // walk could not finish, the corpus does not hold every source file here and a zero over it
-    // must not be reported as complete: it would read as "the symbol is absent" when it means "the
-    // files that could hold it were never listed".
     let corpus_blind_spot = universe.git_tracked_files == 0
         && universe.git_untracked_files > 0
         && !universe.listing_complete;
@@ -5723,11 +5711,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         .filter(|e| e.rule == crate::scan_universe::OWN_STATE_RULE)
         .count();
 
-    // The universe above is what git -- or a gitignore-honouring walk -- handed over, so a
-    // gitignored subtree (a downloaded fixture, a vendored body, a build output) was never opened
-    // and a zero-match reply over such a scope would read as "absent" when it means "not
-    // searched". When the answer is empty, or partial without the listing itself having been cut,
-    // list the same scope with the ignore rules off and line-scan what the universe missed.
     let indexed_files_scanned = files_scanned;
     let mut uncovered_files_listed = 0usize;
     let mut uncovered_files_scanned = 0usize;
@@ -5838,9 +5821,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     }
     if has_glob_filter && (req.verbose || matched_nothing_needs_coverage_fields || glob_matched_no_files) { out.insert("files_matching_glob".to_string(), json!(files_matching_glob)); }
     if glob_matched_no_files { out.insert("glob_matched_no_files".to_string(), json!(true)); }
-    // The corpus source is reported on every reply, not only on an empty one: a git corpus over a
-    // worktree git tracks nothing in is the blind spot that makes a zero read as "absent", so the
-    // caller has to be able to see which corpus answered and how much of it git actually tracked.
     let file_source = universe.source.label();
     out.insert("file_source".to_string(), json!(file_source));
     out.insert(
@@ -5882,9 +5862,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     if !universe.listing_complete {
         out.insert("listing_incomplete".to_string(), json!(true));
     }
-    // Why this corpus is a walk at all rides on every reply, not only on a cut one: "git tracks no
-    // file in this worktree" is the reason the corpus is not git's view, and a caller weighing a
-    // zero needs it as much as a caller weighing an incomplete listing.
     if let Some(reason) = &universe.walk_reason {
         out.insert("walk_reason".to_string(), json!(reason));
     }
@@ -6078,9 +6055,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("count".to_string(), json!(format!(
             "{lines_with_matches} lines, {occurrence_count} occurrences, {files_with_matches} files of {files_scanned} scanned ({lines_scanned} lines read)"
         )));
-        // "files_scanned" is the difference between "nothing matched" and "nothing was read":
-        // it is always reported, so a caller can never read an empty match set as a zero-match
-        // when the scope was never opened.
         out.insert("files_scanned".to_string(), json!(files_scanned));
         if matched_nothing_needs_coverage_fields {
             out.insert("files_listed".to_string(), json!(files.len()));
@@ -6088,8 +6062,6 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
         }
     }
-    // So a zero can never be read as "not searched": name how many files the indexed cover read
-    // and how many the disk pass over its uncovered files added.
     if uncovered_files_listed > 0 || uncovered_listing_error.is_some() {
         out.insert(
             "files_scanned_indexed".to_string(),

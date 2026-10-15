@@ -12,9 +12,6 @@ const BACKOFF_MAX_MS: u64 = 60 * 60 * 1000;
 
 const LOCK_STALE_MS: u64 = 10 * 60 * 1000;
 
-/// Re-probe interval for a ref whose change cadence this machine has never
-/// measured. The first probe that sees a new tip replaces it with the measured
-/// interval, so the steady-state cadence is a fact about the ref, not a constant.
 const UNMEASURED_REF_INTERVAL_MS: u64 = 60 * 60 * 1000;
 
 const PROBE_BACKOFF_BASE_MS: u64 = 60 * 1000;
@@ -92,9 +89,6 @@ impl SyncState {
     }
 }
 
-/// The machine-wide answer to "what is the tip of `<repo> <reference>`". One record
-/// per (repo, reference), shared by every project root on this machine, so N project
-/// roots resolving in the same window cost at most one `git ls-remote`.
 #[derive(Debug, Clone, Default)]
 struct RemoteRecord {
     remote_sha: String,
@@ -161,23 +155,6 @@ impl RemoteRecord {
     }
 }
 
-/// Whether a remote probe is warranted. The probe answers exactly one question:
-/// "what is the tip of this (repo, reference)", so it is warranted only when this
-/// machine cannot already answer it:
-///
-/// * no tip is recorded for this (repo, reference) yet, or
-/// * the last probe is older than the interval at which this ref was last observed to
-///   move.
-///
-/// A recorded probe failure replaces both with a backoff counted in failures. A
-/// project whose checkout is behind a freshly recorded tip never probes: the machine
-/// already holds the answer, and the project materializes to that tip.
-///
-/// `forced` is the one caller that may not be answered from the record: a forced
-/// refresh exists to ask the remote itself, so it is always `Due`. Without that, the
-/// record's interval (an hour for a ref whose change cadence this machine has never
-/// measured) outlives a publish, and a forced sync answers "already current" from a
-/// tip the remote stopped advertising.
 enum ProbeDecision {
     Due,
     Skip { sha: String },
@@ -281,7 +258,6 @@ impl RemoteProbePaths {
     }
 }
 
-/// The machine-global home of the remote-tip record for this (repo, reference).
 fn remote_probe_paths(src: &RepoSource) -> RemoteProbePaths {
     let project_gm_dir = Path::new(&src.cache_dir)
         .parent()
@@ -299,20 +275,18 @@ fn remote_probe_paths(src: &RepoSource) -> RemoteProbePaths {
     }
 }
 
-/// The in-memory twin of the on-disk record: the write can fail under load, and
-/// without it every dispatch would re-run `git ls-remote` with no backoff.
-static REMEMBERED_REMOTE: std::sync::Mutex<Option<HashMap<String, RemoteRecord>>> =
+static IN_MEMORY_REMOTE_RECORDS: std::sync::Mutex<Option<HashMap<String, RemoteRecord>>> =
     std::sync::Mutex::new(None);
 
 fn remembered_remote(key: &str) -> Option<RemoteRecord> {
-    REMEMBERED_REMOTE
+    IN_MEMORY_REMOTE_RECORDS
         .lock()
         .ok()
         .and_then(|guard| guard.as_ref().and_then(|map| map.get(key)).cloned())
 }
 
 fn remember_remote(key: &str, rec: &RemoteRecord) {
-    if let Ok(mut guard) = REMEMBERED_REMOTE.lock() {
+    if let Ok(mut guard) = IN_MEMORY_REMOTE_RECORDS.lock() {
         let map = guard.get_or_insert_with(HashMap::new);
         let merged = RemoteRecord::newer(&map.get(key).cloned().unwrap_or_default(), rec);
         map.insert(key.to_string(), merged);
@@ -342,17 +316,10 @@ fn write_remote_record(paths: &RemoteProbePaths, rec: &RemoteRecord) {
     }
 }
 
-/// The single-flight, machine-global remote probe. Every project root on this
-/// machine asks the same question, so at most one of them runs `git ls-remote`
-/// per window and the rest adopt the recorded answer.
 fn global_remote_tip(src: &RepoSource, now: u64) -> GlobalTip {
     global_remote_tip_with(src, now, false)
 }
 
-/// The forced twin: it asks the remote instead of adopting a recorded tip, so a
-/// refresh the operator asked for by hand cannot be answered from a record that has
-/// not expired yet. Single-flight still holds -- one `git ls-remote` per window, and
-/// a second forced caller adopts the probe that is already running or hears `Held`.
 fn global_remote_tip_forced(src: &RepoSource, now: u64) -> GlobalTip {
     global_remote_tip_with(src, now, true)
 }
@@ -377,8 +344,6 @@ fn global_remote_tip_with(src: &RepoSource, now: u64, forced: bool) -> GlobalTip
             let _ = unlock(&lock);
             outcome
         }
-        // No sleep on this target: adopt the holder's answer if it has landed, and
-        // otherwise serve this project's checkout rather than probe a second time.
         LockProbe::Held => {
             let shared = read_remote_record(&paths);
             if !shared.remote_sha.is_empty() && shared.last_probe_ms > baseline {
@@ -804,8 +769,6 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64, forced: bool) -> Resul
     let now = now_ms();
     let have_local = local_sha(src);
 
-    // A forced refresh is the operator asking for the answer the remote gives now, so
-    // neither the debounce nor an unexpired machine-global tip may answer it.
     let last_probe = st.last_checked_ms.max(remembered_probe_ms(src));
     let clock_sane = last_probe > 0 && last_probe <= now;
     if !forced && clock_sane {
@@ -826,8 +789,6 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64, forced: bool) -> Resul
     }
 
     let probe_paths = remote_probe_paths(src);
-    // At the recorded tip: no probe and no fetch. Behind it, fall through and
-    // materialize to the tip this machine already recorded.
     if let ProbeDecision::Skip { sha } =
         probe_decision(&read_remote_record(&probe_paths), now, forced)
     {
@@ -844,9 +805,6 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64, forced: bool) -> Resul
     let lock = match try_lock(src) {
         LockProbe::Acquired(lock) => lock,
         LockProbe::Held => {
-            // Serving the current checkout is the right answer for a background
-            // refresh and the wrong one for a forced one: a forced call that cannot
-            // hold the lock never learns the tip, so it must not report success.
             let detail = "another refresh in progress; serving current checkout".to_string();
             return match have_local {
                 Some(sha) => {
@@ -892,9 +850,6 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64, forced: bool) -> Resul
     if unlock(&lock) {
         write_state(src, &st);
     }
-    // The post-condition a forced call promises: the checkout on disk now stands at
-    // the sha this call reports. Reading it back turns any path above that answered
-    // without touching the checkout into a failure naming what it served.
     if forced {
         if let Ok(outcome) = &result {
             match (local_sha(src), outcome.sha.clone()) {
@@ -1096,12 +1051,6 @@ fn changed_config_paths(src: &RepoSource, pre_fetch_text: Option<&str>) -> Vec<S
     }
 }
 
-/// Refresh one config repo checkout.
-///
-/// `forced` marks a refresh the caller asked for by hand (`config-sync-now`): it
-/// probes the remote instead of adopting a recorded tip, and it fails when it cannot
-/// leave the checkout at the tip it reports, so `ok` on that verb means the vendored
-/// files on disk really are the published ones.
 pub struct GitRepoFetcher {
     pub debounce_ms: u64,
     pub forced: bool,

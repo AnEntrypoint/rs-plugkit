@@ -8274,9 +8274,6 @@ pub(super) fn excluded_pathspecs(paths: &[String], cwd: Option<&str>) -> Vec<Str
     out
 }
 
-/// The `.agentplug*` rule bears on a request only when the request is unscoped (git
-/// resolves it against `:/`) or names a DOT-prefixed runtime path. The tracked
-/// submodule `agentplug` is a gitlink, not runtime state.
 fn agentplug_runtime_rule_applies(paths: &[String]) -> bool {
     paths.is_empty()
         || paths.iter().any(|spec| {

@@ -11,12 +11,10 @@ pub fn prd_path() -> std::path::PathBuf {
     gm_dir().join("prd.yml")
 }
 
-/// The folder that holds one file per PRD row. Read on every access: it is the index.
 pub fn prd_dir() -> std::path::PathBuf {
     gm_dir().join("prd")
 }
 
-/// The append-only commit log a resolved row's material is moved into.
 pub fn prd_log_path() -> std::path::PathBuf {
     gm_dir().join("prd-log.jsonl")
 }
@@ -28,9 +26,6 @@ pub fn prd_path_for(cwd: Option<&str>) -> std::path::PathBuf {
     }
 }
 
-/// True when the document read back from disk still holds a row with `id`: the
-/// post-write read-back check that turns a vanished row into a reported lost
-/// update instead of a false ok.
 pub fn row_has_id(doc: &Value, id: &str) -> bool {
     doc.as_sequence()
         .map(|seq| {
@@ -376,8 +371,6 @@ const PRD_BRIEF_BODY_FIELDS: &[&str] = &["brief", "compact"];
 
 const PRD_TITLE_FIELDS: &[&str] = &["title", "subject"];
 
-/// Every block in the store: one file per row under `.gm/prd/`, plus any legacy
-/// `.gm/prd.yml` rows not yet absorbed into it.
 fn load_blocks() -> Result<Vec<Value>, (String, i32)> {
     Ok(row_store::read_blocks(&row_store::Store::prd())?.blocks)
 }
@@ -566,8 +559,6 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
             id_ok && status_ok
         })
         .collect();
-    // A resolved row is moved out of the folder into the commit log, so an id stays
-    // answerable here: the log is searched for any id the folder no longer holds.
     let store = row_store::Store::prd();
     let mut selected = selected;
     if !wanted_ids.is_empty() {
@@ -1336,9 +1327,6 @@ pub fn is_prd_yml_pathspec(path: &str) -> bool {
     path.trim().replace('\\', "/").trim_start_matches("./") == ".gm/prd.yml"
 }
 
-/// True for any path that carries PRD or mutable state: the legacy single files, the
-/// one-file-per-row folders and the commit logs. One file per row is what makes the
-/// git verbs' whole-file foreign-row filter unnecessary -- a row file has one owner.
 pub fn is_prd_state_pathspec(path: &str) -> bool {
     let trimmed = path.trim().replace('\\', "/");
     let p = trimmed.trim_start_matches("./");
@@ -1700,9 +1688,6 @@ pub fn persisted_witness_path(dispatch_id: &str) -> String {
     format!("{WITNESS_OUT_DIR}/witness-{dispatch_id}.mjs")
 }
 
-/// `referenced_path_token` trims a leading `.`, so a witness text citing
-/// `.gm/witness-out/witness-<dispatch id>.mjs` reaches here as the dot-less
-/// `gm/witness-out/...`; both spellings name the same file.
 fn canonical_persisted_witness_path(path: &str) -> Option<String> {
     let trimmed = path.trim_start_matches("./");
     let canonical = if trimmed.starts_with("gm/witness-out/") {
@@ -2721,8 +2706,6 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     );
     match outcome {
         Ok(status_matches) => {
-            // Resolution moves the material: the row's content is appended to the
-            // commit log and its file is cleared, so the folder holds open work only.
             let filed = if annotate_only {
                 None
             } else {
