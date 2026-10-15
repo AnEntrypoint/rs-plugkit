@@ -8,15 +8,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::{DEFAULT_REPO_CACHE_REL, DEFAULT_REPO_REFERENCE, DEFAULT_REPO_URL};
 
-/// How long one dispatch waits for another process's in-flight probe of the same
-/// (repo, reference) before it serves its own checkout instead.
 const SHARED_PROBE_WAIT_MS: u64 = 15 * 1000;
 
 const SHARED_PROBE_POLL_MS: u64 = 25;
 
-/// Re-probe interval for a ref whose change cadence this machine has never
-/// measured. The first probe that sees a new tip replaces it with the measured
-/// interval, so the steady-state cadence is a fact about the ref, not a constant.
 const UNMEASURED_REF_INTERVAL_MS: u64 = 60 * 60 * 1000;
 
 const PROBE_BACKOFF_BASE_MS: u64 = 60 * 1000;
@@ -50,9 +45,6 @@ impl CheckState {
     }
 }
 
-/// The machine-wide answer to "what is the tip of `<repo> <reference>`". One record
-/// per (repo, reference), shared by every project root on this machine, so N project
-/// roots resolving in the same window cost at most one `git ls-remote`.
 #[derive(Debug, Clone, Default)]
 struct RemoteRecord {
     remote_sha: String,
@@ -119,17 +111,6 @@ impl RemoteRecord {
     }
 }
 
-/// Whether a remote probe is warranted. The probe answers exactly one question:
-/// "what is the tip of this (repo, reference)", so it is warranted only when this
-/// machine cannot already answer it:
-///
-/// * no tip is recorded for this (repo, reference) yet, or
-/// * the last probe is older than the interval at which this ref was last observed to
-///   move.
-///
-/// A recorded probe failure replaces both with a backoff counted in failures. A
-/// project whose checkout is behind a freshly recorded tip never probes: the machine
-/// already holds the answer, and the project materializes to that tip.
 enum ProbeDecision {
     Due,
     Skip { sha: String },
@@ -375,9 +356,6 @@ fn fallback(have: Option<String>, detail: String, sticky: bool) -> Result<Native
     }
 }
 
-/// The single-flight, machine-global remote probe. Every project root on this
-/// machine asks the same question, so at most one of them runs `git ls-remote`
-/// per window and the rest adopt the recorded answer.
 fn global_remote_tip(
     repo: &str,
     reference: &str,
@@ -479,19 +457,17 @@ fn probe_paths(repo: &str, reference: &str, cache: &str) -> ProbePaths {
     }
 }
 
-/// The in-memory twin of the on-disk record: the write can fail under load, and
-/// without it every dispatch would re-run `git ls-remote` with no backoff.
-static REMEMBERED_REMOTE: Mutex<Option<HashMap<String, RemoteRecord>>> = Mutex::new(None);
+static IN_MEMORY_REMOTE_RECORDS: Mutex<Option<HashMap<String, RemoteRecord>>> = Mutex::new(None);
 
 fn remembered_remote(key: &str) -> Option<RemoteRecord> {
-    REMEMBERED_REMOTE
+    IN_MEMORY_REMOTE_RECORDS
         .lock()
         .ok()
         .and_then(|guard| guard.as_ref().and_then(|map| map.get(key)).cloned())
 }
 
 fn remember_remote(key: &str, rec: &RemoteRecord) {
-    if let Ok(mut guard) = REMEMBERED_REMOTE.lock() {
+    if let Ok(mut guard) = IN_MEMORY_REMOTE_RECORDS.lock() {
         let map = guard.get_or_insert_with(HashMap::new);
         let merged = RemoteRecord::newer(&map.get(key).cloned().unwrap_or_default(), rec);
         map.insert(key.to_string(), merged);

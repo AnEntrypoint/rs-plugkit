@@ -1,10 +1,3 @@
-// Native harness for the YAML write guard: `pkfs` is a wasm32-only host
-// implementation, so every guard below is a pure text-in/text-out function and
-// this example drives them with std::fs against a real file.
-//
-//   cargo run -p rs-plugkit --example prd_yaml_guard -- serialize '<value>'
-//   cargo run -p rs-plugkit --example prd_yaml_guard -- diagnose <path>
-//   cargo run -p rs-plugkit --example prd_yaml_guard -- repair <path>
 use rs_plugkit::orchestrator::yaml_util;
 use serde_yaml::{Mapping, Value};
 

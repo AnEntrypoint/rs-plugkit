@@ -129,14 +129,8 @@ pub struct ScanUniverse {
     pub listing_complete: bool,
     pub excluded: Vec<RuleExclusion>,
     pub walk_reason: Option<String>,
-    // What git itself contributed to the corpus: a git corpus whose tracked count is 0 carries no
-    // committed content at all, so the reply has to be able to say so -- the number is what turns
-    // "searched 1803 files" from a reassurance into the blind spot it is when nothing is tracked.
     pub git_tracked_files: usize,
     pub git_untracked_files: usize,
-    // Nested worktrees (submodule checkouts) this corpus had to be widened for, and whether the
-    // untracked listing inside one of them failed: their untracked files are outside the parent
-    // worktree's own listing, so a miss here is a blind spot a zero must not be read over.
     pub git_nested_worktrees: usize,
     pub git_nested_untracked_failed: bool,
     target: String,
@@ -324,12 +318,6 @@ fn directory_is_gitignored(dir: &str) -> Result<bool, String> {
     }
 }
 
-/// Directories holding their own `.git` under `dir`, found by listing rather than by `git ls-files
-/// --stage`: git's own listing of the parent names a submodule's TRACKED files only, so a file
-/// written into a submodule worktree is untracked there and invisible to the parent's
-/// `--others --exclude-standard`. Those files are what this finds, so a fresh write is searchable
-/// without `refresh: true`. The walk stops at the first `.git` it meets and at this depth, so it
-/// costs a handful of readdirs and never descends a whole tree.
 const NESTED_WORKTREE_SCAN_DEPTH: usize = 2;
 const MAX_NESTED_WORKTREES: usize = 64;
 
@@ -439,21 +427,12 @@ fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec
             _ => complete = false,
         }
     }
-    // A submodule worktree is a repository of its own, so its untracked files are not in the parent
-    // worktree's `--others` listing. They are listed inside each one and joined here, so a file
-    // written minutes ago is in the corpus without `refresh: true`. Both discovery routes are
-    // tried because either can be the one that answers: git's own gitlink listing, and a listing
-    // for the worktrees that route missed.
     let (mut nested_dirs, _gitlink_failed) = gitlink_dirs(dir, &mut complete);
     for found in nested_worktree_dirs(dir) {
         if !nested_dirs.iter().any(|d| *d == found) {
             nested_dirs.push(found);
         }
     }
-    // git's own gitlink listing is a second discovery route, not the one coverage rests on: the
-    // listing above names the nested worktrees whether or not git answers, so its failure costs
-    // nothing and is not reported as a blind spot. What is reported is a worktree whose own
-    // untracked files could not be listed, or a discovery that stopped at the cap.
     let mut nested_untracked_failed = nested_dirs.len() >= MAX_NESTED_WORKTREES;
     nested_worktrees += nested_dirs.len();
     for nested_dir in nested_dirs {
@@ -637,10 +616,6 @@ pub fn scope_has_no_entries(root: &str, scope: Option<&str>) -> bool {
     host_stat_is_directory(&target) == Some(true) && child_names(&target).is_empty()
 }
 
-// Does a caller-named scope resolve to something that exists under this root? A named scope that
-// resolves to nothing must be answered as an error: an empty scan over a scope that was never
-// opened is indistinguishable from a real zero-match, and a caller reading the second as the
-// first drops a hit that is really there.
 pub fn scope_path_exists(root: &str, rel: &str) -> bool {
     host_stat_is_directory(&join_under(root, rel)).is_some()
 }
@@ -746,8 +721,6 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
             Some(true) => {}
         }
     }
-    // What git listed, kept aside when its tracked set is empty: the walk below then answers on the
-    // union, so an untracked tree is scanned instead of being reported as covered-but-empty.
     let mut git_join: Option<(Vec<String>, bool)> = None;
     let cause = if force_disk {
         WalkCause::CallerForcedDisk
@@ -806,8 +779,6 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
     walk.descend(&target);
     let mut files = walk.files;
     let mut listing_complete = !walk.reached_deadline;
-    // git contributed no tracked file here (that is why this is a walk at all), so 0 is the count
-    // the reply reports: it is the number that names the blind spot.
     let tracked = 0usize;
     let mut untracked = 0usize;
     if let Some((git_files, git_complete)) = git_join {

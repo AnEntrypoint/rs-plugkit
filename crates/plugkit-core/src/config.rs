@@ -20,14 +20,10 @@ pub const DEFAULT_REPO_CACHE_REL: &str = ".gm/config-source-cache-default";
 
 pub const GLOBAL_PROBE_REL: &str = "config-source-remote-probe";
 
-/// Directory holding the machine-global remote-tip records, one file per
-/// (repo, reference). It lives under the user's home on every platform; when the
-/// platform exposes no home directory it falls back to the project's own `.gm`,
-/// which keeps the pre-global per-project granularity rather than failing.
-pub fn global_probe_root(project_gm_dir: Option<&str>) -> Option<String> {
+pub fn global_probe_root(project_gm_fallback_dir: Option<&str>) -> Option<String> {
     match home_dir() {
         Some(home) => Some(join(&join(&home, ".gm"), GLOBAL_PROBE_REL)),
-        None => project_gm_dir.map(|dir| join(dir, GLOBAL_PROBE_REL)),
+        None => project_gm_fallback_dir.map(|dir| join(dir, GLOBAL_PROBE_REL)),
     }
 }
 

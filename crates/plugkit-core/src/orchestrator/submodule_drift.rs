@@ -10,10 +10,7 @@ const KNOWN_SUBMODULES: &[&str] = &[
 
 const SUBMODULE_GITLINK_MODE: &str = "160000";
 
-/// How far back a pin's previous value is searched for. The walk stops at the
-/// first commit that pinned anything other than HEAD's pin, so this bounds the
-/// search and is not the number of commits inspected.
-const PIN_HISTORY_COMMITS: usize = 50;
+const PIN_HISTORY_SEARCH_DEPTH: usize = 50;
 
 #[derive(serde::Serialize)]
 pub struct DriftedSubmodule {
@@ -22,9 +19,6 @@ pub struct DriftedSubmodule {
     submodule_head_sha: String,
 }
 
-/// One submodule pointer that moved backwards: `new_sha` is not a descendant of
-/// `old_sha`, so this repo now points at a commit that does not contain one it
-/// already pointed at.
 #[derive(serde::Serialize)]
 pub struct PinRegression {
     path: String,
@@ -47,7 +41,6 @@ fn call_stdout(_argv: &[&str], _cwd: Option<&str>) -> String {
     String::new()
 }
 
-/// `160000 commit <sha>\t<path>` -- the shape `git ls-tree <rev>` writes.
 fn parse_tree_gitlink(stdout: &str) -> Option<String> {
     let mut fields = stdout.lines().next()?.split_whitespace();
     if fields.next()? != SUBMODULE_GITLINK_MODE {
@@ -59,8 +52,6 @@ fn parse_tree_gitlink(stdout: &str) -> Option<String> {
     fields.next().map(|sha| sha.trim().to_string())
 }
 
-/// `160000 <sha> <stage>\t<path>` -- the shape `git ls-files --stage` writes,
-/// which carries no object type between the mode and the sha.
 fn parse_index_gitlink(stdout: &str) -> Option<String> {
     let mut fields = stdout.lines().next()?.split_whitespace();
     if fields.next()? != SUBMODULE_GITLINK_MODE {
@@ -73,15 +64,12 @@ fn gm_tracked_gitlink_sha(path: &str) -> Option<String> {
     parse_tree_gitlink(&call_stdout(&["ls-tree", "HEAD", "--", path], None))
 }
 
-/// The pin the *next* commit in this repo will write: `git add` has already put
-/// it in the index, so it is the value a pin commit lands even though HEAD does
-/// not carry it yet.
 fn staged_gitlink_sha(path: &str) -> Option<String> {
     parse_index_gitlink(&call_stdout(&["ls-files", "--stage", "--", path], None))
 }
 
 fn pin_history_commits(path: &str) -> Vec<String> {
-    let limit = format!("-n{}", PIN_HISTORY_COMMITS);
+    let limit = format!("-n{}", PIN_HISTORY_SEARCH_DEPTH);
     call_stdout(&["log", limit.as_str(), "--format=%H", "--", path], None)
         .lines()
         .map(|line| line.trim())
@@ -127,10 +115,6 @@ fn is_ancestor(ancestor: &str, descendant: &str, path: &str) -> bool {
     result.get("exit_code").and_then(|value| value.as_i64()) == Some(0)
 }
 
-/// An object the submodule's own clone has never fetched makes
-/// `merge-base --is-ancestor` fail, and a failed check is not proof that a pin
-/// moved backwards. Both ends are required to be present before either
-/// direction is claimed.
 #[cfg(target_arch = "wasm32")]
 fn commit_present(path: &str, sha: &str) -> bool {
     let result = crate::wasm_dispatch::git_call_argv(
@@ -157,13 +141,6 @@ fn descendant_in_submodule(path: &str, old_sha: &str, new_sha: &str) -> bool {
     pin_direction_known(path, old_sha, new_sha) && is_ancestor(old_sha, new_sha, path)
 }
 
-/// Whether any direction can be claimed at all. Both ends have to be objects
-/// this clone holds: `merge-base --is-ancestor` fails on a commit that was
-/// never fetched exactly as it fails on one that is genuinely unrelated, so
-/// "not a descendant" computed over an absent end is a fact about the clone,
-/// not about the pin. A pin leaving a local-only phantom for a published tip is
-/// a forward correction, and reporting it as a regression is the opposite of
-/// what happened.
 fn pin_direction_known(path: &str, old_sha: &str, new_sha: &str) -> bool {
     commit_present(path, old_sha) && commit_present(path, new_sha)
 }
@@ -201,9 +178,6 @@ fn parse_gitmodules_paths(raw: &str) -> Vec<String> {
     out
 }
 
-/// Pins that moved backwards, from both places one can be observed: the index,
-/// which is the pin the next commit writes, and this repo's own history, which
-/// is where a pin that already landed backwards is visible.
 pub fn pin_regressions() -> Vec<PinRegression> {
     let mut out = Vec::new();
     for path in submodule_paths() {

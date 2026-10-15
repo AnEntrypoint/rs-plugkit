@@ -1,11 +1,3 @@
-//! `prd-repair`: name the parse fault in a PRD/mutables YAML file and re-quote the
-//! offending scalar in place.
-//!
-//! Every other row-writing verb refuses to touch a file that does not parse, so a
-//! single unquoted scalar (`why: ... claim): ...`) locks the whole store until
-//! something repairs it. This module is that something: it names the exact line,
-//! column and substring that breaks the document, backs the file up, and writes a
-//! re-quoted copy only when that copy re-parses and round-trips.
 use crate::pkfs;
 use serde_yaml::Value;
 use super::prd::prd_path;
@@ -35,8 +27,6 @@ fn fault_json(faults: &[YamlFault]) -> serde_json::Value {
     )
 }
 
-/// Body: `{path?, dry_run?, max_passes?}`. `path` defaults to the project's PRD
-/// store. `dry_run` reports the fault and the would-be result without writing.
 pub fn handle_repair(content: &str) -> (String, String, i32) {
     let body: Value = match serde_json::from_str::<Value>(content.trim()) {
         Ok(v) => v,
@@ -112,8 +102,6 @@ pub fn handle_repair(content: &str) -> (String, String, i32) {
     }
 }
 
-/// Repair `path_s` in place: re-quote the unparseable scalar, back the original
-/// up, and write the result only if it re-parses and round-trips.
 pub fn repair_prd_store(
     path_s: &str,
     max_passes: usize,

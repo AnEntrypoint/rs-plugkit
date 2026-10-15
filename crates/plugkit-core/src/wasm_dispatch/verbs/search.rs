@@ -456,8 +456,6 @@ impl PathScope {
         self.globs.iter().any(|glob| glob.admits(root, None, path))
     }
 
-    // The patterns a caller named that are plain paths, not globs. These are the ones a scan can
-    // be pointed at directly; a glob can only filter what a wider scan already listed.
     fn literal_scopes(&self) -> Vec<String> {
         self.patterns
             .iter()
@@ -508,9 +506,6 @@ pub(super) fn push_scope_pattern(out: &mut Vec<String>, raw: &str, field: &str) 
 
 pub(super) const SCOPED_CANDIDATE_MULTIPLIER: usize = 8;
 
-// A named scope that resolves to nothing under the root is answered as an error, never as an
-// empty match set: the two differ by whether the scope was opened at all, and a caller who
-// cannot tell them apart reports "no match" for a hit that is really there.
 pub(super) fn scope_paths_resolve(root: &str, scope: &PathScope) -> Result<(), String> {
     for pattern in scope.literal_scopes() {
         if !crate::scan_universe::scope_path_exists(root, &pattern) {
@@ -921,9 +916,6 @@ pub(super) fn normalize_scope_text(raw: &str) -> String {
         .to_string()
 }
 
-// A glob written under "path" reached the scan as a literal path, where it names no file and the
-// scan was refused outright. Move those entries to "glob", which every route already honours: the
-// scan listing takes it as a filter and PathScope takes it as a scope.
 pub(super) fn hoist_glob_paths(body: &Value) -> Result<Option<Value>, String> {
     let mut literal: Vec<Value> = Vec::new();
     let mut globs: Vec<String> = Vec::new();
@@ -1808,8 +1800,6 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
 }
 
 pub(super) fn finish_scan_reply(out: &mut serde_json::Map<String, Value>, scan_cap: u32) -> Option<String> {
-    // A rule exclusion only costs coverage while the excluded paths stay unread: once the
-    // uncovered-files pass has read them off disk, "exhaustive" keeps whatever that pass reported.
     let uncovered_complete = out
         .get("uncovered_scan")
         .and_then(|v| v.get("complete"))
@@ -2455,8 +2445,6 @@ pub(super) fn codesearch_identifier(
                                 .unwrap_or(0)
                     })
                     .unwrap_or(lines.len() as u64);
-                // A reply that names no files_scanned cannot be told apart from one whose scope
-                // was never opened, so both numbers ride every report.
                 map.insert("files_scanned".to_string(), json!(scan_files_scanned));
                 map.insert("count".to_string(), json!(found));
             }
@@ -2560,7 +2548,6 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             CODESEARCH_MODES.iter().map(|m| format!("\"{m}\"")).collect::<Vec<_>>().join(", "),
         ));
     }
-    // A glob under "path" is a scope, not a path: hand it to the field every route reads.
     let hoisted_body;
     let body: &Value = match hoist_glob_paths(body) {
         Ok(Some(rewritten)) => {
@@ -2615,10 +2602,6 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             None => {}
         }
     }
-    // "dual" ranks the whole project unless the named scope is applied here. The scan-backed
-    // routes take "path" from scan_target_paths, but this one used to leave the ranked channels
-    // unscoped, so a scoped query answered with project-wide hits and a zero-match reply carried
-    // no files_scanned -- indistinguishable from a scope that was never opened.
     let scope = match PathScope::from_body(body) {
         Ok(scope) => scope,
         Err(e) => return err("codesearch", &e),

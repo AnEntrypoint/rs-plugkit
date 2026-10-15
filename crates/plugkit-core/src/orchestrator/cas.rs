@@ -7,17 +7,16 @@ pub enum CasOutcome<T> {
     Abort(String, String, i32),
 }
 
-/// Re-read `path_s` and parse it; `None` when it is gone or unparseable.
-fn read_back(path_s: &str) -> Option<Value> {
+fn reparse_document_at(path_s: &str) -> Option<Value> {
     let raw = pkfs::read_to_string(path_s)?;
     let source = raw.strip_prefix('\u{feff}').unwrap_or(raw.as_str());
     serde_yaml::from_str::<Value>(source).ok()
 }
 
-/// True when a CAS error is a lost update: the write landed but the row is not
-/// in the file, so the caller must not report success.
+const LOST_UPDATE_MARKER: &str = "lost-update:";
+
 pub fn is_lost_update(err: &str) -> bool {
-    err.contains("lost-update:")
+    err.contains(LOST_UPDATE_MARKER)
 }
 
 pub fn cas_retry_write<T>(
@@ -29,10 +28,6 @@ pub fn cas_retry_write<T>(
     cas_retry_write_verified(path_s, max_attempts, verb_label, modify, |_doc| true)
 }
 
-/// `cas_retry_write` plus a post-write read-back: the write only counts as done
-/// when the bytes on disk, re-read and re-parsed, still satisfy `verify`. A row
-/// that lands and then vanishes under concurrent writers is reported as a lost
-/// update, never as success.
 pub fn cas_retry_write_verified<T>(
     path_s: &str,
     max_attempts: u32,
@@ -104,7 +99,7 @@ pub fn cas_retry_write_verified<T>(
 
         match pkfs::cas_write(path_s, &before_raw, &new_raw) {
             pkfs::CasWriteOutcome::Swapped => {
-                match read_back(path_s) {
+                match reparse_document_at(path_s) {
                     Some(after) if verify(&after) => return Ok(result),
                     other => {
                         if attempt >= max_attempts {
@@ -115,8 +110,8 @@ pub fn cas_retry_write_verified<T>(
                             return Err((
                                 String::new(),
                                 format!(
-                                    "{} lost-update: the write to {} was accepted but reading it back shows {} -- the row is NOT in the store, so this dispatch reports no success instead of a false ok",
-                                    verb_label, path_s, why
+                                    "{} {} the write to {} was accepted but reading it back shows {} -- the row is NOT in the store, so this dispatch reports no success instead of a false ok",
+                                    verb_label, LOST_UPDATE_MARKER, path_s, why
                                 ),
                                 1,
                             ));
