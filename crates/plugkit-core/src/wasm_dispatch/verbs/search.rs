@@ -2388,90 +2388,89 @@ pub(super) fn codesearch_identifier(
     };
     let substring_pattern = format!("(?i){}", regex::escape(query));
     let passes = [
-        (
-            IdentifierScan {
-                pattern: query,
-                regex: false,
-                whole_word: true,
-            },
-            false,
-        ),
-        (
-            IdentifierScan {
-                pattern: &substring_pattern,
-                regex: true,
-                whole_word: false,
-            },
-            true,
-        ),
+        IdentifierScan {
+            pattern: query,
+            regex: false,
+            whole_word: true,
+        },
+        IdentifierScan {
+            pattern: &substring_pattern,
+            regex: true,
+            whole_word: false,
+        },
     ];
     let mut scan_files_scanned = 0u64;
-    for (scan, substring) in &passes {
-        let (lines, complete, files_scanned) =
+    let mut complete = true;
+    let mut lines: Vec<String> = Vec::new();
+    let mut whole_word_lines = 0usize;
+    for (index, scan) in passes.iter().enumerate() {
+        let (found, pass_complete, files_scanned) =
             match identifier_scan_lines(scan, body, scan_root, &include_globs, &exclude_globs, cfg)
             {
                 Ok(found) => found,
                 Err(e) => return Some(Err(e)),
             };
         scan_files_scanned = scan_files_scanned.max(files_scanned);
-        if lines.is_empty() {
-            continue;
+        complete &= pass_complete;
+        if index == 0 {
+            whole_word_lines = found.len();
         }
-        let (definition_lines, definitions_complete) = if complete {
-            (Vec::new(), true)
-        } else {
-            let pattern = crate::codesearch_rank::any_definition_pattern(query, *substring);
-            let definitions_scan = IdentifierScan {
-                pattern: &pattern,
-                regex: true,
-                whole_word: false,
-            };
-            match identifier_scan_lines(
-                &definitions_scan,
-                body,
-                scan_root,
-                &include_globs,
-                &exclude_globs,
-                cfg,
-            ) {
-                Ok((definition_lines, definitions_complete, definition_files_scanned)) => {
-                    scan_files_scanned = scan_files_scanned.max(definition_files_scanned);
-                    (definition_lines, definitions_complete)
-                }
-                Err(e) => return Some(Err(e)),
-            }
-        };
-        let scan_lines = crate::codesearch_rank::ScanLines {
-            lines: &lines,
-            definition_lines: &definition_lines,
-            complete,
-            definitions_complete,
-        };
-        if let Some(report) =
-            crate::codesearch_rank::identifier_report(query, &scan_lines, opts, *substring)
-        {
-            let mut report = report;
-            if let Some(map) = report.as_object_mut() {
-                let found = map
-                    .get("counts")
-                    .map(|counts| {
-                        counts
-                            .get("definitions")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0)
-                            + counts
-                                .get("references")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0)
-                    })
-                    .unwrap_or(lines.len() as u64);
-                map.insert("files_scanned".to_string(), json!(scan_files_scanned));
-                map.insert("count".to_string(), json!(found));
-            }
-            return Some(Ok(report));
-        }
+        lines.extend(found);
     }
-    None
+    if lines.is_empty() {
+        return None;
+    }
+    let substring = whole_word_lines == 0;
+    let (definition_lines, definitions_complete) = if complete {
+        (Vec::new(), true)
+    } else {
+        let pattern = crate::codesearch_rank::any_definition_pattern(query, substring);
+        let definitions_scan = IdentifierScan {
+            pattern: &pattern,
+            regex: true,
+            whole_word: false,
+        };
+        match identifier_scan_lines(
+            &definitions_scan,
+            body,
+            scan_root,
+            &include_globs,
+            &exclude_globs,
+            cfg,
+        ) {
+            Ok((definition_lines, definitions_complete, definition_files_scanned)) => {
+                scan_files_scanned = scan_files_scanned.max(definition_files_scanned);
+                (definition_lines, definitions_complete)
+            }
+            Err(e) => return Some(Err(e)),
+        }
+    };
+    let scan_lines = crate::codesearch_rank::ScanLines {
+        lines: &lines,
+        definition_lines: &definition_lines,
+        complete,
+        definitions_complete,
+    };
+    let mut report =
+        crate::codesearch_rank::identifier_report(query, &scan_lines, opts, substring)?;
+    if let Some(map) = report.as_object_mut() {
+        let found = map
+            .get("counts")
+            .map(|counts| {
+                counts
+                    .get("definitions")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    + counts
+                        .get("references")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+            })
+            .unwrap_or(lines.len() as u64);
+        map.insert("files_scanned".to_string(), json!(scan_files_scanned));
+        map.insert("count".to_string(), json!(found));
+    }
+    Some(Ok(report))
 }
 
 pub(super) fn codesearch(body: &Value) -> u64 {
