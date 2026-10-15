@@ -1,15 +1,15 @@
-// Witness for the git_branch body contract. remote:true lists the remote-tracking
-// refs, all:true lists local and remote refs, a non-boolean remote or all is refused,
-// and any other body field is refused with unknown_fields and accepted_fields, the
-// contract git_log, git_diff and git_show already keep. Every check dispatches through
-// the gm CLI to the live runtime, in scratch repositories it creates and removes.
-// Usage: node scripts/git-branch-fields-witness.mjs [--gm=<gm-mcp-server.mjs>] [--project=<dir>] [--scratch=<dir>]
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 const IDENTITY = ['-c', 'user.name=lanmower', '-c', 'user.email=lanmower@users.noreply.github.com'];
+const GIT_TIMEOUT_MS = 120000;
+const GM_DISPATCH_TIMEOUT_MS = 180000;
+const GM_DISPATCH_MAX_BUFFER = 16 * 1024 * 1024;
+const WITNESS_SESSION_ID = 'spoint-g-gitbranch-witness';
+const SCRATCH_PREFIX = 'git-branch-fields-';
+const DEFAULT_GM_SERVER = path.join(os.homedir(), '.gm-tools', 'gm-mcp-server.mjs');
 
 function parseArgs(argv) {
   const out = {};
@@ -26,7 +26,7 @@ function git(argv, cwd) {
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 120000,
+    timeout: GIT_TIMEOUT_MS,
   }).trim();
 }
 
@@ -60,12 +60,12 @@ function parseReply(text) {
 }
 
 function dispatch(gm, project, cwd, body) {
-  const payload = JSON.stringify({ SESSION_ID: 'spoint-g-gitbranch-witness', cwd, ...body });
+  const payload = JSON.stringify({ SESSION_ID: WITNESS_SESSION_ID, cwd, ...body });
   const text = execFileSync(process.execPath, [gm, 'dispatch', 'git_branch', '--body', payload, '--cwd', project], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 180000,
-    maxBuffer: 16 * 1024 * 1024,
+    timeout: GM_DISPATCH_TIMEOUT_MS,
+    maxBuffer: GM_DISPATCH_MAX_BUFFER,
   });
   return parseReply(text);
 }
@@ -77,9 +77,9 @@ const hasNone = (reply, names) => names.every((name) => !lists(reply, 'branches'
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  const gm = path.resolve(args.gm || path.join(os.homedir(), '.gm-tools', 'gm-mcp-server.mjs'));
+  const gm = path.resolve(args.gm || DEFAULT_GM_SERVER);
   const project = path.resolve(args.project || process.cwd());
-  const scratch = fs.mkdtempSync(path.join(args.scratch || os.tmpdir(), 'git-branch-fields-'));
+  const scratch = fs.mkdtempSync(path.join(args.scratch || os.tmpdir(), SCRATCH_PREFIX));
   const failures = [];
   const expect = (name, ok, detail) => {
     console.log(`check=${name} ${ok ? 'pass' : 'fail'} ${detail}`);

@@ -1,21 +1,18 @@
-// Live-spool witness for the code index. Over one window of the spool log it requires: zero
-// code_index_treesitter_failed events, every such event attributed to a file (path + plugin_failure),
-// at most one codeinsight_rebuild, every rebuild naming the changed files that forced it (no bare
-// stored-then-current digest pair), and at least one spool event inside the window, so a stalled
-// watcher cannot pass on old events. The window ends at the wall clock unless --window-end-ms is
-// given. A record that names a checked event but does not parse as JSON fails the run, because it
-// cannot be placed in the window.
-// Usage: node scripts/codeinsight-spool-witness.mjs [--log <watcher.log>] [--window-ms 600000] [--window-end-ms <ms>]
 import { readFileSync } from 'node:fs';
+
+const TREESITTER_FAILED = 'code_index_treesitter_failed';
+const REBUILD = 'codeinsight_rebuild';
+const CHECKED_EVENTS = [TREESITTER_FAILED, REBUILD];
+const DEFAULT_LOG_PATH = 'C:/dev/spoint/.gm/exec-spool/.watcher.log';
+const DEFAULT_WINDOW_MS = '600000';
 
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
   const i = argv.indexOf(name);
   return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : fallback;
 };
-const logPath = opt('--log', 'C:/dev/spoint/.gm/exec-spool/.watcher.log');
-const windowMs = Number(opt('--window-ms', '600000'));
-const checkedNames = ['code_index_treesitter_failed', 'codeinsight_rebuild'];
+const logPath = opt('--log', DEFAULT_LOG_PATH);
+const windowMs = Number(opt('--window-ms', DEFAULT_WINDOW_MS));
 
 const text = readFileSync(logPath, 'utf8');
 const parsed = [];
@@ -31,8 +28,8 @@ for (const line of text.split('\n')) {
 const events = parsed.filter((ev) => typeof ev.ts === 'number');
 const windowEnd = Number(opt('--window-end-ms', String(Date.now())));
 const inWindow = events.filter((ev) => ev.ts > windowEnd - windowMs && ev.ts <= windowEnd);
-const treesitter = inWindow.filter((ev) => ev.event === 'code_index_treesitter_failed');
-const rebuilds = inWindow.filter((ev) => ev.event === 'codeinsight_rebuild');
+const treesitter = inWindow.filter((ev) => ev.event === TREESITTER_FAILED);
+const rebuilds = inWindow.filter((ev) => ev.event === REBUILD);
 const unattributed = treesitter.filter(
   (ev) => typeof ev.path !== 'string' || ev.path === '' || typeof ev.plugin_failure !== 'string',
 );
@@ -41,7 +38,7 @@ const namelessRebuilds = rebuilds.filter(
   (ev) => ev.reason !== 'explicit-rebuild' && Array.isArray(ev.changed_files) && ev.changed_files.length === 0,
 );
 const unparsed = Object.fromEntries(
-  checkedNames.map((name) => [
+  CHECKED_EVENTS.map((name) => [
     name,
     Math.max(0, text.split(name).length - 1 - parsed.filter((ev) => ev.event === name).length),
   ]),

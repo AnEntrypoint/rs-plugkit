@@ -1,28 +1,24 @@
-// Wiring witness for the degraded config-refresh signal. A refresh that did not finish cleanly
-// has to reach config_resolve (Resolution::to_json) and instruction (the handle_instruction payload)
-// as degraded plus a reason. Each link of that chain is checked in the source of crates/plugkit-core.
-// Usage: node scripts/config-degraded-refresh-witness.mjs [--root=<rs-plugkit checkout>]
-// Prints one line per link and ends with RESULT: PASS, or RESULT: FAIL naming the missing links.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const RESOLUTION_CONSTRUCTION_SITES = 5;
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const argv = Object.fromEntries(
+const cliOptions = Object.fromEntries(
   process.argv.slice(2).map((arg) => {
     const m = /^--([^=]+)=(.*)$/.exec(arg);
     return m ? [m[1], m[2]] : [arg, true];
   }),
 );
-const root = path.resolve(argv.root || path.join(scriptDir, '..'));
-const srcDir = path.join(root, 'crates', 'plugkit-core', 'src');
-const read = (rel) => fs.readFileSync(path.join(srcDir, rel), 'utf8');
+const root = path.resolve(cliOptions.root || path.join(scriptDir, '..'));
+const crateSrcDir = path.join(root, 'crates', 'plugkit-core', 'src');
+const readCrateSource = (rel) => fs.readFileSync(path.join(crateSrcDir, rel), 'utf8');
 
-const config = read('config.rs');
-const configSync = read('config_sync.rs');
-const configSyncNative = read('config_sync_native.rs');
-const prose = read('prose.rs');
-const instructions = read('orchestrator/instructions/mod.rs');
+const config = readCrateSource('config.rs');
+const configSync = readCrateSource('config_sync.rs');
+const configSyncNative = readCrateSource('config_sync_native.rs');
+const prose = readCrateSource('prose.rs');
+const instructions = readCrateSource('orchestrator/instructions/mod.rs');
 
 function resolveWithBody(text) {
   const start = text.indexOf('pub fn resolve_with(');
@@ -49,7 +45,7 @@ const links = [
     (t) => {
       const body = resolveWithBody(t);
       const fields = body.match(/^\s*degraded,\s*$/gm) || [];
-      return body.includes('let mut degraded: Option<String> = None;') && fields.length >= 5;
+      return body.includes('let mut degraded: Option<String> = None;') && fields.length >= RESOLUTION_CONSTRUCTION_SITES;
     }],
   ['GitRepoFetcher maps the degraded reason into Freshness', configSync,
     (t) => /Some\(reason\) => Freshness::Degraded \{ reason \}/.test(t)],
