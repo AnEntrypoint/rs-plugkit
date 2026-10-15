@@ -6781,7 +6781,11 @@ fn scan_c_like(
             continue;
         }
         if let Some(delim) = quote {
-            if byte == b'\\' {
+            if byte == b'\\' && byte_at(i + 1) == Some(b'\n') {
+                line += 1;
+                line_start = i + 2;
+                i += 2;
+            } else if byte == b'\\' {
                 i = after_escape(bytes, i);
             } else {
                 if byte == delim {

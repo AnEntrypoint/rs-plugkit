@@ -47,6 +47,12 @@ const fileSource = field('file_source');
 const matchCountRaw = field('match_count');
 const hasWalkReason = /^\s*walk_reason:/m.test(out);
 
+if (ok === null) {
+  const reason = out.trim().split('\n')[0] || 'empty reply from gm-mcp dispatch';
+  console.log(`RESULT: SKIP no daemon answered the codesearch dispatch (${reason.slice(0, 200)})`);
+  process.exit(2);
+}
+
 console.log(
   `file_source=${fileSource} match_count=${matchCountRaw} walk_reason=${hasWalkReason ? 'present' : 'absent'} hits=${hitLines.length}`,
 );

@@ -33,7 +33,7 @@ const rebuilds = inWindow.filter((ev) => ev.event === REBUILD);
 const unattributed = treesitter.filter(
   (ev) => typeof ev.path !== 'string' || ev.path === '' || typeof ev.plugin_failure !== 'string',
 );
-const barePairRebuilds = rebuilds.filter((ev) => !Array.isArray(ev.changed_files) || 'stored_then_current' in ev);
+const barePairRebuilds = rebuilds.filter((ev) => !Array.isArray(ev.changed_files) || ev.reused === true);
 const namelessRebuilds = rebuilds.filter(
   (ev) => ev.reason !== 'explicit-rebuild' && Array.isArray(ev.changed_files) && ev.changed_files.length === 0,
 );

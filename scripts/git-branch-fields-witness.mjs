@@ -138,6 +138,13 @@ function main() {
       `ok=${nonBoolean.ok} invalid_fields=${lists(nonBoolean, 'invalid_fields').join('|')}`,
     );
 
+    const nonBooleanAll = dispatch(gm, project, work, { all: 'origin' });
+    expect(
+      'non_boolean_all_refused',
+      !isOk(nonBooleanAll) && lists(nonBooleanAll, 'invalid_fields').includes('all'),
+      `ok=${nonBooleanAll.ok} invalid_fields=${lists(nonBooleanAll, 'invalid_fields').join('|')}`,
+    );
+
     const envelope = dispatch(gm, project, work, { full_response: true });
     expect(
       'full_response_envelope_accepted',
