@@ -66,6 +66,8 @@ pub struct Policy {
     pub shell_verbs: Vec<String>,
     #[serde(default = "default_deny_shell_git")]
     pub deny_shell_git: bool,
+    #[serde(default = "default_deny_native_search")]
+    pub deny_native_search: bool,
     #[serde(default = "default_gate_repeat_escalate_threshold")]
     pub gate_repeat_escalate_threshold: u64,
     #[serde(default = "default_pseudo_phases")]
@@ -175,6 +177,9 @@ fn default_shell_verbs() -> Vec<String> {
 fn default_deny_shell_git() -> bool {
     true
 }
+fn default_deny_native_search() -> bool {
+    true
+}
 fn default_gate_repeat_escalate_threshold() -> u64 {
     3
 }
@@ -258,6 +263,7 @@ impl Default for Policy {
             fresh_prompt_resets_phase: default_true(),
             shell_verbs: default_shell_verbs(),
             deny_shell_git: default_deny_shell_git(),
+            deny_native_search: default_deny_native_search(),
             gate_repeat_escalate_threshold: default_gate_repeat_escalate_threshold(),
             hook_timeout_ms: default_hook_timeout_ms(),
             longgap_threshold_ms: default_longgap_threshold_ms(),
@@ -357,6 +363,7 @@ impl Graph {
         "fresh_prompt_resets_phase",
         "shell_verbs",
         "deny_shell_git",
+        "deny_native_search",
         "gate_repeat_escalate_threshold",
         "hook_timeout_ms",
         "longgap_threshold_ms",
