@@ -15,12 +15,16 @@ pub(super) fn read_ceiling(dir: &str) -> Option<u64> {
 
 pub fn slot_state(project_root: &str) -> Value {
     let observed = count_of_record_live(project_root, now_ms()).map(|live| (live, "count_of_record"));
-    slot_parts(project_root, observed).0
+    slot_parts(project_root, observed, &[]).0
 }
 
-pub(super) fn slot_parts(project_root: &str, observed: Option<(u64, &'static str)>) -> (Value, Vec<String>) {
+pub(super) fn slot_parts(
+    project_root: &str,
+    observed: Option<(u64, &'static str)>,
+    extra_heartbeat_dirs: &[String],
+) -> (Value, Vec<String>) {
     let dir = pool_dir(project_root);
-    let live = read_heartbeats(&dir, now_ms());
+    let live = read_heartbeats(&dir, extra_heartbeat_dirs, now_ms());
     let heartbeat_live = live.count as u64;
     let live_count = observed.map_or(heartbeat_live, |(count, _)| count);
     let live_source = observed.map_or("heartbeats", |(_, source)| source);

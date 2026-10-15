@@ -1382,7 +1382,7 @@ pub(super) const GREP_ACCEPTED_FIELDS: &[&str] = &[
     "regex", "fixed_strings", "fixedStrings", "case_insensitive", "ignore_case", "whole_word",
     "context", "max_files",
     "no_ignore", "include_ignored",
-    "max_results", "maxResults", "limit", "max_matches", "k",
+    "max_results", "maxResults", "limit", "head_limit", "max_matches", "k",
     "refresh", "no_cache", "force_disk", "file_source",
 ];
 
@@ -1657,6 +1657,8 @@ pub(super) fn verb_help_doc(verb: &str) -> Option<&'static str> {
         "prd-add" => Some(PRD_ADD_HELP),
         "codeinsight" | "code_insight" => Some(CODEINSIGHT_HELP),
         "comment-audit" => Some(COMMENT_AUDIT_HELP),
+        "fetch" => Some(super::web::FETCH_HELP),
+        "websearch" | "web_search" | "web-search" => Some(super::web::WEBSEARCH_HELP),
         "git_merge_abort" => Some(super::git::GIT_MERGE_ABORT_HELP),
         "git_worktree" => Some("git_worktree {action: list} returns worktrees; {action: add, path, ref?: HEAD, detach?: true} creates a linked checkout; detach false requires an existing local branch name; {action: remove, path} removes a clean unlocked checkout without force. Unknown fields are refused per action. Repository selectors and session fields are accepted."),
         _ => None,
@@ -1806,7 +1808,14 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
 }
 
 pub(super) fn finish_scan_reply(out: &mut serde_json::Map<String, Value>, scan_cap: u32) -> Option<String> {
-    if code_exclusion_count(out) > 0 {
+    // A rule exclusion only costs coverage while the excluded paths stay unread: once the
+    // uncovered-files pass has read them off disk, "exhaustive" keeps whatever that pass reported.
+    let uncovered_complete = out
+        .get("uncovered_scan")
+        .and_then(|v| v.get("complete"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if code_exclusion_count(out) > 0 && !uncovered_complete {
         out.insert("exhaustive".to_string(), json!(false));
     }
     let partial = scan_partial_reason(out);
@@ -1826,7 +1835,7 @@ pub(super) fn finish_scan_reply(out: &mut serde_json::Map<String, Value>, scan_c
     partial
 }
 
-pub(super) const GREP_LIMIT_FIELDS: &[&str] = &["max_results", "maxResults", "limit", "max_matches", "k"];
+pub(super) const GREP_LIMIT_FIELDS: &[&str] = &["max_results", "maxResults", "limit", "head_limit", "max_matches", "k"];
 
 pub(super) const GREP_DEFAULT_MAX_MATCHES: u32 = 200;
 

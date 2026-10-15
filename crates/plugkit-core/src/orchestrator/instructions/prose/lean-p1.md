@@ -2,7 +2,7 @@
 
 This is a concern of the method, not a stage of a pipeline: it is entered from whichever node the work reaches it from, and left as soon as what it asks for holds. No concern gates entry to a set of nodes.
 
-SHAPE turns the request into a PRD that covers the whole closure of the request before any contract is written. It orients on the live tree rather than on recalled memory, names every in-spirit row, states each row's pre-conditions, invariants and post-conditions, resolves every grounding unknown with a witness, and types every contract-level or runtime-level unknown for the node that will discharge it. The node exits when no row is unshaped, no grounding unknown is open, and an expansion pass over the rows adds nothing new. The exit runs LIVEPLAN, then the G_CONTRACT gate, then CONTRACT.
+SHAPE turns the request into a PRD that covers the whole closure of the request before any contract is written. It orients on the live tree rather than on recalled memory, names every in-spirit row, states each row's pre-conditions, invariants and post-conditions, resolves every grounding unknown with a witness, and types every contract-level or runtime-level unknown for the node that will discharge it. The node exits when no row is unshaped, no grounding unknown is open, and an expansion pass over the rows adds nothing new. The exit runs LIVEPLAN, then the G_CONTRACT gate.
 
 Principles in this node are applied as work, from the lean method (AnEntrypoint/lean). Each H3 below carries a principle key, then the attribution exactly as gm-config/fsm/graph.json labels it.
 
@@ -66,7 +66,7 @@ Any other unknown is a contract property or a runtime property. Record it with `
 
 `depends_on` lists the ids that must resolve first. mutable-add refuses an addition that would close a cycle, and the refusal names the cycle path. A mutable may depend on any row in the store regardless of the node that typed it.
 
-Two-pass rule: a mutable that survives two genuine resolution attempts without a witness is not attempted a third time with the same approach. Reclassify it as a fresh, differently scoped unknown with a new id, re-cut the affected rows with prd-add on their existing ids, and stay in SHAPE. The reclassification is reshaping, not failure.
+Two-pass rule: a mutable that survives two genuine resolution attempts without a witness is not attempted a third time with the same approach. Reclassify it as a fresh, differently scoped unknown with a new id, re-cut the affected rows with prd-add on their existing ids, and stay in EARS. The reclassification is reshaping, not failure.
 
 Surface divergence: a state that differs from the PRD's assumed shape becomes a new mutable, with its witness, and then resumes. A broken tool that blocks a witness channel becomes a mutable whose task is to make the channel reachable: fix the tool, replace it, or drive its lower-level interface directly. It is never parked as blocked by something external.
 
@@ -74,7 +74,7 @@ Surface divergence: a state that differs from the PRD's assumed shape becomes a 
 
 scan_deps detects the obfuscated dropper that appends a payload after a source file's real end: one very long, whitespace-padded line that resolves a remote address, fetches and decodes data, and evaluates or spawns the result. It runs two structural checks that survive a change of address, key or cipher. First, the byte size of a file is wildly out of proportion to its line count. Second, a run of four or more `\uXXXX` escapes decodes to an identifier-shaped name, which real code never writes for an ASCII identifier.
 
-Dispatch `{}` on the first dependency install of a session and before trusting any freshly cloned or vendored node_modules. `{"root":"<relative dir>"}` limits the git-tracked half to a subdirectory. `{"root":"<absolute dir>"}` scans a sibling project, including its gitignored node_modules. A symlink or junction that leaves the root is not followed and is listed in symlinkEscapes. `{"full":true}` forces a complete walk for a one-off sweep after a suspicious install. Otherwise the per-package stamp in `.gm/scan-deps-stamp.json` skips unchanged packages. A package with a failing or blocked finding is never stamped, so it is reported on every scan.
+Dispatch `{}` on the first dependency install of a session and before trusting any freshly cloned or vendored node_modules. `{"root":"<relative dir>"}` limits the git-tracked half to a subdirectory. `{"root":"<absolute dir>"}` scans a sibling project, including its gitignored node_modules. A symlink or junction that leaves the root is not followed and is listed in symlinkEscapes. `{"full":true}` forces a complete walk for a one-off sweep after a suspicious install. Otherwise the per-package stamp in `.gm/exec-spool/.scan-deps-stamp.json` skips unchanged packages. A package with a failing or blocked finding is never stamped, so it is reported on every scan.
 
 Read the reply by its counts. blockedCount above zero is evidence: the operating system or antivirus already blocked a read. failCount above zero is a structural hit. warnCount alone usually marks a legitimate minified bundle and gets a glance, never a block. nodeModulesTruncated true means part of the tree was not covered, and the walk adds a prd-add row for a standing unbounded sweep.
 
@@ -112,7 +112,7 @@ Search the problem in the wording the user used, and dispatch an exec_js command
 
 Handover: Hands falsifiable EARS requirements, each with an exec_js-checkable outcome, to INVEST for row sizing; nominated next node: INVEST; cite EARS Requirements Syntax - Alistair Mavin.
 
-Write each requirement in one EARS template (ubiquitous, event-driven, state-driven, unwanted behaviour, or optional feature), with its trigger, its system response, and an observable outcome. Test falsifiability: the observable outcome must be something an exec_js run can return true or false on. A requirement that cannot be falsified fires the backreference to DBC. The requirement is then rewritten in CONTRACT as a precondition or postcondition before it enters the PRD.
+Write each requirement in one EARS template (ubiquitous, event-driven, state-driven, unwanted behaviour, or optional feature), with its trigger, its system response, and an observable outcome. Test falsifiability: the observable outcome must be something an exec_js run can return true or false on. A requirement that cannot be falsified fires the backreference to DBC. The requirement is then rewritten in G_CONTRACT as a precondition or postcondition before it enters the PRD.
 
 ### INVEST - INVEST - Bill Wake
 
@@ -160,10 +160,10 @@ When instruction returns a recall hit that a witnessed codesearch contradicts, p
 
 Entry is gated by G_START. The gate lean-one-task-in-flight is blocking. Its refusal names a recovery verb in next_dispatch. A repeated identical refusal escalates at gate_repeat_escalate_threshold (default 3). Dispatch the named recovery verb, never the denied transition again.
 
-Exit is `transition to=CONTRACT`, dispatched only when every row carries pre-conditions, invariants and post-conditions, every grounding unknown has a witness, every contract-kind mutable is typed, and the last expansion pass added zero rows. The exit path runs LIVEPLAN, then the G_CONTRACT gate (contract is the only durable description, advisory: it records the rule and never refuses), then UBIQ in CONTRACT. Before that transition no second durable description of the request exists. No design document is written, and no plan prose lives outside `.gm/prd/`, `.gm/mutables/` and their two commit logs. The rows and the types are the description.
+Exit is `transition to=G_CONTRACT`, dispatched only when every row carries pre-conditions, invariants and post-conditions, every grounding unknown has a witness, every contract-kind mutable is typed, and the last expansion pass added zero rows. The exit path runs LIVEPLAN, then the G_CONTRACT gate (contract is the only durable description, advisory: it records the rule and never refuses), then UBIQ in G_CONTRACT. Before that transition no second durable description of the request exists. No design document is written, and no plan prose lives outside `.gm/prd/`, `.gm/mutables/` and their two commit logs. The rows and the types are the description.
 
-Feedback inside the node: XYPROB routes back to JTBD, INVEST routes back to THINSLICE, and SPIKE routes back to LIVEPLAN. Each re-cuts rows in place with prd-add on existing ids, then continues the walk in this node. EARS routes to DBC, which is a backreference into CONTRACT carrying the row id, because DBC is the earliest node able to make the requirement falsifiable. The backreference from LIVEPLAN to G_START closes a finished task before a new plan opens.
+Feedback inside the node: XYPROB routes back to JTBD, INVEST routes back to THINSLICE, and SPIKE routes back to LIVEPLAN. Each re-cuts rows in place with prd-add on existing ids, then continues the walk in this node. EARS routes to DBC, which is a backreference into G_CONTRACT carrying the row id, because DBC is the earliest node able to make the requirement falsifiable. The backreference from LIVEPLAN to G_START closes a finished task before a new plan opens.
 
-Routing is to the earliest capable node. A discovery made in SHAPE stays in SHAPE unless it changes a contract or a runtime property, and it never sends the walk further back than the discovery requires.
+Routing is to the earliest capable node. A discovery made in EARS stays in EARS unless it changes a contract or a runtime property, and it never sends the walk further back than the discovery requires.
 
 Every turn ends in a verb dispatch. A transition refused with a next_dispatch is dispatched next, not narrated, and the denied transition is not retried blind.
