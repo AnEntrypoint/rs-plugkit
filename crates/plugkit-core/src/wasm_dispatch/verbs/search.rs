@@ -586,6 +586,7 @@ fn emit_codeinsight_pass_outcome(reason: &str, root: &str, pass: &Value) {
             "pass_ok": pass.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
             "changed_files_count": changed_files_count,
             "changed_files": pass.get("changed_files").cloned().unwrap_or_else(|| json!([])),
+            "reused": pass.get("reused").cloned().unwrap_or(Value::Null),
         }),
     );
 }
