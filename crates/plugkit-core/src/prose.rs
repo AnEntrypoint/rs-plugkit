@@ -142,10 +142,15 @@ fn read_vendor_manifest() -> serde_json::Map<String, serde_json::Value> {
 }
 
 pub fn is_unedited_snapshot(key: &str, text: &str) -> bool {
-    read_vendor_manifest()
-        .get(key)
-        .and_then(|recorded| recorded.as_str())
-        .is_some_and(|recorded| recorded == snapshot_hash(text))
+    let hash = snapshot_hash(text);
+    match read_vendor_manifest().get(key).and_then(|recorded| recorded.as_str()) {
+        Some(recorded) => recorded == hash,
+        None => {
+            let default = crate::orchestrator::instructions::compiled_default_for_prose_key(key);
+            crate::orchestrator::instructions::has_compiled_default_for_prose_key(key)
+                && hash == snapshot_hash(default)
+        }
+    }
 }
 
 pub fn record_snapshot(key: &str, text: &str) -> bool {

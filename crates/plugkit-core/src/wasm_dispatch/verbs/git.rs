@@ -4409,7 +4409,7 @@ pub(super) fn git_diff(body: &Value) -> u64 {
         "git_diff",
         body,
         &[
-            "range", "ref", "rev", "staged", "stat", "path", "paths", "files",
+            "range", "ref", "rev", "staged", "stat", "path", "paths", "files", "limit",
         ],
     ) {
         return refusal;
