@@ -4676,6 +4676,8 @@ impl TermCombination {
     }
 }
 
+const REGEX_COMPILE_SIZE_LIMIT: usize = 1 << 20;
+
 fn build_matcher(
     pattern: &str,
     regex: bool,
@@ -4683,8 +4685,19 @@ fn build_matcher(
     whole_word: bool,
 ) -> Result<LiteralMatcher, String> {
     if regex {
+        if let Some((at, c)) = pattern
+            .char_indices()
+            .find(|&(_, c)| c.is_control() && c != '\t')
+        {
+            let code = c as u32;
+            return Err(format!(
+                "invalid regular expression: raw control character U+{code:04X} at byte {at} is not allowed in a pattern or class; write it as an escape such as \\x{code:02X} (or \\t, \\n) so the class matches the bytes you meant"
+            ));
+        }
         regex::RegexBuilder::new(pattern)
             .case_insensitive(case_insensitive)
+            .size_limit(REGEX_COMPILE_SIZE_LIMIT)
+            .dfa_size_limit(REGEX_COMPILE_SIZE_LIMIT)
             .build()
             .map(LiteralMatcher::Regex)
             .map_err(|e| format!("invalid regular expression: {e}"))

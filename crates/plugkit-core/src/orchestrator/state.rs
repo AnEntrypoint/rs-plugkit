@@ -258,3 +258,40 @@ pub fn handle_status() -> (String, String, i32) {
     }
     (payload.to_string(), String::new(), 0)
 }
+
+pub fn handle_session_handover(content: &str) -> (String, String, i32) {
+    let body: Value = serde_json::from_str(content).unwrap_or(Value::Null);
+    let incoming = dispatch_session_id().or_else(|| {
+        ["session_id", "SESSION_ID", "sessionId"]
+            .iter()
+            .find_map(|k| body.get(*k).and_then(|v| v.as_str()))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    });
+    let Some(incoming) = incoming else {
+        return (
+            String::new(),
+            "session-handover refused: no requesting session id (pass session_id in the body)"
+                .to_string(),
+            1,
+        );
+    };
+    let mut s = read_state();
+    let prior = s.session_id.clone();
+    s.session_id = Some(incoming.clone());
+    s.updated_at_ms = now_ms();
+    if let Err(e) = write_state(&s) {
+        return (
+            String::new(),
+            format!("session-handover write failed: {}", e),
+            1,
+        );
+    }
+    let payload = json!({
+        "ok": true,
+        "verb": "session-handover",
+        "session_id": incoming,
+        "handed_over_from": prior,
+    });
+    (payload.to_string(), String::new(), 0)
+}

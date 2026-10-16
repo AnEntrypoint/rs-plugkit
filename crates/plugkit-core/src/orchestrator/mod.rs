@@ -17,15 +17,12 @@ pub mod fsm;
 pub mod fsm_propose;
 pub mod fsm_vendor;
 pub mod instructions;
-pub mod memorize;
-pub mod memory_component;
 pub mod mutables;
 pub mod prd;
 pub mod prd_repair;
 pub mod predicate_registry;
 pub mod pool_rank;
 pub mod pool_slots;
-pub mod recall;
 pub mod residual;
 pub mod row_store;
 pub mod state;
@@ -406,16 +403,14 @@ orchestrator_dispatch_table! {
     "dream-replay" => dream_rsi::handle(content),
     "dream-replay-cycle" => dream_cycle::handle(content),
     "dream-strategy-propose" => dream_rsi::handle_strategy_propose(content),
-    "memorize-fire" => memorize::handle_fire(content),
-    "memorize-backfill" => memorize::handle_backfill(content),
     "discipline-note" => discipline_note::handle(content),
     "discipline-check-removal" => discipline_note::handle_check_removal(content),
     "discipline-audit" => discipline_note::handle_audit(content),
     "capability-resolve" => capability_proxy::handle(content),
-    "memory-namespace-audit" => memory_component::handle_audit(content),
     "codeinsight-namespace-audit" => codeinsight_component::handle_audit(content),
     "calculus-model-check" => calculus::handle_model_check(content),
     "phase-status" => state::handle_status(),
+    "session-handover" => state::handle_session_handover(content),
     "wait" => wait::handle(content),
     "sleep" => wait::handle(content),
     "residual-scan" => residual::handle_scan(content),
@@ -424,7 +419,6 @@ orchestrator_dispatch_table! {
     "submodule-check" => submodule_drift::handle_check(content),
     "component-loader-reconcile" => component_loader_dispatch::handle_reconcile(content),
     "component-loader-hmr" => component_loader_dispatch::handle_hmr(content),
-    "auto-recall" => recall::handle_auto_recall(content),
     "instruction" => instructions::handle_instruction(content),
     "pool-brief" => pool_slots::handle_brief(content),
     "prd-add" => prd::handle_add(content),
