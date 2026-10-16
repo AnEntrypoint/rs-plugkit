@@ -307,9 +307,13 @@ pub fn status_is_open(status: &str) -> bool {
         .any(|s| s.eq_ignore_ascii_case(&normalized))
 }
 
+pub fn status_is_blocked(status: &str) -> bool {
+    status.trim().eq_ignore_ascii_case("blocked")
+}
+
 fn status_matches_filter(want: &str, status: &str) -> bool {
     if want.eq_ignore_ascii_case("pending") {
-        return status_is_open(status) && !status.trim().eq_ignore_ascii_case("blocked");
+        return status_is_open(status) && !status_is_blocked(status);
     }
     want == status
 }
