@@ -18,7 +18,7 @@ const DEFAULT_LIST_LIMIT: usize = 12;
 const POOL_RULES: [&str; 8] = [
     "Floor 10: while open_rows > 0 keep live at or above the floor, which is 10 or the recorded spawn ceiling when that is lower; the floor is a gate, not a launch count: refill is measured against the ceiling (rule 3).",
     "Pass the ListAgents count of running subagents as body.live on every call: it is the count of record, kept 5 minutes in .gm/pool/count-of-record.json. prd-resolve and transition use that record when they carry no live field; with no fresh record they do not deny and reply count_of_record: absent. slots.live_heartbeats is only the heartbeat cross-check.",
-    "Spawn ceiling 20, or the N a spawn refusal recorded: while open_rows > 0 fill toward it. free_slots = ceiling - live; refill_needed = min(free_slots, launchable + traversal slot), where launchable = slots.candidates after the dirty_target and live_writer gates (node rows first, then any open row) and the traversal slot is 1 while traversal.needed; idle_slots = free_slots - refill_needed. shortfall = floor - live is what the floor needs; sufficient is true when the advertised launches cover the shortfall. Launch exactly the ids in slots.launch; unfilled_shortfall = shortfall - refill_needed is filled from slots.candidates in order.",
+    "Spawn ceiling 20, or the N a spawn refusal recorded: while open_rows > 0 fill toward it. free_slots = ceiling - live; refill_needed = min(free_slots, launchable + traversal slot), where launchable = slots.candidates after the dirty_target and live_writer gates (node rows first, then any open row) and the traversal slot is 1 while traversal.needed; idle_slots = free_slots - refill_needed. shortfall = floor - live is what the floor needs; sufficient is true when the advertised launches cover the shortfall. Launch exactly the ids in slots.launch, which holds pending rows only; when traversal.slot is true, fill that one slot with pool-brief role traversal and traversal.brief_row. unfilled_shortfall = shortfall - refill_needed is filled from slots.candidates in order.",
     "A live count under the floor while open_rows > 0 is a gate denial (error_code floor_gate_denied) on pool-observe and transition (never on prd-resolve: a closure adds no launch): launch the advertised gm-worker subagents from slots.launch, then launch unfilled_shortfall more from slots.candidates (node-first, then any open row), then retry. It is also a FAILURE: append `FAILURE: <UTC timestamp> live count fell to <live> with <open_rows> pending rows` to .gm/witness-log.md. When no open row is launchable and no traversal node is due, pool-observe replies ok with state supply_exhausted instead of a denial, naming held_rows; those rows are the only supply, so wait for their completion and do not retry-loop.",
     "Refill on every completion, in the same turn: launch one replacement per freed slot from launch (node-first candidates). Never launch a row that is in slots.live_rows.",
     "Pass body.held = the row id of every running worker on every call, including a worker whose heartbeat is not written yet. The newest held list is kept for 30 minutes; send held: []. slots.live_rows lists only ids that exist as a row id in the prd store, so a scan of the prd text finds every id it lists; a held or heartbeat id with no such row is listed in slots.live_rows_unmatched instead.",
@@ -141,22 +141,20 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     let unfilled_shortfall = shortfall.saturating_sub(refill_needed);
     let next_node = unscanned.first().cloned();
     attach_reasons(&mut slots, &advertised, refill_needed, free_slots);
-    let mut launch: Vec<Value> = advertised
+    let launch: Vec<Value> = advertised
         .iter()
         .take(refill_needed as usize)
         .enumerate()
         .map(|(index, id)| json!({"id": id, "role": "resolver", "reason": advertised_reason(index + 1, refill_needed)}))
         .collect();
     let shown: Vec<&String> = unscanned.iter().take(TRAVERSAL_NODE_SHOWN).collect();
-    if traversal_needed && (launch.len() as u64) < refill_needed {
-        launch.push(json!({"id": TRAVERSAL_LAUNCH_ID, "role": "traversal", "node": next_node, "surface": next_node, "reason": "traversal: fills a free slot after every advertised row, scanning the next unscanned node"}));
-    }
+    let traversal_slot = traversal_needed && (launch.len() as u64) < refill_needed;
     let launch_ids: Vec<String> = launch
         .iter()
         .filter_map(|item| item["id"].as_str().map(str::to_string))
         .collect();
     let sufficient = open_rows == 0 || shortfall == 0 || (launch_ids.len() as u64) >= shortfall;
-    let route = pool_route(open_rows, &launch_ids, traversal_needed, next_node.as_deref(), launchable);
+    let route = pool_route(open_rows, &launch_ids, traversal_needed, traversal_slot, next_node.as_deref(), launchable);
     let candidates_shown = slots["candidates"].as_array().map_or(0, Vec::len) as u64;
     if let Some(fields) = slots["candidates_route"].as_object_mut() {
         fields.insert("next_verb".to_string(), json!(route.kind));
@@ -164,13 +162,15 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     }
     let traversal = json!({
         "needed": traversal_needed,
+        "slot": traversal_slot,
+        "brief_row": TRAVERSAL_LAUNCH_ID,
         "state_error": state_error,
         "node_witness_candidates": node_launchable,
         "threshold": traversal_threshold,
         "unscanned_nodes": shown.clone(),
         "unscanned_surfaces": shown,
         "unscanned_total": unscanned.len(),
-        "rule": "traversal is needed only while node witness candidates are below 2 x floor, or the advertised launches do not cover the shortfall, and candidate nodes remain; a candidate is one unscanned, unleased source file (a node: .js/.mjs/.cjs/.ts/.jsx/.tsx up to 3 directory levels under a traversal root) whose own file stem no scripts/ file names by content (the stem as a whole word in the text of a scripts/ file); a node is never grouped into its directory, so a directory scan does not lease its files. Traversal roots are .gm/gm.config.json traversal.roots when it is set; otherwise src, apps and client as far as they exist; otherwise every top-level directory except node_modules, target, dist, build, out, vendor, coverage, .next, __pycache__, deps, _build and .venv. pool-observe advertises the first candidate in launch and leases nothing; a traversal brief for an open row leases the node that row names (its path, a directory prefix of it, or its bare file name) when that node is unscanned, and is refused otherwise; a traversal brief for traversal-node-supply leases the first candidate when it is issued; a node named in scanned_nodes (or scanned_surfaces, where a directory name leases every node under it) is leased for 6 hours; a state key with no file extension is a directory left by an older build, is dropped on read and leases nothing",
+        "rule": "traversal is needed only while node witness candidates are below 2 x floor, or the advertised launches do not cover the shortfall, and candidate nodes remain; a candidate is one unscanned, unleased source file (a node: .js/.mjs/.cjs/.ts/.jsx/.tsx up to 3 directory levels under a traversal root) whose own file stem no scripts/ file names by content (the stem as a whole word in the text of a scripts/ file); a node is never grouped into its directory, so a directory scan does not lease its files. Traversal roots are .gm/gm.config.json traversal.roots when it is set; otherwise src, apps and client as far as they exist; otherwise every top-level directory except node_modules, target, dist, build, out, vendor, coverage, .next, __pycache__, deps, _build and .venv. pool-observe names the first candidate in traversal.unscanned_surfaces and leases nothing, and slots.launch lists pending rows only; a traversal brief for an open row leases the node that row names (its path, a directory prefix of it, or its bare file name) when that node is unscanned, and is refused otherwise; a traversal brief for traversal-node-supply leases the first candidate when it is issued; a node named in scanned_nodes (or scanned_surfaces, where a directory name leases every node under it) is leased for 6 hours; a state key with no file extension is a directory left by an older build, is dropped on read and leases nothing",
     });
     let mut monitor = monitor_block(&slots);
     if monitor["alarm"] == json!(false) {
@@ -205,6 +205,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     out["sufficient"] = json!(sufficient);
     out["route"] = json!(route.text.clone());
     out["route_kind"] = json!(route.kind);
+    out["no_row_launchable"] = json!(open_rows > 0 && launch_ids.is_empty());
     if body.get("rules").and_then(Value::as_bool) == Some(true) {
         out["rules"] = json!(POOL_RULES);
     } else {
@@ -227,7 +228,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     }
     if observed.is_some() && open_rows > 0 && live < floor {
         let launch_text = launch_instruction(&launch_ids, shortfall, &route.text);
-        let mut text = floor_denial_text("pool-observe", live, floor, open_rows, refill_needed, shortfall, &launch_text);
+        let mut text = floor_denial_text("pool-observe", live, floor, open_rows, launch_ids.len() as u64, shortfall, &launch_text);
         if refill_needed == 0 {
             text.push_str(&format!(" Advertised launchable={launchable}, free_slots={free_slots}, traversal_needed={traversal_needed}."));
         }
@@ -342,6 +343,7 @@ fn pool_route(
     open_rows: u64,
     launch_ids: &[String],
     traversal_needed: bool,
+    traversal_slot: bool,
     next_node: Option<&str>,
     launchable: u64,
 ) -> PoolRoute {
@@ -350,9 +352,14 @@ fn pool_route(
     }
     if !launch_ids.is_empty() {
         let shown = launch_ids.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
+        let traversal_note = if traversal_slot {
+            format!("; then fill the traversal slot: pool-brief {{\"role\":\"traversal\",\"row\":\"{TRAVERSAL_LAUNCH_ID}\",\"session\":\"<your SESSION_ID>\"}}")
+        } else {
+            String::new()
+        };
         return PoolRoute {
             kind: "launch",
-            text: format!("launch: launch the {} advertised ids from slots.launch in order, node-first ({})", launch_ids.len(), shown),
+            text: format!("launch: launch the {} advertised ids from slots.launch in order, node-first ({}){}", launch_ids.len(), shown, traversal_note),
         };
     }
     if traversal_needed {
