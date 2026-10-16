@@ -1,7 +1,7 @@
 use super::events::{emit_event, install_panic_hook, log_deviation_push};
 use super::host_abi::{
     crawl_cdp_call, git_call, git_call_argv, host_env_get, host_exec_js, host_fetch,
-    host_fs_readdir, host_kv_get, host_kv_put, host_kv_query, host_now_ms,
+    host_fs_readdir, host_kv_delete, host_kv_get, host_kv_put, host_kv_query, host_now_ms,
     host_read, pack, plugin_call as call_plugin, plugin_call_text, read_str, unpack_to_string,
     unpack_to_value,
 };
