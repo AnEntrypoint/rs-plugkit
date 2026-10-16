@@ -121,7 +121,7 @@ fn pool_floor_denial_detail() -> String {
     let refill_needed = super::pool_slots::monitor_block(&slots)["shortfall"].clone();
     let shortfall = pool_concurrency_shortfall();
     format!(
-        "pool-floor-met denied: floor_gate_denied open_rows={} live={} refill_needed={} free={} action={} shortfall={}; launch refill_needed gm-worker subagents from slots.launch in a pool-observe reply (node-first candidates, then any open row), then call pool-observe with body.live set to the ListAgents count; on a spawn refusal dispatch pool-observe with its text.",
+        "pool-floor-met denied: floor_gate_denied open_rows={} live={} refill_needed={} free={} action={} shortfall={}; Call pool-observe with body.live set to the ListAgents count, launch the ids it lists in slots.launch (pending row ids only) as gm-worker subagents; when traversal.slot is true, fill that slot with pool-brief role traversal and traversal.brief_row; when no_row_launchable is true no row can launch, so wait for a held row to complete before re-attempting; otherwise re-attempt; on a spawn refusal dispatch pool-observe with its text.",
         slots["open_rows"], slots["live"], refill_needed, slots["free"], slots["action"], shortfall
     )
 }
