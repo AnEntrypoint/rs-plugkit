@@ -112,7 +112,6 @@ pub const META_VERBS: &[&str] = &[
     "cache_put",
     "cache_invalidate",
     "cache_stats",
-    "learn",
 ];
 
 pub const VERB_ALIASES: &[(&str, &str)] = &[
