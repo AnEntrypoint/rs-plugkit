@@ -137,7 +137,7 @@ fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
 const LONGGAP_GATED_STATE_CHANGING_VERBS: &[&str] = &[
     "fs_write", "kv_put", "cache_put", "cache_invalidate",
     "sql_open", "sql_close", "sql_exec", "sql_serialize", "sql_deserialize", "sql_smoke",
-    "forget", "codeinsight_index",
+    "codeinsight_index",
     "config-sync-now", "discipline", "close",
     "git_add", "git_commit", "git_amend", "git_finalize", "git_push", "git_fetch", "git_pull",
     "git_worktree", "git_checkout", "git_merge", "git_merge_abort", "git_branch_delete", "git_rm",
