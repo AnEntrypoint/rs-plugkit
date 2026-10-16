@@ -267,7 +267,7 @@ verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git
 GitHub Actions workflow-run query with each job's name and conclusion in `jobs`) and `ci-log`
 (the run's printed text: `run_id` or `sha`, optional `job_id`, filtered by `job`, `step` and
 `pattern`, capped by `max_lines` and `max_chars`, each line split into `{n, job, step, at, text}`), `prd-add`/`prd-list`/`prd-resolve`/
-`prd-status`, `mutable-add`/`mutable-list`, `discipline-note`, `fsm-vendor`,
+`mutable-add`/`mutable-list`, `discipline-note`, `fsm-vendor`,
 `fsm-validate`, `fsm-propose-override`, `submodule-check`, `sql_open`/`sql_query`/`sql_exec`/`sql_list_dbs`/
 `sql_smoke`, `task-spawn`/`task-list`/`task-output`/`task-stop`, `wait-for-task` (`{id, timeout_ms?}`, default and max 100000; blocks until the task leaves `running` and returns its output, or returns `timed_out:true` at the deadline),
 `background-convert`, `kill-port`, `similarity`, `claim-audit`, `comment-audit`.
