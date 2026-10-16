@@ -346,40 +346,6 @@ fn default_document() -> DataflowDocument {
         },
     );
 
-    pipelines.insert(
-        "recall".to_string(),
-        Pipeline {
-            entry_point: "recall".to_string(),
-            steps: vec![
-                StepNode {
-                    id: "embed".to_string(),
-                    plugin: "gm".to_string(),
-                    verb: "embed_query".to_string(),
-                    input: InputMapping {
-                        fields: btreemap([("query", "request.query")]),
-                    },
-                    when: None,
-                },
-                StepNode {
-                    id: "search".to_string(),
-                    plugin: "gm".to_string(),
-                    verb: "search_with_recency".to_string(),
-                    input: InputMapping {
-                        fields: btreemap([
-                            ("embedding", "steps.embed.embedding"),
-                            ("namespaces", "request.namespaces"),
-                            ("limit", "request.limit"),
-                        ]),
-                    },
-                    when: None,
-                },
-            ],
-            fuse: vec![],
-            conditions: vec![],
-            output: "search".to_string(),
-        },
-    );
-
     DataflowDocument {
         schema_version: DATAFLOW_SCHEMA_VERSION,
         pipelines,

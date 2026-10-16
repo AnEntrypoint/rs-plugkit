@@ -22,8 +22,6 @@ pub mod code_symbols;
 #[cfg(target_arch = "wasm32")]
 pub mod codesearch_rank;
 
-pub mod recall_compact;
-
 #[cfg(target_arch = "wasm32")]
 pub mod scan_deps;
 
@@ -76,12 +74,6 @@ pub mod git_commit_vectors;
 
 #[cfg(target_arch = "wasm32")]
 pub mod memory_md;
-
-#[cfg(target_arch = "wasm32")]
-pub mod tencentdb_memory;
-
-#[cfg(target_arch = "wasm32")]
-pub mod tencentdb_compat;
 
 #[cfg(target_arch = "wasm32")]
 pub mod mediator;

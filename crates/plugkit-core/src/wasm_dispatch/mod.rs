@@ -18,7 +18,7 @@ pub use host_abi::{
 };
 pub(crate) use verbs::GIT_PROTECTED_PATHSPECS;
 pub use verbs::dispatch_verb;
-pub use verbs::{embed_query, memory_recall_backend, route_hint, vec_search_local};
+pub use verbs::{embed_query, route_hint, vec_search_local};
 pub use verbs::{
     plugin_error_detail, plugin_failure_code, plugin_ok, ERR_CODE_FAILED, ERR_CODE_GATE_DENIED,
     ERR_CODE_INVALID_ARGS, ERR_CODE_PANIC, ERR_CODE_RETIRED_VERB, ERR_CODE_UNKNOWN_VERB,

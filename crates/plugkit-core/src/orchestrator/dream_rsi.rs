@@ -513,7 +513,6 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
                 | "mutable-resolve"
                 | "mutable-list"
                 | "mutable-defer"
-                | "memorize-fire"
                 | "residual-scan"
         )
     {
