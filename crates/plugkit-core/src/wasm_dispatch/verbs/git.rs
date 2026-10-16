@@ -3513,7 +3513,7 @@ pub(super) fn pull_and_repush_remote_moved(
                 == 0
         })
         .unwrap_or(false);
-    match pull_past_remote_moved(cwd, &refusal, body_pull_identity(body).as_ref()) {
+    match pull_past_remote_moved(cwd, &refusal, Some(&pull_identity(body))) {
         RemoteMovedPull::NotApplicable => refusal,
         RemoteMovedPull::Blocked(reason) => {
             let clash = pull_clashing_paths(cwd, branch);
@@ -4796,6 +4796,10 @@ pub(super) fn body_pull_identity(body: &Value) -> Option<(String, String)> {
     Some((name, email))
 }
 
+pub(super) fn pull_identity(body: &Value) -> (String, String) {
+    body_pull_identity(body).unwrap_or_else(|| commit_identity(body))
+}
+
 pub(super) const GIT_PULL_ACCEPTED_FIELDS: &[&str] = &[
     "remote",
     "branch",
@@ -4845,13 +4849,13 @@ pub(super) fn git_pull(body: &Value) -> u64 {
     };
 
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-    let mut argv: Vec<String> = Vec::new();
-    if let Some((name, email)) = body_pull_identity(body) {
-        argv.push("-c".to_string());
-        argv.push(format!("user.name={name}"));
-        argv.push("-c".to_string());
-        argv.push(format!("user.email={email}"));
-    }
+    let (name, email) = pull_identity(body);
+    let mut argv: Vec<String> = vec![
+        "-c".to_string(),
+        format!("user.name={name}"),
+        "-c".to_string(),
+        format!("user.email={email}"),
+    ];
     argv.push("pull".to_string());
     argv.push("--no-edit".to_string());
     argv.push(String::from(if rebase { "--rebase" } else { "--no-rebase" }));
