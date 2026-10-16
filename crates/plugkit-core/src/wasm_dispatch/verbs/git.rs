@@ -4404,6 +4404,18 @@ pub(super) fn git_log(body: &Value) -> u64 {
     })
 }
 
+fn git_diff_error(range: &str, r: &Value) -> u64 {
+    let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+    err_json(
+        "git_diff",
+        json!({
+            "error": stderr,
+            "range": range,
+            "hint": "Inspect the error for a Git failure or host execution limit; missing output is not an empty result. Narrow paths/range or use stat:true."
+        }),
+    )
+}
+
 pub(super) fn git_diff(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_diff",
@@ -4423,47 +4435,98 @@ pub(super) fn git_diff(body: &Value) -> u64 {
         let paths = body_pathspecs(body);
         let range = body_revision(body);
         let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
-        let mut argv: Vec<&str> = vec!["diff", "--no-color"];
-        if staged {
-            argv.push("--staged");
+        let limit = body
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
+        let mut scope: Vec<String> = Vec::new();
+        let mut files_total = 0usize;
+        let mut skip_diff = false;
+        if let Some(limit) = limit {
+            let mut listing: Vec<&str> =
+                vec!["diff", "--no-color", "--no-renames", "--name-only", "-z"];
+            if staged {
+                listing.push("--staged");
+            }
+            if !range.is_empty() {
+                listing.push(range);
+            }
+            if !paths.is_empty() {
+                listing.push("--");
+                listing.extend(paths.iter().map(String::as_str));
+            }
+            let r = git_step_replayed_by_call_order(plan, &listing, cwd)?;
+            if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
+                return Ok(git_diff_error(range, &r));
+            }
+            let listed = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+            let names: Vec<&str> = listed.split('\0').filter(|n| !n.is_empty()).collect();
+            files_total = names.len();
+            if files_total > limit {
+                if limit == 0 {
+                    skip_diff = true;
+                } else {
+                    scope = names
+                        .iter()
+                        .take(limit)
+                        .map(|n| format!(":(top,literal){n}"))
+                        .collect();
+                    let chars: usize = scope.iter().map(|s| s.len() + 1).sum();
+                    if chars > GIT_PATHSPEC_EXCLUDE_ARGV_BUDGET_CHARS {
+                        return Ok(err_json(
+                            "git_diff",
+                            json!({
+                                "error": "limit selects too many paths for one git pathspec list",
+                                "limit": limit,
+                                "hint": "Lower limit or narrow paths/range."
+                            }),
+                        ));
+                    }
+                }
+            }
         }
-        if stat {
-            argv.push("--stat");
+        let mut diff = String::new();
+        if !skip_diff {
+            let mut argv: Vec<&str> = vec!["diff", "--no-color"];
+            if limit.is_some() {
+                argv.push("--no-renames");
+            }
+            if staged {
+                argv.push("--staged");
+            }
+            if stat {
+                argv.push("--stat");
+            }
+            if !range.is_empty() {
+                argv.push(range);
+            }
+            if !scope.is_empty() {
+                argv.push("--");
+                argv.extend(scope.iter().map(String::as_str));
+            } else if !paths.is_empty() {
+                argv.push("--");
+                argv.extend(paths.iter().map(String::as_str));
+            }
+            let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+            if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
+                return Ok(git_diff_error(range, &r));
+            }
+            diff = r
+                .get("stdout")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
         }
-        if !range.is_empty() {
-            argv.push(range);
-        }
-        if !paths.is_empty() {
-            argv.push("--");
-            argv.extend(paths.iter().map(String::as_str));
-        }
-        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
-        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-        if code != 0 {
-            let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
-            return Ok(err_json(
-                "git_diff",
-                json!({
-                    "error": stderr,
-                    "range": range,
-                    "hint": "Inspect the error for a Git failure or host execution limit; missing output is not an empty result. Narrow paths/range or use stat:true."
-                }),
-            ));
-        }
-        let mut diff = r
-            .get("stdout")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
         let truncated = diff.len() > 60000;
         if truncated {
             let cut = (0..=60000).rev().find(|&i| diff.is_char_boundary(i)).unwrap_or(0);
             diff.truncate(cut);
         }
-        Ok(ok(
-            "git_diff",
-            json!({ "diff": diff, "truncated": truncated, "range": range, "paths": paths }),
-        ))
+        let mut data = json!({ "diff": diff, "truncated": truncated, "range": range, "paths": paths });
+        if let Some(limit) = limit {
+            data["files_omitted"] = json!(files_total.saturating_sub(limit));
+        }
+        Ok(ok("git_diff", data))
     })
 }
 
