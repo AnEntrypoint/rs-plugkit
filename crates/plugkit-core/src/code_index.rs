@@ -2228,6 +2228,44 @@ fn chunk_rows_by_path(db_path: &str) -> std::collections::HashMap<String, usize>
     out
 }
 
+fn chunk_row_ids(db_path: &str, fp: &str) -> Vec<i64> {
+    match libsql_wasm::query_params(
+        db_path,
+        &format!("SELECT id FROM {} WHERE path=?1", chunks_table()),
+        &[fp],
+    ) {
+        Ok(rows) => rows
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|row| {
+                        row.get("id").and_then(|v| {
+                            v.as_i64()
+                                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn delete_chunk_rows_by_id(db_path: &str, ids: &[i64]) {
+    if ids.is_empty() {
+        return;
+    }
+    let list = ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let _ = libsql_wasm::exec(
+        db_path,
+        &format!("DELETE FROM {} WHERE id IN ({})", chunks_table(), list),
+    );
+}
+
 fn chunks_table() -> String {
     crate::ragconfig::RagConfig::resolved().code_chunks.table
 }
@@ -2633,17 +2671,20 @@ fn index_cfg_impl(
                 };
                 let mut all_persisted = true;
                 if !(libsql_ok && chunks_present) {
-                    if libsql_ok {
-                        let _ = libsql_wasm::exec_params(
-                            &db_path,
-                            &format!("DELETE FROM {} WHERE path=?1", chunks_table()),
-                            &[fp],
-                        );
-                    }
+                    let prior_ids = if libsql_ok {
+                        chunk_row_ids(&db_path, fp)
+                    } else {
+                        Vec::new()
+                    };
                     for c in &m.chunks {
                         let body = slice_lines(&content, c.ls, c.le);
                         all_persisted &=
                             write_chunk(libsql_ok, &db_path, fp, c, &body, project_path);
+                    }
+                    let replaces_rows =
+                        m.chunks.is_empty() || m.chunks.iter().any(|c| c.emb.is_some());
+                    if libsql_ok && all_persisted && replaces_rows {
+                        delete_chunk_rows_by_id(&db_path, &prior_ids);
                     }
                 }
                 chunked += m.chunks.len() as i32;
@@ -2779,13 +2820,11 @@ fn index_cfg_impl(
         if let Some(m) = prior.get(fp) {
             delete_chunk_keys(&m.chunks, project_path);
         }
-        if libsql_ok {
-            let _ = libsql_wasm::exec_params(
-                &db_path,
-                &format!("DELETE FROM {} WHERE path=?1", chunks_table()),
-                &[fp],
-            );
-        }
+        let prior_chunk_ids = if libsql_ok {
+            chunk_row_ids(&db_path, fp)
+        } else {
+            Vec::new()
+        };
         if treesitter_failed {
             treesitter_failures += 1;
         }
@@ -2880,6 +2919,7 @@ fn index_cfg_impl(
         let mut records: Vec<ChunkRecord> = Vec::new();
         let mut file_fully_persisted = true;
         let mut file_skipped_no_embed: u32 = 0;
+        let mut file_rows_written: usize = 0;
         let chunk_write_loop_started = unsafe { crate::wasm_dispatch::host_now_ms() };
         let chunks_in_this_file = chunk_content_hashes.len();
         for (idx, (((kind, name, ls, le, body), (emb_opt, plan)), content_hash)) in chunks
@@ -2889,6 +2929,9 @@ fn index_cfg_impl(
             .enumerate()
         {
             let was_reused = plan == ChunkEmbedPlan::Reuse;
+            if emb_opt.is_some() {
+                file_rows_written += 1;
+            }
             chunked += 1;
             if emb_opt.is_none() {
                 file_skipped_no_embed += 1;
@@ -2930,6 +2973,10 @@ fn index_cfg_impl(
                     "note": "no elapsed-check guard exists inside this loop by design -- see index-resumable-partial-file-so-chunk-writes-can-be-budget-bounded for why a naive guard would be unsafe",
                 }),
             );
+        }
+        let replaces_rows = chunks_in_this_file == 0 || file_rows_written > 0;
+        if libsql_ok && file_fully_persisted && replaces_rows {
+            delete_chunk_rows_by_id(&db_path, &prior_chunk_ids);
         }
         if file_fully_persisted {
             let over_budget = unsafe { crate::wasm_dispatch::host_now_ms() }
