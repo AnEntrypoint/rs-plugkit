@@ -392,7 +392,9 @@ pub fn handle_vendor(content: &str) -> (String, String, i32) {
         } else {
             write_if_absent_or_forced(&path, text, force)
         };
-        if ok && status != "skipped-existing" {
+        let on_disk_matches_default =
+            pkfs::read_to_string(&path).is_some_and(|prev| prev.trim() == text.trim());
+        if ok && (status != "skipped-existing" || on_disk_matches_default) {
             crate::prose::record_snapshot(key, text);
         }
         let mut row = json!({ "path": path, "ok": ok, "status": status });
