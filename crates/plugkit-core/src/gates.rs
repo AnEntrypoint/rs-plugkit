@@ -139,7 +139,7 @@ const LONGGAP_GATED_STATE_CHANGING_VERBS: &[&str] = &[
     "sql_open", "sql_close", "sql_exec", "sql_serialize", "sql_deserialize", "sql_smoke",
     "codeinsight_index",
     "config-sync-now", "discipline", "close",
-    "git_add", "git_commit", "git_amend", "git_finalize", "git_push", "git_fetch", "git_pull",
+    "git_add", "git_commit", "git_amend", "git_finalize", "git_push", "git_fetch", "git_pull", "git_rewrite_authors",
     "git_worktree", "git_checkout", "git_merge", "git_merge_abort", "git_branch_delete", "git_rm",
     "git_revert", "git_reset", "git_stash", "git_stash_pop", "git_stash_drop",
     "git_worktree_add", "git_worktree_remove", "git_worktree_prune",
