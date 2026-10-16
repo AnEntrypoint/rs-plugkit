@@ -48,6 +48,10 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/config-source-cache/",
     ".gm/config-source-cache.*",
     ".gm/config-source-cache-*",
+    ".gm/browser-mutables.yml",
+    ".gm/receipts/",
+    ".gm/witness-log.md",
+    ".gm/witness-out/",
 ];
 
 pub const MUST_STAY_TRACKED: &[&str] = &[
