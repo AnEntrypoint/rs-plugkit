@@ -81,9 +81,6 @@ pub const SQL_VERBS: &[&str] = &[
     "sql_deserialize",
 ];
 pub const MEMORY_VERBS: &[&str] = &[
-    "memorize",
-    "memorize-prune",
-    "recall",
     "codeinsight_index",
     "codeinsight",
     "codesearch",
@@ -123,7 +120,6 @@ pub const VERB_ALIASES: &[(&str, &str)] = &[
     ("javascript", "exec_js"),
     ("node", "exec_js"),
     ("js", "exec_js"),
-    ("memorize_prune", "memorize-prune"),
     ("py", "python"),
     ("sh", "bash"),
     ("shell", "bash"),

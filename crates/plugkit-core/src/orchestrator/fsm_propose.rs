@@ -254,12 +254,6 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
             ),
             None => format!("no file currently exists at {target_path} -- this would create it"),
         };
-        let gate_name = body
-            .get("gate")
-            .and_then(|v| v.as_str())
-            .unwrap_or(key.as_str());
-        let friction_query = format!("gate {gate_name} {reason}");
-        let historical_friction_hits = super::recall::recall_hits(&friction_query, 5);
         return (
             json!({
                 "ok": true,
@@ -274,8 +268,6 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
                 "diff_summary": diff_summary,
                 "proposed_text": proposed_text,
                 "validation_gates_weaker": validation_gates_weaker,
-                "historical_friction_hits": historical_friction_hits,
-                "historical_friction_note": "Prior cross-session recall hits for this gate/friction pattern -- extrapolate the proposal from repeated real friction, not only this session's single instance, before dispatching with user_confirmed:true.",
                 "note": if requires_authority {
                     "kind=graph grants execution authority (vendored graphs may carry gate hooks). Dispatch AskUserQuestion, state which gates the proposed graph drops relative to the compiled default (see validation_gates_weaker), and only re-dispatch this verb with user_confirmed:true after the user answers yes."
                 } else {
