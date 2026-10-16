@@ -84,7 +84,6 @@ pub const MEMORY_VERBS: &[&str] = &[
     "codeinsight_index",
     "codeinsight",
     "codesearch",
-    "forget",
     "discipline",
 ];
 pub const EXEC_VERBS: &[&str] = &[

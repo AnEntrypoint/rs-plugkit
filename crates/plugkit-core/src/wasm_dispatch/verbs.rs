@@ -1,7 +1,7 @@
 use super::events::{emit_event, install_panic_hook, log_deviation_push};
 use super::host_abi::{
     crawl_cdp_call, git_call, git_call_argv, host_env_get, host_exec_js, host_fetch,
-    host_fs_readdir, host_kv_delete, host_kv_get, host_kv_put, host_kv_query, host_now_ms,
+    host_fs_readdir, host_kv_get, host_kv_put, host_kv_query, host_now_ms,
     host_read, pack, plugin_call as call_plugin, plugin_call_text, read_str, unpack_to_string,
     unpack_to_value,
 };
@@ -2025,24 +2025,6 @@ fn close(body: &Value) -> u64 {
     }
 }
 
-fn forget(body: &Value) -> u64 {
-    let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("");
-    let ns = body
-        .get("namespace")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default");
-    if key.is_empty() {
-        return err("forget", "key required");
-    }
-    let rc =
-        unsafe { host_kv_delete(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32) };
-    if rc == 0 {
-        ok("forget", json!({ "namespace": ns, "key": key }))
-    } else {
-        err("forget", "delete failed")
-    }
-}
-
 const ROUTER_MODELS: &[&str] = &["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"];
 
 const ROUTE_BUCKET_CAPS: &[u64] = &[1000, 4000, 16000, 64000];
@@ -3242,7 +3224,6 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_worktree_remove" => git_worktree_remove(&body),
         "git_worktree_prune" => git_worktree_prune(&body),
         "git_poll" => git_poll(&body),
-        "forget" => forget(&body),
         "learn" => err_coded("learn", ERR_CODE_RETIRED_VERB, "verb retired: the rs-learn crate is removed; memory routes through memorize/recall/memorize-prune (md corpus at .gm/memories + gm.db index)"),
         "cdp" => err_coded("cdp", ERR_CODE_RETIRED_VERB, "verb retired: the standalone cdp verb is removed in this build; dispatch verb crawl (or chrome) with a plain-text body whose first line is engine=cdp, then one step per line: sessionId=<name>, a URL or url=<url>, wait <ms>, eval=<js>, cdp <Domain.method> with its JSON params on the next line, events <Domain.event> [where <field>~<value>] [limit=N]. A session still answered by an older runner build serves cdp; a runner newer than that one retires it"),
         "discipline" => discipline(&body),
