@@ -376,6 +376,27 @@ fn git_status_directory_counts(paths: &[String]) -> Value {
     json!({ "directories": directories, "top": top, "elsewhere": elsewhere })
 }
 
+fn git_status_by_directory(
+    modified: &[String],
+    deleted: &[String],
+    untracked: &[String],
+    staged: &[String],
+) -> Value {
+    json!({
+        "modified": git_status_directory_counts(modified),
+        "deleted": git_status_directory_counts(deleted),
+        "untracked": git_status_directory_counts(untracked),
+        "staged": git_status_directory_counts(staged),
+    })
+}
+
+const GIT_STATUS_SUMMARY_PAGING_NOTE: &str = "first_paths holds the first entries only; pass limit:<n> for more, paths:[...] to scope the listing, or omit summary:true for per-list samples with a spill_file";
+const GIT_STATUS_UNSPILLED_PAGING_NOTE: &str = "the full listing could not be written to a spill file; narrow with paths:[...] or raise limit:<n>";
+
+fn git_status_spill_paging_note(spill_name: &str) -> String {
+    format!("full listing: fs_read path \"{GIT_STATUS_SPILL_DIR}/{spill_name}\" with cwd set to the repo root; or narrow with paths:[...] or raise limit:<n>")
+}
+
 const GIT_STATUS_SPILL_DIR: &str = ".gm/exec-spool/out";
 const GIT_STATUS_SPILL_PREFIX: &str = "git_status-";
 pub(super) const GIT_STATUS_SPILL_KEEP: usize = 20;
@@ -520,7 +541,8 @@ pub(super) fn git_status(body: &Value) -> u64 {
                 .take(first_n)
                 .map(|l| format!("{} {}", &l[..2], l[3..].trim()))
                 .collect();
-            json!({
+            let truncated = entries.len() > first_n;
+            let mut summary_reply = json!({
                 "dirty": dirty,
                 "head": head_sha.clone(), "head_sha": head_sha.clone(), "branch": head_branch.clone(),
                 "summary": true,
@@ -533,14 +555,27 @@ pub(super) fn git_status(body: &Value) -> u64 {
                 },
                 "first_paths": first_paths,
                 "first_paths_note": "each entry is the two-column porcelain status, a space, then the path",
-                "truncated": entries.len() > first_n,
+                "by_directory": git_status_by_directory(&modified, &deleted, &untracked, &staged),
+                "truncated": truncated,
                 "scoped_to": paths,
-            })
+            });
+            if truncated {
+                summary_reply["paging"] = json!(GIT_STATUS_SUMMARY_PAGING_NOTE);
+            }
+            summary_reply
         } else {
             let sample_n = limit.unwrap_or(GIT_STATUS_SAMPLE_PATHS);
-            let overflow = [&modified, &untracked, &deleted, &staged]
-                .iter()
-                .any(|list| list.len() > sample_n);
+            let cut_lists: Vec<&str> = [
+                ("modified", &modified),
+                ("untracked", &untracked),
+                ("deleted", &deleted),
+                ("staged", &staged),
+            ]
+            .into_iter()
+            .filter(|(_, list)| list.len() > sample_n)
+            .map(|(name, _)| name)
+            .collect();
+            let overflow = !cut_lists.is_empty();
             let mut l = json!({
                 "dirty": dirty,
                 "head": head_sha.clone(), "head_sha": head_sha.clone(), "branch": head_branch.clone(),
@@ -551,15 +586,13 @@ pub(super) fn git_status(body: &Value) -> u64 {
                     "deleted": deleted.len(),
                     "staged": staged.len(),
                 },
-                "by_directory": {
-                    "modified": git_status_directory_counts(&modified),
-                    "deleted": git_status_directory_counts(&deleted),
-                },
+                "by_directory": git_status_by_directory(&modified, &deleted, &untracked, &staged),
                 "modified": git_status_sample(&modified, sample_n),
                 "untracked": git_status_sample(&untracked, sample_n),
                 "deleted": git_status_sample(&deleted, sample_n),
                 "staged": git_status_sample(&staged, sample_n),
                 "truncated": overflow,
+                "truncated_lists": cut_lists,
             });
             if overflow {
                 let lines: Vec<String> = porcelain
@@ -576,8 +609,12 @@ pub(super) fn git_status(body: &Value) -> u64 {
                     Some(file) => {
                         l["spill_file"] = json!(file);
                         l["spill_retention"] = json!(git_status_spill_retention_note());
+                        l["paging"] = json!(git_status_spill_paging_note(&spill_name));
                     }
-                    None => l["spill_write_failed"] = json!(true),
+                    None => {
+                        l["spill_write_failed"] = json!(true);
+                        l["paging"] = json!(GIT_STATUS_UNSPILLED_PAGING_NOTE);
+                    }
                 }
             }
             if !paths.is_empty() {
@@ -3762,6 +3799,22 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             protected_pathspec_refusal("git_finalize", &blocked_paths),
         );
     }
+    let gitignored_paths = ignored_requested_paths_now(body_cwd(body), &paths);
+    if !gitignored_paths.is_empty() {
+        return err_json(
+            "git_finalize",
+            json!({
+                "error": format!(
+                    "git_finalize refused: explicit path(s) match .gitignore and were not staged: {}. Untrack or unignore them deliberately, or drop them from paths.",
+                    gitignored_paths.join(", ")
+                ),
+                "error_code": ERR_CODE_INVALID_ARGS,
+                "ignored_paths": gitignored_paths,
+                "requested_paths": paths,
+                "next_dispatch": "git_finalize",
+            }),
+        );
+    }
     let mut steps: Vec<Value> = vec![];
     let mut write_steps: Vec<Value> = Vec::new();
     let mut committed = false;
@@ -3835,12 +3888,7 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                 return err("git_finalize", "refusing to finalize .gm/prd.yml: rewriting the worktree copy down to this session's own rows failed, so a path-scoped commit could not be scoped");
             }
         }
-        let ignored = ignored_requested_paths_now(cwd_ref, &paths);
-        let stage_argv = if ignored.is_empty() {
-            git_stage_argv(&paths, cwd_ref)
-        } else {
-            git_stage_argv_forced(&paths, cwd_ref)
-        };
+        let stage_argv = git_stage_argv(&paths, cwd_ref);
         let stage = git_call_argv(&as_argv(&stage_argv), cwd_ref);
         let stage_code = stage.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         let stage_stderr = stage
@@ -3946,11 +3994,7 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                 json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary, "repo": repo }),
             );
             record_commit_in_liqology(&summary, &head_after);
-            let mut commit_step = json!({ "step": "commit", "sha": sha, "summary": summary });
-            if !ignored.is_empty() {
-                commit_step["force_added_ignored_paths"] = json!(ignored);
-            }
-            steps.push(commit_step);
+            steps.push(json!({ "step": "commit", "sha": sha, "summary": summary }));
         }
     } else if !scoped {
         let flush_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd_ref, &[PRD_STATE_PATHSPEC.to_string()]);
