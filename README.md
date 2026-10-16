@@ -394,6 +394,16 @@ under `.agentplug*` is refused rather than silently widening. A scoped
 `nothing_to_commit`, so a pathspec that no-ops cannot fall through to
 committing the rest of the index.
 
+`git_rewrite_authors` rewrites main's history: dry run by default (lists the
+human commits to change, squash runs and skipped bot commits, writes nothing).
+`apply:true` with `confirm:"rewrite-pushed-history"` snapshots refs/heads/main
+into `.gm/git-snapshots/<ms>.bundle`, rebuilds commit objects with the
+configured identity (`since` optionally bounds the range), keeps every tree
+identical, pushes `--force-with-lease` to origin main and moves the local ref.
+Bot-authored commits keep their author and committer lines but take new shas
+when an ancestor changes. Refuses off main, during a merge, or with changes
+outside `.gm`.
+
 `git_commit {amend:true}` and the `git_amend` alias rewrite HEAD (`git commit
 --amend`) with the same body fields; they refuse `pushed_commit_refused` when
 HEAD is reachable from a `refs/remotes/` ref and `amend requires an existing HEAD
