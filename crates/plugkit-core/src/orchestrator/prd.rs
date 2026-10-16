@@ -2459,8 +2459,8 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                     return (
                         body,
                         format!(
-                            "prd-resolve refused: witness_dispatch_id {} not in the dispatch ledger for {}",
-                            dispatch_id, id_target
+                            "prd-resolve refused: witness_dispatch_id {} is not in the root's dispatch ledger for {}; the ledger keeps the most recent {} dispatches, so a witness older than that has aged out and must be re-run",
+                            dispatch_id, id_target, crate::dispatch_ledger::RETAINED_ENTRIES
                         ),
                         1,
                     );
