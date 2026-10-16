@@ -2,12 +2,12 @@
 
 use std::sync::OnceLock;
 
+#[cfg(feature = "candle")]
 use candle_core::{DType, Device, Tensor};
-#[cfg(not(feature = "slim"))]
+#[cfg(feature = "candle")]
 use candle_nn::VarBuilder;
-use candle_transformers::models::bert::BertModel;
-#[cfg(not(feature = "slim"))]
-use candle_transformers::models::bert::{Config, HiddenAct, PositionEmbeddingType};
+#[cfg(feature = "candle")]
+use candle_transformers::models::bert::{BertModel, Config, HiddenAct, PositionEmbeddingType};
 use tokenizers::Tokenizer;
 
 #[link(wasm_import_module = "env")]
@@ -103,9 +103,9 @@ fn elog(msg: &str) {
     let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
 }
 
-#[cfg(not(feature = "slim"))]
+#[cfg(feature = "candle")]
 static MODEL_SAFETENSORS: &[u8] = include_bytes!("../../../weights/bge-small-en-v1.5.safetensors");
-#[cfg(not(feature = "slim"))]
+#[cfg(feature = "candle")]
 static TOKENIZER_JSON: &[u8] = include_bytes!("../../../weights/bge-tokenizer.json");
 
 pub const EMBED_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
@@ -144,14 +144,16 @@ getrandom::register_custom_getrandom!(custom_getrandom);
 
 struct EmbedCtx {
     tokenizer: Option<Tokenizer>,
+    #[cfg(feature = "candle")]
     model: Option<BertModel>,
+    #[cfg(feature = "candle")]
     device: Device,
     host_delegated: bool,
 }
 
 static CTX: OnceLock<EmbedCtx> = OnceLock::new();
 
-#[cfg(not(feature = "slim"))]
+#[cfg(feature = "candle")]
 static LAZY_WASM_FALLBACK: OnceLock<Option<(Tokenizer, BertModel, Device)>> = OnceLock::new();
 
 fn probe_host_embed() -> bool {
@@ -168,7 +170,7 @@ fn probe_host_embed() -> bool {
     rc == EMBED_DIM as i32
 }
 
-#[cfg(not(feature = "slim"))]
+#[cfg(feature = "candle")]
 fn bge_small_config() -> Config {
     Config {
         vocab_size: 30522,
@@ -190,7 +192,7 @@ fn bge_small_config() -> Config {
     }
 }
 
-#[cfg(not(feature = "slim"))]
+#[cfg(feature = "candle")]
 fn load_wasm_model_uncached() -> Result<(Tokenizer, BertModel, Device), String> {
     gemm::set_wasm_simd128(true);
     crate::wasm_dispatch::emit_event(
@@ -226,7 +228,7 @@ fn load_wasm_model_uncached() -> Result<(Tokenizer, BertModel, Device), String> 
     Ok((tokenizer, model, device))
 }
 
-#[cfg(not(feature = "slim"))]
+#[cfg(feature = "candle")]
 fn lazy_wasm_fallback() -> Option<&'static (Tokenizer, BertModel, Device)> {
     LAZY_WASM_FALLBACK
         .get_or_init(|| {
@@ -257,13 +259,15 @@ fn init_ctx() -> Result<EmbedCtx, String> {
         elog("embed::init_ctx host-delegated (probe ok); skipping safetensors+tokenizer load");
         return Ok(EmbedCtx {
             tokenizer: None,
+            #[cfg(feature = "candle")]
             model: None,
+            #[cfg(feature = "candle")]
             device: Device::Cpu,
             host_delegated: true,
         });
     }
 
-    #[cfg(feature = "slim")]
+    #[cfg(not(feature = "candle"))]
     {
         crate::wasm_dispatch::emit_event(
             "embed.slim-build-no-fallback",
@@ -274,7 +278,7 @@ fn init_ctx() -> Result<EmbedCtx, String> {
         return Err("slim build has no wasm-side embedding fallback -- host_vec_embed must be implemented by the host (e.g. agentplug-runner's native candle path)".to_string());
     }
 
-    #[cfg(not(feature = "slim"))]
+    #[cfg(feature = "candle")]
     {
         crate::wasm_dispatch::emit_event(
             "embed.wasm-loading",
@@ -303,13 +307,13 @@ fn ctx() -> Result<&'static EmbedCtx, &'static str> {
                 "embed::init_ctx OK (host_delegated={})",
                 c.host_delegated
             ));
-            #[cfg(not(feature = "slim"))]
+            #[cfg(feature = "candle")]
             let (safetensors_bytes, tokenizer_bytes) = if c.host_delegated {
                 (0, 0)
             } else {
                 (MODEL_SAFETENSORS.len(), TOKENIZER_JSON.len())
             };
-            #[cfg(feature = "slim")]
+            #[cfg(not(feature = "candle"))]
             let (safetensors_bytes, tokenizer_bytes) = (0, 0);
             crate::wasm_dispatch::emit_event(
                 "embed_init_ok",
@@ -418,7 +422,7 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
     };
 
     if c.host_delegated {
-        #[cfg(not(feature = "slim"))]
+        #[cfg(feature = "candle")]
         {
             if let Some((tokenizer, model, device)) = lazy_wasm_fallback() {
                 elog("embed::embed_text host-delegated live call failed; using lazily-loaded wasm fallback");
@@ -438,23 +442,32 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
         return None;
     }
 
-    let tokenizer = match c.tokenizer.as_ref() {
-        Some(t) => t,
-        None => {
-            record_embed_failure("tokenizer missing from a non-host-delegated embedding context: the compiled-in tokenizer never loaded. A retry will not help".to_string());
-            return None;
-        }
-    };
-    let model = match c.model.as_ref() {
-        Some(m) => m,
-        None => {
-            record_embed_failure("model missing from a non-host-delegated embedding context: the compiled-in safetensors never loaded. A retry will not help".to_string());
-            return None;
-        }
-    };
-    run_embed_forward(tokenizer, model, &c.device, text)
+    #[cfg(not(feature = "candle"))]
+    {
+        record_embed_failure("this build has no candle feature, so no in-wasm embedding model is compiled in: host_vec_embed must answer. A retry will not help until the host embedder recovers".to_string());
+        None
+    }
+    #[cfg(feature = "candle")]
+    {
+        let tokenizer = match c.tokenizer.as_ref() {
+            Some(t) => t,
+            None => {
+                record_embed_failure("tokenizer missing from a non-host-delegated embedding context: the compiled-in tokenizer never loaded. A retry will not help".to_string());
+                return None;
+            }
+        };
+        let model = match c.model.as_ref() {
+            Some(m) => m,
+            None => {
+                record_embed_failure("model missing from a non-host-delegated embedding context: the compiled-in safetensors never loaded. A retry will not help".to_string());
+                return None;
+            }
+        };
+        run_embed_forward(tokenizer, model, &c.device, text)
+    }
 }
 
+#[cfg(feature = "candle")]
 fn run_embed_forward(
     tokenizer: &Tokenizer,
     model: &BertModel,
@@ -608,6 +621,12 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
     if c.host_delegated {
         return Some(out);
     }
+    #[cfg(not(feature = "candle"))]
+    {
+        return Some(out);
+    }
+    #[cfg(feature = "candle")]
+    {
     let (tokenizer, model) = match (c.tokenizer.as_ref(), c.model.as_ref()) {
         (Some(t), Some(m)) => (t, m),
         _ => {
@@ -774,6 +793,7 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
         start = end;
     }
     Some(out)
+    }
 }
 
 pub fn embed_text_json(text: &str) -> Option<serde_json::Value> {
