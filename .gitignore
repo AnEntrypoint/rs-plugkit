@@ -22,3 +22,8 @@ Cargo.lock
 .gm/codesearch-result-*.json
 .gm/codesearch-result-*.json.tmp-*
 .gm/last-prompt.txt
+.gm/turn-state.json
+.gm/mutables.absorbed.json
+.gm/prd.absorbed.json
+.gm/receipts/
+crates/**/.gm/
