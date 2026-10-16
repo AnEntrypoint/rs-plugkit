@@ -20,7 +20,7 @@ Reshaping is `transition to=EARS`, dispatched in the same turn as the discovery,
 
 Write each file in the CONTRACT artifacts only through `fs_write {path, content}`, then verify it with `fs_read {path}`. The disk content is the witness, not the tool's return.
 
-Memorize through the rules in the Memorize section below.
+Save memory for unknowns only, under the rules in the Memory section below.
 
 ## PRD rows
 
@@ -148,13 +148,11 @@ A generic witness such as "verified", "looks correct" or "reviewed" is rejected 
 
 Process of elimination is the debugging method on every surface. For a hard bug, name the loop before the first hypothesis: one exec_js command that drives the exact reported symptom, is deterministic, and is fast. Run it once, unmodified, before reading code for a theory. Each candidate cause is a mutable, eliminated by a real-input run, and each elimination reveals the next candidate. Iterate until one cause survives. Profile to locate the cost with `opts.profile:true`, then eliminate by live measurement, never by intuition.
 
-## Memorize
+## Memory
 
-Memorize the settled contract facts that a subsequent task would otherwise re-derive: the domain term to type name mapping, the module interface decisions, and each rejected representation with the witness that rejected it. Each is `memorize-fire` with a stable key and its witness inline.
+When a contract change makes a memory file stale, delete the file and its `MEMORY.md` line.
 
-When a contract change makes a stored memo stale, prune it with `memorize-prune {"key":"<key>"}`. Use `memorize-prune {"query":"<text>"}` to list the review candidates, then delete the confirmed ones with `{"keys":[...]}`.
-
-Do not memorize the exec output in bulk, intermediate compiler errors, or the contract text itself, which already lives in the signatures.
+Exec output, intermediate compiler errors and the contract text are not memories. The contract text already lives in the signatures.
 
 ## Transition
 
