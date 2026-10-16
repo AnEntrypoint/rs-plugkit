@@ -956,45 +956,48 @@ pub(super) fn ssh_https_fallback_for_origin(repo: Option<&str>) -> Option<SshHtt
 
 pub(super) fn git_fetch_and_resolve_remote(
     repo: Option<&str>,
+    remote: &str,
     branch: &str,
     fallback: Option<&SshHttpsFallback>,
 ) -> Option<String> {
     match fallback {
         Some(f) => {
-            let _ = f.call(&["fetch", "origin", branch], repo);
+            let _ = f.call(&["fetch", remote, branch], repo);
         }
         None => {
-            let _ = git_call_argv(&["fetch", "origin", branch], repo);
+            let _ = git_call_argv(&["fetch", remote, branch], repo);
         }
     }
-    resolve_ref(repo, &format!("origin/{}", branch))
+    resolve_ref(repo, &format!("{}/{}", remote, branch))
 }
 
 pub(super) fn verify_push_landed(
     cwd: Option<&str>,
+    remote: &str,
     branch: &str,
     local_head: &str,
     remote_before: Option<&str>,
     fallback: Option<&SshHttpsFallback>,
 ) -> Result<(String, bool), String> {
     let _ = match fallback {
-        Some(f) => f.call(&["fetch", "origin", branch], cwd),
-        None => git_call_argv(&["fetch", "origin", branch], cwd),
+        Some(f) => f.call(&["fetch", remote, branch], cwd),
+        None => git_call_argv(&["fetch", remote, branch], cwd),
     };
-    let remote_after = resolve_ref(cwd, &format!("origin/{}", branch));
+    let tracking = format!("{}/{}", remote, branch);
+    let remote_after = resolve_ref(cwd, &tracking);
     let remote_after = match remote_after {
         Some(s) => s,
         None => {
             return Err(format!(
-                "could not resolve origin/{} after push -- remote-tracking ref missing",
-                branch
+                "could not resolve {} after push -- remote-tracking ref missing",
+                tracking
             ))
         }
     };
     if remote_after != local_head {
         return Err(format!(
-            "push claimed success but origin/{} ({}) does not match local HEAD ({}) after fetch -- remote did not actually advance to this commit",
-            branch, remote_after, local_head
+            "push claimed success but {} ({}) does not match local HEAD ({}) after fetch -- remote did not actually advance to this commit",
+            tracking, remote_after, local_head
         ));
     }
     let already_current = remote_before.map(|b| b == local_head).unwrap_or(false);
@@ -1273,11 +1276,11 @@ pub(super) fn configured_push_url(repo: Option<&str>, remote: &str) -> Option<St
 
 pub(super) fn push_disabled_refusal(
     repo: Option<&str>,
+    remote: &str,
     branch: &str,
     source_ref: &str,
 ) -> Option<Value> {
-    const REMOTE: &str = "origin";
-    let push_url = configured_push_url(repo, REMOTE)?;
+    let push_url = configured_push_url(repo, remote)?;
     if push_url_is_real_target(&push_url, repo) {
         return None;
     }
@@ -1293,7 +1296,7 @@ pub(super) fn push_disabled_refusal(
         "remote_moved": false,
         "repo": repo,
         "branch": branch,
-        "remote": REMOTE,
+        "remote": remote,
         "push_url": push_url,
         "source_ref": source_ref,
         "push_disabled_by_config": true,
@@ -1301,12 +1304,12 @@ pub(super) fn push_disabled_refusal(
         "error_code": "push_disabled_by_config",
         "reason": format!(
             "remote '{}' of {} has pushurl '{}', which is {} -- no scheme, no user@host and no local path that exists. This repository is deliberately configured not to publish: it is not a broken remote, not a credentials failure and not a remote that moved, so pulling or retrying cannot fix it. Configure a real pushurl to publish -- git config --local remote.{}.pushurl <real push url> -- or drop the override with git config --local --unset remote.{}.pushurl so the fetch url is used.",
-            REMOTE, repo.unwrap_or("cwd"), push_url, kind, REMOTE, REMOTE
+            remote, repo.unwrap_or("cwd"), push_url, kind, remote, remote
         ),
         "next_dispatch": "instruction",
         "next_action_hint": format!(
             "git config --local remote.{}.pushurl <real push url> then git_push again; recover_remote_moved and pull_first are refused on purpose here.",
-            REMOTE
+            remote
         ),
     }))
 }
@@ -1346,6 +1349,22 @@ pub(super) fn git_push(body: &Value) -> u64 {
         return rewrite_refusal("git_push", "force or force_with_lease push");
     }
     let repo = body_cwd(body).map(String::from);
+    let remote_name = match body
+        .get("remote")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(name) if !valid_remote_name(name) => {
+            return err(
+                "git_push",
+                "remote must name a configured remote: letters, digits, '.', '_' or '-' (max 64)",
+            );
+        }
+        Some(name) => name.to_string(),
+        None => "origin".to_string(),
+    };
+    let origin_remote = remote_name == "origin";
     let explicit_branch = body
         .get("branch")
         .and_then(|v| v.as_str())
@@ -1444,12 +1463,15 @@ pub(super) fn git_push(body: &Value) -> u64 {
             }),
         );
     }
-    if let Some(refusal) = push_disabled_refusal(repo.as_deref(), &branch, source_ref) {
+    if let Some(refusal) =
+        push_disabled_refusal(repo.as_deref(), &remote_name, &branch, source_ref)
+    {
         log_deviation_push("push-disabled-by-config", &branch);
         return pack(refusal.to_string());
     }
     let mut ssh_fallback: Option<SshHttpsFallback> = None;
-    let mut remote_before = git_fetch_and_resolve_remote(repo.as_deref(), &branch, None);
+    let mut remote_before =
+        git_fetch_and_resolve_remote(repo.as_deref(), &remote_name, &branch, None);
     let allow_foreign_commits = body
         .get("allow_foreign_commits")
         .and_then(|v| v.as_bool())
@@ -1499,12 +1521,22 @@ pub(super) fn git_push(body: &Value) -> u64 {
         );
     }
     let (mut push_out, mut push_succeeded) =
-        exec_git_push_in(repo.as_deref(), source_ref, &branch, None);
-    if !push_succeeded && push_output_is_ssh_auth_failure(&push_out) {
+        exec_git_push_in(repo.as_deref(), &remote_name, source_ref, &branch, None);
+    if origin_remote && !push_succeeded && push_output_is_ssh_auth_failure(&push_out) {
         if let Some(fallback) = ssh_https_fallback_for_origin(repo.as_deref()) {
-            remote_before = git_fetch_and_resolve_remote(repo.as_deref(), &branch, Some(&fallback));
-            let (retry_out, retry_ok) =
-                exec_git_push_in(repo.as_deref(), source_ref, &branch, Some(&fallback));
+            remote_before = git_fetch_and_resolve_remote(
+                repo.as_deref(),
+                &remote_name,
+                &branch,
+                Some(&fallback),
+            );
+            let (retry_out, retry_ok) = exec_git_push_in(
+                repo.as_deref(),
+                &remote_name,
+                source_ref,
+                &branch,
+                Some(&fallback),
+            );
             if retry_ok {
                 push_out = retry_out;
                 push_succeeded = true;
@@ -1536,8 +1568,13 @@ pub(super) fn git_push(body: &Value) -> u64 {
                 GIT_PUSH_TRANSIENT_REMOTE_BACKOFF_MS * transient_attempts as u64,
             ));
             transient_attempts += 1;
-            let (out, ok_now) =
-                exec_git_push_in(repo.as_deref(), source_ref, &branch, ssh_fallback.as_ref());
+            let (out, ok_now) = exec_git_push_in(
+                repo.as_deref(),
+                &remote_name,
+                source_ref,
+                &branch,
+                ssh_fallback.as_ref(),
+            );
             for id in push_output_remote_request_ids(&out) {
                 if !remote_request_ids.contains(&id) {
                     remote_request_ids.push(id);
@@ -1620,8 +1657,12 @@ pub(super) fn git_push(body: &Value) -> u64 {
             "next_dispatch": "instruction",
             "next_action_hint": "git_pull {branch} then git_push {rev:\"<head_after of that pull>\"}",
         });
-        match remote_moved_recovery_refusal(body, repo.as_deref(), &branch, &local_source_before)
-        {
+        let recovery_block = if origin_remote {
+            remote_moved_recovery_refusal(body, repo.as_deref(), &branch, &local_source_before)
+        } else {
+            Some("auto recovery pulls origin only; pull and re-push this remote by hand")
+        };
+        match recovery_block {
             None => refusal = pull_and_repush_remote_moved(body, &repo, &branch, refusal),
             Some(reason) => {
                 refusal["auto_recovery"] = json!({ "attempted": false, "skipped_reason": reason });
@@ -1632,6 +1673,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
     }
     while !push_succeeded
         && attempts < 3
+        && origin_remote
         && !push_output_is_transient_remote_rejection(&push_out)
     {
         attempts += 1;
@@ -1661,8 +1703,13 @@ pub(super) fn git_push(body: &Value) -> u64 {
             }).to_string());
         }
         rebased = true;
-        let (out, ok_now) =
-            exec_git_push_in(repo.as_deref(), source_ref, &branch, ssh_fallback.as_ref());
+        let (out, ok_now) = exec_git_push_in(
+            repo.as_deref(),
+            &remote_name,
+            source_ref,
+            &branch,
+            ssh_fallback.as_ref(),
+        );
         push_out = out;
         push_succeeded = ok_now;
     }
@@ -1704,6 +1751,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
     };
     match verify_push_landed(
         repo.as_deref(),
+        &remote_name,
         &branch,
         &local_source_after,
         remote_before.as_deref(),
@@ -1736,6 +1784,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
                 "output": push_out,
                 "rebased": rebased,
                 "rebase_retries": attempts,
+                "remote": remote_name.as_str(),
                 "remote_advanced": !already_current,
                 "already_current": already_current,
                 "remote_sha": remote_sha,
@@ -1886,15 +1935,29 @@ pub(super) fn git_commit_failed_for_missing_identity(sout: &str, serr: &str) -> 
     false
 }
 
-pub(super) const MISSING_COMMIT_IDENTITY: &str = "git commit needs an author identity: pass author_name and author_email in the body, or set user.name and user.email in this repository. The identity of an earlier commit is never reused.";
+pub(super) const MISSING_COMMIT_IDENTITY: &str = "git commit needs an author identity: pass author_name and author_email in the body, or set git.author_name and git.author_email in the gm config. The identity of an earlier commit is never reused.";
 
-pub(super) fn body_commit_identity(body: &Value) -> Option<(String, String)> {
-    let field = |key: &str| body.get(key).and_then(|v| v.as_str()).map(str::trim).unwrap_or("").to_string();
-    let (name, email) = (field("author_name"), field("author_email"));
-    if name.is_empty() || email.is_empty() {
-        return None;
-    }
-    Some((name, email))
+pub(super) const DEFAULT_COMMIT_AUTHOR_NAME: &str = "lanmower";
+pub(super) const DEFAULT_COMMIT_AUTHOR_EMAIL: &str = "almagestfraternite@gmail.com";
+
+fn non_blank_str(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+pub(super) fn commit_identity(body: &Value) -> (String, String) {
+    let configured = crate::config::resolve().config.value;
+    let git = configured.get("git");
+    let name = non_blank_str(body.get("author_name"))
+        .or_else(|| non_blank_str(git.and_then(|g| g.get("author_name"))))
+        .unwrap_or_else(|| DEFAULT_COMMIT_AUTHOR_NAME.to_string());
+    let email = non_blank_str(body.get("author_email"))
+        .or_else(|| non_blank_str(git.and_then(|g| g.get("author_email"))))
+        .unwrap_or_else(|| DEFAULT_COMMIT_AUTHOR_EMAIL.to_string());
+    (name, email)
 }
 
 pub(super) fn commit_session_id(body: &Value) -> String {
@@ -2066,15 +2129,14 @@ pub(super) fn git_commit_argv(
     allow_empty: bool,
     amend: bool,
     scoped_paths: &[String],
-    identity: Option<&(String, String)>,
+    identity: &(String, String),
 ) -> Vec<String> {
-    let mut argv: Vec<String> = Vec::new();
-    if let Some((name, email)) = identity {
-        argv.push("-c".to_string());
-        argv.push(format!("user.name={name}"));
-        argv.push("-c".to_string());
-        argv.push(format!("user.email={email}"));
-    }
+    let mut argv: Vec<String> = vec![
+        "-c".to_string(),
+        format!("user.name={}", identity.0),
+        "-c".to_string(),
+        format!("user.email={}", identity.1),
+    ];
     argv.push("commit".to_string());
     if amend {
         argv.push("--amend".to_string());
@@ -2485,10 +2547,10 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         }
         let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd, &commit_note_paths(cwd, scoped_paths));
         let bundled_message = bundle_prd_commit_comments(message, &commit_notes);
-        let identity = body_commit_identity(body);
+        let identity = commit_identity(body);
         let r = git_step_replayed_by_call_order(
             plan,
-            &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, scoped_paths, identity.as_ref())),
+            &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, scoped_paths, &identity)),
             cwd,
         )?;
         write_steps.push(r.clone());
@@ -3333,7 +3395,8 @@ pub(super) fn pull_and_repush_remote_moved(
                     rebased_commits,
                     out_of_scope_commit_paths,
                 } => {
-                    let (push_out, push_ok) = exec_git_push_in(cwd, new_sha.as_str(), branch, None);
+                    let (push_out, push_ok) =
+                        exec_git_push_in(cwd, "origin", new_sha.as_str(), branch, None);
                     let recovery = json!({
                         "attempted": true,
                         "via": "scope-recommit",
@@ -3358,6 +3421,7 @@ pub(super) fn pull_and_repush_remote_moved(
                     log_deviation_push("push-remote-moved-scope-recommitted", branch);
                     let (remote_sha, already_current) = match verify_push_landed(
                         cwd,
+                        "origin",
                         branch,
                         new_sha.as_str(),
                         Some(remote_tip.as_str()),
@@ -3842,8 +3906,8 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         let scoped_paths: &[String] = if scoped { &paths } else { &[] };
         let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd_ref, &commit_note_paths(cwd_ref, scoped_paths));
         let bundled_message = bundle_prd_commit_comments(message.as_str(), &commit_notes);
-        let identity = body_commit_identity(body);
-        let cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, identity.as_ref())), cwd_ref);
+        let identity = commit_identity(body);
+        let cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, &identity)), cwd_ref);
         prd_own_rows = own_rows_filter.as_ref().map(|f| f.own_rows.clone());
         prd_foreign_row_count = foreign_prd_rows.len();
         if let Some(filter) = own_rows_filter.as_mut() {
@@ -6340,6 +6404,82 @@ pub(super) fn git_branch(body: &Value) -> u64 {
 }
 
 pub(super) fn git_remote(body: &Value) -> u64 {
+    match body.get("action").and_then(|v| v.as_str()).map(str::trim) {
+        None | Some("") => git_remote_list(body),
+        Some(action @ ("add" | "remove")) => git_remote_mutate(body, action),
+        Some(_) => err("git_remote", "action must be add or remove; omit it to list remotes"),
+    }
+}
+
+pub(super) fn valid_remote_name(name: &str) -> bool {
+    name.len() <= 64
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+fn valid_https_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    !authority.is_empty()
+        && !authority.contains('@')
+        && !authority.starts_with('-')
+        && url.bytes().all(|b| b.is_ascii_graphic())
+}
+
+fn git_remote_mutate(body: &Value, action: &str) -> u64 {
+    git_async_entry("git_remote", body, |body, plan| {
+        let cwd = body_cwd(body);
+        let name = body
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if !valid_remote_name(name) {
+            return Ok(err(
+                "git_remote",
+                "name must start with a letter or digit and hold only letters, digits, '.', '_' or '-' (max 64)",
+            ));
+        }
+        if name == "origin" {
+            return Ok(err(
+                "git_remote",
+                "origin is never added, removed or changed by git_remote; choose another name",
+            ));
+        }
+        let argv: Vec<&str> = if action == "add" {
+            let url = body
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if !valid_https_url(url) {
+                return Ok(err(
+                    "git_remote",
+                    "url must be https:// with a host, no user:password@ and no whitespace",
+                ));
+            }
+            vec!["remote", "add", name, url]
+        } else {
+            vec!["remote", "remove", name]
+        };
+        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 {
+            let reason = r
+                .get("stderr")
+                .and_then(|x| x.as_str())
+                .unwrap_or("git remote failed");
+            return Ok(err("git_remote", reason));
+        }
+        Ok(ok("git_remote", json!({ "action": action, "name": name })))
+    })
+}
+
+fn git_remote_list(body: &Value) -> u64 {
     git_async_entry("git_remote", body, |body, plan| {
         let cwd = body_cwd(body);
         let requested = body
@@ -9099,6 +9239,7 @@ pub(super) fn push_dirty_refusal(
 
 pub(super) fn exec_git_push_in(
     repo: Option<&str>,
+    remote: &str,
     source_ref: &str,
     branch: &str,
     fallback: Option<&SshHttpsFallback>,
@@ -9108,7 +9249,7 @@ pub(super) fn exec_git_push_in(
     } else {
         format!("{}:{}", source_ref, branch)
     };
-    let push_argv = ["push", "origin", refspec.as_str()];
+    let push_argv = ["push", remote, refspec.as_str()];
     let v = match fallback {
         Some(f) => f.call(&push_argv, repo),
         None => git_call_argv(&push_argv, repo),
