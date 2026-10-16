@@ -3216,7 +3216,6 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_worktree_remove" => git_worktree_remove(&body),
         "git_worktree_prune" => git_worktree_prune(&body),
         "git_poll" => git_poll(&body),
-        "learn" => err_coded("learn", ERR_CODE_RETIRED_VERB, "verb retired: the rs-learn crate is removed; memory routes through memorize/recall/memorize-prune (md corpus at .gm/memories + gm.db index)"),
         "cdp" => err_coded("cdp", ERR_CODE_RETIRED_VERB, "verb retired: the standalone cdp verb is removed in this build; dispatch verb crawl (or chrome) with a plain-text body whose first line is engine=cdp, then one step per line: sessionId=<name>, a URL or url=<url>, wait <ms>, eval=<js>, cdp <Domain.method> with its JSON params on the next line, events <Domain.event> [where <field>~<value>] [limit=N]. A session still answered by an older runner build serves cdp; a runner newer than that one retires it"),
         "discipline" => discipline(&body),
         "" => err_coded("", ERR_CODE_INVALID_ARGS, "verb required"),
