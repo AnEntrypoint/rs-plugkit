@@ -1,6 +1,5 @@
 use super::cas;
 use super::gm_dir;
-use super::memorize;
 use super::row_store;
 use super::yaml_util::{invalidate_residual_marker, levenshtein, yaml_to_json};
 use crate::pkfs;
@@ -900,27 +899,10 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         }
     };
 
-    let evidence_body = resolved_evidence
-        .clone()
-        .unwrap_or_else(|| format!("mutable {} resolved", trimmed));
-    let memo = format!(
-        "## Resolved mutable: {}\n\n{}\n",
-        resolved_id.as_deref().unwrap_or(""),
-        evidence_body
-    );
-    let memo_body = serde_json::json!({ "text": memo, "namespace": "default" }).to_string();
-    let (memo_stdout, _memo_stderr, memo_rc) = memorize::handle_fire(&memo_body);
-    let memo_written: serde_json::Value = if memo_rc == 0 {
-        serde_json::from_str(&memo_stdout).unwrap_or(serde_json::Value::Null)
-    } else {
-        serde_json::Value::Null
-    };
-
     #[cfg(target_arch = "wasm32")]
     crate::wasm_dispatch::emit_event("mutable.resolved", serde_json::json!({ "id": resolved_id }));
     let payload = serde_json::json!({
         "resolved": resolved_id,
-        "memorize_write": memo_written,
         "filed_to": ".gm/mutables-log.jsonl",
         "filed_at": filed.get("ts").cloned().unwrap_or(serde_json::Value::Null),
         "row_file_cleared": true,

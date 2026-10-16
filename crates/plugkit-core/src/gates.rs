@@ -137,9 +137,8 @@ fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
 const LONGGAP_GATED_STATE_CHANGING_VERBS: &[&str] = &[
     "fs_write", "kv_put", "cache_put", "cache_invalidate",
     "sql_open", "sql_close", "sql_exec", "sql_serialize", "sql_deserialize", "sql_smoke",
-    "memorize", "memorize-prune", "memorize_prune", "memorize-vacuum", "memorize_vacuum",
-    "memorize-retention", "memorize_retention", "forget", "codeinsight_index",
-    "tencentdb-memory-import", "config-sync-now", "discipline", "close",
+    "codeinsight_index",
+    "config-sync-now", "discipline", "close",
     "git_add", "git_commit", "git_amend", "git_finalize", "git_push", "git_fetch", "git_pull",
     "git_worktree", "git_checkout", "git_merge", "git_merge_abort", "git_branch_delete", "git_rm",
     "git_revert", "git_reset", "git_stash", "git_stash_pop", "git_stash_drop",
@@ -766,13 +765,9 @@ fn policy_gate(
                     "self-reconfig-candidate",
                     &format!("gate={} repeat_count={}", gate_key, repeat_count),
                 );
-                let friction_query =
-                    format!("gate {} stuck loop {}", gate_key, residuals.join(" "));
-                let historical_hits = crate::orchestrator::recall::recall_hits(&friction_query, 5);
-                let n_historical = historical_hits.as_array().map(|a| a.len()).unwrap_or(0);
                 reason = format!(
-                    "{} -- STUCK LOOP DETECTED: this exact gate denial has now fired {} times in a row with no successful transition between attempts. Retrying the bare transition again will repeat the same denial. Stop retrying: (1) `prd-add` a row describing the concrete stuck state (which residual, what you tried, why it did not clear), (2) invoke the wfgy-method skill's BBCR bounded-retry-then-surface discipline to recover instead of blind-retrying, (3) only then re-attempt the transition. self-reconfig-candidate: {} prior cross-session recall hit(s) for this gate/friction pattern found ({}) -- cite them as `witness` when composing an `fsm-propose-override`, so the proposal extrapolates from repeated real friction, not this session alone.",
-                    reason, repeat_count, n_historical, friction_query
+                    "{} -- STUCK LOOP DETECTED: this exact gate denial has now fired {} times in a row with no successful transition between attempts. Retrying the bare transition again will repeat the same denial. Stop retrying: (1) `prd-add` a row describing the concrete stuck state (which residual, what you tried, why it did not clear), (2) invoke the wfgy-method skill's BBCR bounded-retry-then-surface discipline to recover instead of blind-retrying, (3) only then re-attempt the transition.",
+                    reason, repeat_count
                 );
             }
             let mut v = GateVerdict::deny(reason);

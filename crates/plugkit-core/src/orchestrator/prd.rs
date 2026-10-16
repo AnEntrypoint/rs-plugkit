@@ -734,7 +734,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             "deviation.prd-add-no-id",
             serde_json::json!({
                 "subject": subject_str,
-                "hint": "Pass `id` in prd-add body. No usable text in any of id/slug/prd_id or subject/title/name/task/goal/description/notes -- every one was empty or unslugifiable, so the row was REJECTED. An item-<ms> fallback cannot be referenced by intent in recall or prd-resolve, so it is never admitted. Pass `id` directly, or put the intent in any of subject/title/name/task/goal/description so slug derivation succeeds.",
+                "hint": "Pass `id` in prd-add body. No usable text in any of id/slug/prd_id or subject/title/name/task/goal/description/notes -- every one was empty or unslugifiable, so the row was REJECTED. An item-<ms> fallback cannot be referenced by intent in prd-resolve, so it is never admitted. Pass `id` directly, or put the intent in any of subject/title/name/task/goal/description so slug derivation succeeds.",
             }),
         );
         let err = "PRD item rejected: no usable `id` and no slugifiable text in subject/title/name/task/goal/description/notes. A referenceable handle is mandatory -- every later prd-resolve / recall names the row by id. Pass `id` directly (kebab-case slug derived from intent) or provide a meaningful subject/title/description. Auto `item-<ms>` ids are not admitted because they cannot be referenced by intent.";
@@ -1231,6 +1231,17 @@ const WITNESS_OUTPUT_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 const WITNESS_BINDING_HINT: &str = "bind the witness with witness_dispatch_id (string: the dispatch_id of your own live run in this project), or with all four of witness_exit_code (integer, must be 0), witness_output_sha256 (string: sha256 of the witness output file, 64 lowercase hex), witness_output_path (string: that output file, relative to the project root, no .. segments) and witness_ts (string: RFC 3339 timestamp). prd-resolve re-reads the file, re-hashes it and refuses on any mismatch.";
 
+fn witness_field_shape(field: &str) -> &'static str {
+    match field {
+        "witness_exit_code" => "integer 0",
+        "witness_output_sha256" => "string, 64 lowercase hex characters: sha256 of the witness output file",
+        "witness_output_path" => "string, relative to the project root with no leading /, drive letter or .. segment, e.g. .gm/witness-out/<row>.txt",
+        "witness_ts" => "string, RFC 3339 timestamp, e.g. 2026-10-09T13:44:57Z",
+        "witness_dispatch_id" => "string, the dispatch_id of your own live run in this project; alone it is a complete binding",
+        _ => "see accepted_fields",
+    }
+}
+
 fn prd_resolve_required_fields() -> serde_json::Value {
     serde_json::json!({
         "id": "string: the row id, at top level (aliases prd_id, mutable_id, item_id, slug, key)",
@@ -1663,7 +1674,6 @@ const BROWSER_OR_GPU_WITNESS_MARKERS: &[&str] = &[
     "chrome-launcher",
     "puppeteer",
     "playwright",
-    "lightpanda",
     "remote-debugging",
     "requestadapter",
     "webgl",
@@ -2130,7 +2140,10 @@ fn verify_witness_binding(
     if !is_relative_project_path(&output_path) {
         return Err((
             "witness_output_path",
-            "must be a relative path inside the project root with no .. segments".to_string(),
+            format!(
+                "must be a relative path inside the project root with no .. segments (received {:?}); copy the output file into the project, e.g. .gm/witness-out/<row>.txt, and pass that relative path",
+                output_path
+            ),
         ));
     }
     let ts = request
@@ -2314,7 +2327,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         if !binding_missing.is_empty() {
             let body = serde_json::json!({
                 "error": format!(
-                    "prd-resolve refused: witness binding for {} is incomplete, missing {}",
+                    "prd-resolve refused: witness binding for {} is incomplete, missing {} -- bind with witness_dispatch_id alone, or with all four of witness_exit_code, witness_output_sha256, witness_output_path and witness_ts",
                     id_target,
                     binding_missing.join(", ")
                 ),
@@ -2322,14 +2335,16 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 "deviation_severity": "deny",
                 "prd_id": id_target,
                 "missing_fields": binding_missing,
+                "accepted_fields": ["witness_dispatch_id", "witness_exit_code", "witness_output_sha256", "witness_output_path", "witness_ts"],
                 "hint": WITNESS_BINDING_HINT,
             })
             .to_string();
             return (
                 body,
                 format!(
-                    "prd-resolve refused: incomplete witness binding for {}",
-                    id_target
+                    "prd-resolve refused: incomplete witness binding for {}, missing {}; bind with witness_dispatch_id alone or with all four flat witness_* fields",
+                    id_target,
+                    binding_missing.join(", ")
                 ),
                 1,
             );
@@ -2344,12 +2359,19 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                     "prd_id": id_target,
                     "field": field,
                     "reason": reason,
+                    "accepted_shape": witness_field_shape(field),
                     "hint": WITNESS_BINDING_HINT,
                 })
                 .to_string();
                 return (
                     body,
-                    format!("prd-resolve refused: invalid {} for {}", field, id_target),
+                    format!(
+                        "prd-resolve refused: invalid {} for {}: {}; accepted shape: {}",
+                        field,
+                        id_target,
+                        reason,
+                        witness_field_shape(field)
+                    ),
                     1,
                 );
             }
