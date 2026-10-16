@@ -912,6 +912,7 @@ fn collect_files_impl(
         deadline_ms,
         expired: false,
     };
+    let containment = crate::scan_deps::Containment::around(&[root]);
     walk_posix(
         root,
         max_files,
@@ -919,6 +920,7 @@ fn collect_files_impl(
         &gi,
         cfg,
         checked,
+        &containment,
         &mut clock,
         &mut skipped_unstattable,
     )?;
@@ -961,6 +963,7 @@ fn walk_posix(
     gi: &Option<ignore::gitignore::Gitignore>,
     cfg: &crate::ragconfig::IndexConfig,
     checked: bool,
+    containment: &crate::scan_deps::Containment,
     clock: &mut WalkClock,
     skipped_unstattable: &mut Vec<String>,
 ) -> Result<(), String> {
@@ -973,7 +976,13 @@ fn walk_posix(
         return Ok(());
     }
     let entries = if checked {
-        list_dir_checked(root)?
+        match list_dir_checked(root) {
+            Ok(entries) => entries,
+            Err(_) => {
+                record_unstattable(skipped_unstattable, root);
+                return Ok(());
+            }
+        }
     } else {
         list_dir(root)
     };
@@ -999,7 +1008,14 @@ fn walk_posix(
                 continue;
             }
         }
-        let is_dir = crate::wasm_dispatch::host_stat_is_directory(&next);
+        let stat = crate::scan_deps::FsStat::host(&next);
+        if let Some(stat) = &stat {
+            if !containment.admits(stat) {
+                record_unstattable(skipped_unstattable, &next);
+                continue;
+            }
+        }
+        let is_dir = stat.as_ref().map(|stat| stat.is_directory);
         let is_dir_entry = match is_dir {
             Some(value) => value,
             None if is_windows_reserved_device_name(&entry) => {
@@ -1025,6 +1041,7 @@ fn walk_posix(
                 gi,
                 cfg,
                 checked,
+                containment,
                 clock,
                 skipped_unstattable,
             )?;

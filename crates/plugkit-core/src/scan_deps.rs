@@ -281,15 +281,15 @@ struct PackageWalkResult {
     escapes: Vec<String>,
 }
 
-struct FsStat {
-    is_directory: bool,
-    canonical_path: Option<String>,
+pub(crate) struct FsStat {
+    pub(crate) is_directory: bool,
+    pub(crate) canonical_path: Option<String>,
     mtime_ms: Option<f64>,
     size: u64,
 }
 
 impl FsStat {
-    fn host(path: &str) -> Option<Self> {
+    pub(crate) fn host(path: &str) -> Option<Self> {
         let stat = crate::wasm_dispatch::host_stat(path)?;
         if stat.is_null() {
             return None;
@@ -309,7 +309,7 @@ impl FsStat {
     }
 }
 
-struct Containment {
+pub(crate) struct Containment {
     allowed_canonical_roots: Vec<String>,
 }
 
@@ -326,7 +326,7 @@ fn comparable_canonical_path(path: &str) -> String {
 }
 
 impl Containment {
-    fn around(directories: &[&str]) -> Self {
+    pub(crate) fn around(directories: &[&str]) -> Self {
         let allowed_canonical_roots = directories
             .iter()
             .filter_map(|dir| FsStat::host(dir))
@@ -338,7 +338,7 @@ impl Containment {
         }
     }
 
-    fn admits(&self, stat: &FsStat) -> bool {
+    pub(crate) fn admits(&self, stat: &FsStat) -> bool {
         if self.allowed_canonical_roots.is_empty() {
             return true;
         }
