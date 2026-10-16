@@ -4693,6 +4693,8 @@ pub(super) const GIT_PULL_ACCEPTED_FIELDS: &[&str] = &[
     "remote",
     "branch",
     "ff_only",
+    "rebase",
+    "autostash",
     "user_name",
     "author_name",
     "user_email",
@@ -4726,6 +4728,14 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         Ok(v) => v,
         Err(detail) => return err_json("git_pull", detail),
     };
+    let rebase = match body_bool_flag(body, "rebase", "git_pull") {
+        Ok(v) => v,
+        Err(detail) => return err_json("git_pull", detail),
+    };
+    let autostash = match body_bool_flag(body, "autostash", "git_pull") {
+        Ok(v) => v,
+        Err(detail) => return err_json("git_pull", detail),
+    };
 
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
     let mut argv: Vec<String> = Vec::new();
@@ -4737,7 +4747,10 @@ pub(super) fn git_pull(body: &Value) -> u64 {
     }
     argv.push("pull".to_string());
     argv.push("--no-edit".to_string());
-    argv.push("--no-rebase".to_string());
+    argv.push(String::from(if rebase { "--rebase" } else { "--no-rebase" }));
+    if autostash {
+        argv.push("--autostash".to_string());
+    }
     if ff_only {
         argv.push("--ff-only".to_string());
     }
