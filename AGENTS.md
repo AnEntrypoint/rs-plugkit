@@ -129,7 +129,7 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 
 - Without a home directory `global_probe_root` falls back to the project's `.gm` directory, keeping per-project granularity.
 - `SHARED_PROBE_WAIT_MS` (15 s): a dispatch waits for another process's in-flight probe of the same (repo, reference) before serving its checkout.
-- `UNMEASURED_REF_INTERVAL_MS` (1 h) re-probes a ref with no measured cadence; the first probe that sees a new tip stores the measured `change_interval_ms`.
+- `UNMEASURED_REF_INTERVAL_MS` (60 s) re-probes a ref with no measured cadence; the first probe that sees a new tip stores the measured `change_interval_ms`.
 - A failure backoff caps at `PROBE_BACKOFF_MAX_MS` (1 h).
 - A project whose checkout is behind a freshly recorded tip never probes; it materializes to that tip.
 - `IN_MEMORY_REMOTE_RECORDS` is the in-memory twin of the disk record; without it a failed disk write re-runs `git ls-remote` on every dispatch.
