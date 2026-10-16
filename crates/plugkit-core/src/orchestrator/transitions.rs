@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 use super::fsm::{self, GateDef, HookMode};
 use super::mutables;
 use super::prd;
-#[cfg(target_arch = "wasm32")]
 use super::predicate_registry::{PredicateFn, PREDICATE_REGISTRY};
 use super::state::Phase;
 #[cfg(target_arch = "wasm32")]
