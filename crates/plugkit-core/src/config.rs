@@ -93,6 +93,7 @@ impl Config {
             "instruction_payload",
             "discipline_note",
             "claim_audit",
+            "git",
             "db_path",
             "memory_md_tables",
             "retention",
