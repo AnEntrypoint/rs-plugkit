@@ -482,7 +482,12 @@ pub(super) fn git_status(body: &Value) -> u64 {
             .get("limit")
             .and_then(|v| v.as_u64())
             .map(|n| n.max(1) as usize);
-        let mut argv: Vec<&str> = vec!["status", "--porcelain=v2", "--branch"];
+        let mut argv: Vec<&str> = vec![
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--untracked-files=all",
+        ];
         if !paths.is_empty() {
             argv.push("--");
             for p in &paths {
