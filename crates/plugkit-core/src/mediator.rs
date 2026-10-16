@@ -54,6 +54,7 @@ pub const GIT_VERBS: &[&str] = &[
     "git_checkout",
     "git_merge",
     "git_merge_abort",
+    "git_cherry_pick",
     "git_branch_delete",
     "git_rm",
     "git_revert",
