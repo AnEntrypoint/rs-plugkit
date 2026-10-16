@@ -7,7 +7,6 @@ use super::mutables;
 #[cfg(target_arch = "wasm32")]
 use super::prd;
 #[cfg(target_arch = "wasm32")]
-use super::recall;
 #[cfg(target_arch = "wasm32")]
 use super::state::{read_state, Phase};
 #[cfg(target_arch = "wasm32")]
@@ -997,40 +996,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     );
     let next = next_phase_hint(&phase);
 
-    let prompt_query = {
-        let p = read_last_prompt();
-        if p.is_empty() {
-            String::new()
-        } else {
-            p.chars().take(payload_cfg().prompt_excerpt_chars).collect()
-        }
-    };
-    let prd_subject_query = prd_items
-        .iter()
-        .find(|it| item_is_open(it))
-        .and_then(|it| {
-            it.get("subject")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_default();
-    let query = if !prompt_query.is_empty() {
-        prompt_query
-    } else {
-        prd_subject_query
-    };
-    ilog(&format!(
-        "instruction::handle pre-recall query_len={} prd_pending={}",
-        query.len(),
-        prd_pending
-    ));
-    let (recall_hits, recall_embed_failed) = if query.is_empty() {
-        (serde_json::Value::Array(Vec::new()), false)
-    } else {
-        recall::recall_hits_reporting_embed_failure(&query, payload_cfg().instruction_recall_hits)
-    };
-    ilog("instruction::handle post-recall");
-
     let update_available = read_spool_json(".update-available.json");
     let supply_chain_scan = automatic_supply_chain_scan();
     let dream_rsi_strategy = super::dream_rsi::active_strategy(notify_session.as_deref());
@@ -1190,8 +1155,6 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "prd_total_count": prd_items.len(),
         "prd_pending_count": prd_pending,
         "next_phase_hint": next,
-        "recall_hits": crate::recall_compact::compact_hits(&recall_hits, false),
-        "recall_embed_failed": recall_embed_failed,
         "orient_nouns": nouns,
         "codeinsight_start": codeinsight_start,
         "codeinsight_overview": codeinsight_overview,

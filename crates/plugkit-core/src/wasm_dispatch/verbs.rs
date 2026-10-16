@@ -14,7 +14,6 @@ use serde_json::{json, Value};
 
 mod git;
 mod search;
-mod memory;
 mod web;
 use git::*;
 use web::{fetch, websearch};
@@ -22,7 +21,6 @@ use web::{fetch, websearch};
 const VERB_OWNED_RESERVED_BODY_KEYS: &[&str] = &["_plan", "_lease_sessions"];
 pub(crate) use git::GIT_PROTECTED_PATHSPECS;
 use search::*;
-pub use memory::*;
 use super::{dangling_refs, host_abi};
 
 pub fn plugin_ok(resp: &Value) -> bool {
@@ -130,6 +128,126 @@ fn err_plugin(verb: &str, resp: &Value, fallback: &str) -> u64 {
 pub fn vec_search_local(embedding: &Value, namespace: &str, k: u32) -> Value {
     let (hits, _) = rssearch_vector_hits(embedding, namespace, k, false);
     hits
+}
+
+const EMBED_UNAVAILABLE: &str =
+    "query embedding unavailable -- the bert embedder failed, so no vector search was attempted";
+
+fn query_embedding_unusable(query_embedding: &Value) -> bool {
+    match query_embedding {
+        Value::Null => true,
+        Value::Array(a) => a.is_empty(),
+        _ => true,
+    }
+}
+
+fn rssearch_vector_hits(
+    query_embedding: &Value,
+    namespace: &str,
+    limit: u32,
+    do_sync: bool,
+) -> (Value, Option<Vec<String>>) {
+    if query_embedding_unusable(query_embedding) {
+        emit_event(
+            "rssearch_vector_hits_skipped",
+            json!({
+                "namespace": namespace,
+                "reason": EMBED_UNAVAILABLE,
+            }),
+        );
+        return (json!({ "error": EMBED_UNAVAILABLE }), None);
+    }
+    let namespaces = discipline_fanout_namespaces_unioned_from_enabled_txt_and_config(namespace);
+    let now_ms = unsafe { host_now_ms() } as i64;
+    let cfg = crate::ragconfig::RagConfig::resolved();
+    let mut memory_namespaces: Vec<String> = Vec::new();
+    for ns in &namespaces {
+        if cfg.namespaces.is_code(ns) {
+            if let Err(e) =
+                crate::rssearch_vectors::migrate_namespace_from_flat_json_cfg(ns, now_ms, &cfg)
+            {
+                emit_event(
+                    "rssearch_vectors_migration_failed",
+                    json!({ "namespace": ns, "error": e }),
+                );
+            }
+        } else {
+            if do_sync {
+                let _ = crate::memory_md::export_flat_json(ns, now_ms);
+            }
+            memory_namespaces.push(ns.clone());
+        }
+    }
+    let sync_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    let converged = if memory_namespaces.is_empty() {
+        false
+    } else if do_sync {
+        let sync = crate::memory_md::sync_index(&memory_namespaces, now_ms);
+        sync.get("converged")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    } else if crate::memory_md::has_converged_digest(&memory_namespaces) {
+        true
+    } else {
+        let bounded_resume_sync = crate::memory_md::sync_index(&memory_namespaces, now_ms);
+        emit_event(
+            "recall_read_path_sync",
+            json!({
+                "namespaces": memory_namespaces,
+                "result": bounded_resume_sync,
+            }),
+        );
+        bounded_resume_sync
+            .get("converged")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    };
+    let search_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
+    emit_event(
+        "recall_vector_phase_timing",
+        json!({
+            "sync_ms": search_started_ms - sync_started_ms,
+            "did_sync": do_sync,
+            "namespaces": namespaces.len(),
+        }),
+    );
+    let hits = match crate::rssearch_vectors::search_with_recency_cfg(
+        query_embedding,
+        &namespaces,
+        limit as usize,
+        now_ms,
+        &cfg,
+    ) {
+        Ok(hits) => {
+            emit_event(
+                "recall_vector_phase_timing",
+                json!({
+                    "search_ms": unsafe { crate::wasm_dispatch::host_now_ms() } - search_started_ms,
+                    "outcome": "ok",
+                }),
+            );
+            hits
+        }
+        Err(e) => {
+            emit_event(
+                "rssearch_vector_hits_failed",
+                json!({
+                    "namespace": namespace, "error": e,
+                    "search_ms": unsafe { crate::wasm_dispatch::host_now_ms() } - search_started_ms,
+                    "reason": "search_with_recency failed even after malformed-db recovery attempt",
+                }),
+            );
+            json!({ "error": e })
+        }
+    };
+    (
+        hits,
+        if converged {
+            Some(memory_namespaces)
+        } else {
+            None
+        },
+    )
 }
 
 pub fn embed_query(query: &str) -> Value {
@@ -1725,14 +1843,6 @@ fn lifecycle_liveness() -> Value {
     })
 }
 
-fn health_probe_recall() -> Value {
-    let probe = json!({ "query": "health check probe query", "limit": 1 });
-    let packed = recall(&probe);
-    let v = unpack_to_value(packed);
-    let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
-    json!({ "ok": ok, "error": if ok { Value::Null } else { v.get("error").cloned().unwrap_or(Value::Null) } })
-}
-
 fn health_probe_codesearch() -> Value {
     let probe = json!({ "query": "health check probe query", "k": 1 });
     let packed = codesearch(&probe);
@@ -1742,7 +1852,7 @@ fn health_probe_codesearch() -> Value {
 }
 
 const HEALTH_PROBE_FIELDS: &[&str] = &["probes", "probe_subsystems"];
-const HEALTH_PROBE_SKIPPED_NOTE: &str = "not run: each probe is a real recall and a real codesearch, measured at 40-160s together on a large project, which no dispatch caller's timeout survives. Pass {\"probes\": true} to run them.";
+const HEALTH_PROBE_SKIPPED_NOTE: &str = "not run: the probe is a real codesearch, measured at 40-160s on a large project, which no dispatch caller's timeout survives. Pass {\"probes\": true} to run it.";
 
 fn health_probe_skipped() -> Value {
     json!({ "ok": Value::Null, "skipped": true, "note": HEALTH_PROBE_SKIPPED_NOTE })
@@ -1779,18 +1889,15 @@ fn health(body: &Value) -> u64 {
     let probes_requested = HEALTH_PROBE_FIELDS
         .iter()
         .any(|field| body.get(*field).and_then(|v| v.as_bool()).unwrap_or(false));
-    let (recall_health, codesearch_health) = if probes_requested {
-        (health_probe_recall(), health_probe_codesearch())
+    let codesearch_health = if probes_requested {
+        health_probe_codesearch()
     } else {
-        (health_probe_skipped(), health_probe_skipped())
+        health_probe_skipped()
     };
-    let subsystems_healthy = match (
-        recall_health.get("ok").and_then(|b| b.as_bool()),
-        codesearch_health.get("ok").and_then(|b| b.as_bool()),
-    ) {
-        (Some(recall_ok), Some(codesearch_ok)) => recall_ok && codesearch_ok,
-        _ => true,
-    };
+    let subsystems_healthy = codesearch_health
+        .get("ok")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(true);
 
     ok(
         "health",
@@ -1807,7 +1914,7 @@ fn health(body: &Value) -> u64 {
             "effective_config": effective_config_report(),
             "plugin_response_envelope": plugin_response_envelope_contract(),
             "subsystems": subsystems,
-            "subsystem_probes": { "recall": recall_health, "codesearch": codesearch_health },
+            "subsystem_probes": { "codesearch": codesearch_health },
             "subsystem_probes_requested": probes_requested,
             "verb_aliases": aliases,
             "error_codes": [
@@ -3091,13 +3198,6 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "callers" => callers(&body),
         "callees" => callees(&body),
         "impact" => impact(&body),
-        "memorize" => memorize_with_raw(&body, &body_s),
-        "memorize-prune" | "memorize_prune" => memorize_prune(&body),
-        "memorize-vacuum" | "memorize_vacuum" => memorize_vacuum(&body),
-        "memorize-retention" | "memorize_retention" => memorize_retention(&body),
-        "recall" => recall(&body),
-        "tencentdb-compat-probe" => tencentdb_compat_probe(&body),
-        "tencentdb-memory-import" => tencentdb_memory_import_gm_native_memories_reembedded_384dim(&body),
         "python" | "py" => shell_exec(&body, &body_s, "python"),
         "bash" | "sh" | "shell" | "zsh" => shell_exec(&body, &body_s, "bash"),
         "powershell" | "ps1" => shell_exec(&body, &body_s, "powershell"),

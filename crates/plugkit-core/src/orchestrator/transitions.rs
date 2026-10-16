@@ -4,7 +4,6 @@ use super::fsm::{self, GateDef, HookMode};
 use super::mutables;
 use super::prd;
 #[cfg(target_arch = "wasm32")]
-use super::recall;
 use super::predicate_registry::{PredicateFn, PREDICATE_REGISTRY};
 use super::state::Phase;
 #[cfg(target_arch = "wasm32")]
@@ -1285,43 +1284,6 @@ pub fn handle(content: &str) -> (String, String, i32) {
                 let receipt = crate::evidence_receipt::write();
                 crate::wasm_dispatch::emit_event("evidence.receipt", receipt);
             }
-            let query = {
-                let (body, _err, code) = prd::handle_list_full();
-                if code == 0 {
-                    serde_json::from_str::<serde_json::Value>(&body)
-                        .ok()
-                        .and_then(|v| v.get("items").cloned())
-                        .and_then(|v| v.as_array().cloned())
-                        .and_then(|arr| {
-                            arr.iter()
-                                .find(|it| {
-                                    let status = it
-                                        .get("status")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("pending");
-                                    prd::status_is_open(status)
-                                })
-                                .cloned()
-                        })
-                        .and_then(|it| {
-                            it.get("subject")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        })
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                }
-            };
-            let combined = if query.is_empty() {
-                s.phase.as_str().to_string()
-            } else {
-                format!("{} {}", s.phase.as_str(), query)
-            };
-            let hits = recall::recall_hits(
-                &combined,
-                crate::ragconfig::InstructionPayloadConfig::default().transition_recall_hits,
-            );
             let payload = serde_json::json!({
                 "phase": s.phase.as_str(),
                 "phase_label": skill,
@@ -1329,7 +1291,6 @@ pub fn handle(content: &str) -> (String, String, i32) {
                 "graph_path": graph_path,
                 "edge": edge,
                 "advisory": advisory,
-                "recall_hits": crate::recall_compact::compact_hits(&hits, false),
             });
             (payload.to_string(), String::new(), 0)
         }
