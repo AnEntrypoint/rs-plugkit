@@ -200,6 +200,7 @@ pub(super) fn git_async_reenter(verb: &str, body: &Value) -> u64 {
         "git_add" => git_add(body),
         "git_commit" => git_commit(body),
         "git_amend" => git_amend(body),
+        "git_rewrite_authors" => git_rewrite_authors(body),
         "git_log" => git_log(body),
         "git_diff" => git_diff(body),
         "git_remote" => git_remote(body),
@@ -2257,6 +2258,481 @@ pub(super) fn staged_outside_requested(
                 && !requested.iter().any(|r| pathspec_covers_path(r, path))
         })
         .collect()
+}
+
+const REWRITE_CONFIRM: &str = "rewrite-pushed-history";
+const REWRITE_REMOTE: &str = "origin";
+const REWRITE_BOT_EMAILS: &[&str] = &["pins@users.noreply.github.com"];
+const REWRITE_BOT_NAMES: &[&str] = &["github-actions", "github-actions[bot]"];
+const REWRITE_LOG_FORMAT: &str = "--format=%H%x00%T%x00%P%x00%an%x00%ae%x00%ad%x00%cn%x00%ce%x00%cd%x00%s%x00%B%x1e";
+
+struct RewriteCommit {
+    sha: String,
+    tree: String,
+    parents: Vec<String>,
+    author_name: String,
+    author_email: String,
+    author_line: String,
+    author_date: String,
+    committer_line: String,
+    committer_date: String,
+    subject: String,
+    message: String,
+    bot: bool,
+    identity: bool,
+}
+
+impl RewriteCommit {
+    fn human(&self) -> bool {
+        !self.bot && !self.identity
+    }
+}
+
+struct RewriteGroup {
+    members: Vec<usize>,
+    rewrite: bool,
+}
+
+fn rewrite_is_bot(name: &str, email: &str) -> bool {
+    let email = email.to_ascii_lowercase();
+    REWRITE_BOT_EMAILS.contains(&email.as_str())
+        || REWRITE_BOT_NAMES.iter().any(|n| n.eq_ignore_ascii_case(name))
+        || email.ends_with("[bot]@users.noreply.github.com")
+}
+
+fn rewrite_parse_log(text: &str, identity: &(String, String)) -> Vec<RewriteCommit> {
+    let mut out = Vec::new();
+    for record in text.split('\u{1e}') {
+        let record = record.trim_start_matches('\n');
+        let fields: Vec<&str> = record.splitn(11, '\0').collect();
+        if fields.len() < 11 || fields[0].is_empty() {
+            continue;
+        }
+        let (an, ae, ad) = (fields[3], fields[4], fields[5]);
+        let (cn, ce, cd) = (fields[6], fields[7], fields[8]);
+        let mut message = fields[10].to_string();
+        if !message.ends_with('\n') {
+            message.push('\n');
+        }
+        out.push(RewriteCommit {
+            sha: fields[0].to_string(),
+            tree: fields[1].to_string(),
+            parents: fields[2].split_whitespace().map(String::from).collect(),
+            author_name: an.to_string(),
+            author_email: ae.to_string(),
+            author_line: format!("{an} <{ae}> {ad}"),
+            author_date: ad.to_string(),
+            committer_line: format!("{cn} <{ce}> {cd}"),
+            committer_date: cd.to_string(),
+            subject: fields[9].to_string(),
+            message,
+            bot: rewrite_is_bot(an, ae),
+            identity: an == identity.0 && ae == identity.1,
+        });
+    }
+    out
+}
+
+fn rewrite_commit_object(
+    tree: &str,
+    parents: &[String],
+    author_line: &str,
+    committer_line: &str,
+    message: &str,
+) -> String {
+    let mut object = format!("tree {tree}\n");
+    for parent in parents {
+        object.push_str(&format!("parent {parent}\n"));
+    }
+    object.push_str(&format!("author {author_line}\ncommitter {committer_line}\n\n{message}"));
+    object
+}
+
+fn rewrite_step(
+    plan: &mut GitPendingTokenReplayPlan,
+    cwd: Option<&str>,
+    argv: &[&str],
+) -> Result<(i64, String, String), u64> {
+    let r = git_step_replayed_by_call_order(plan, argv, cwd)?;
+    Ok((
+        r.get("exit_code").and_then(Value::as_i64).unwrap_or(-1),
+        r.get("stdout").and_then(Value::as_str).unwrap_or("").to_string(),
+        r.get("stderr").and_then(Value::as_str).unwrap_or("").to_string(),
+    ))
+}
+
+fn rewrite_log(
+    plan: &mut GitPendingTokenReplayPlan,
+    cwd: Option<&str>,
+    range: &str,
+    identity: &(String, String),
+) -> Result<Vec<RewriteCommit>, u64> {
+    let (code, stdout, stderr) = rewrite_step(
+        plan,
+        cwd,
+        &["log", "--reverse", "--topo-order", "--date=raw", REWRITE_LOG_FORMAT, range],
+    )?;
+    if code != 0 {
+        return Err(err(
+            "git_rewrite_authors",
+            &format!("git log {range} failed: {}", stderr.trim()),
+        ));
+    }
+    Ok(rewrite_parse_log(&stdout, identity))
+}
+
+fn rewrite_stamp(plan: &mut GitPendingTokenReplayPlan) -> u64 {
+    if let Some(v) = plan.results.get("stamp").and_then(Value::as_u64) {
+        return v;
+    }
+    let now = unsafe { host_now_ms() };
+    plan.results.insert("stamp".to_string(), json!(now));
+    now
+}
+
+fn rewrite_gm_dir(cwd: Option<&str>) -> String {
+    crate::orchestrator::prd::prd_path_for(cwd)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".gm".to_string())
+}
+
+fn rewrite_write_object(
+    plan: &mut GitPendingTokenReplayPlan,
+    cwd: Option<&str>,
+    gm_dir: &str,
+    object: &str,
+) -> Result<String, u64> {
+    let path = format!("{gm_dir}/git-snapshots/rewrite-object.commit");
+    if !crate::pkfs::write(&path, object) {
+        return Err(err(
+            "git_rewrite_authors",
+            "could not write the rewrite object under .gm/git-snapshots",
+        ));
+    }
+    let (code, stdout, stderr) = rewrite_step(
+        plan,
+        cwd,
+        &["hash-object", "-t", "commit", "-w", "--no-filters", path.as_str()],
+    )?;
+    if code != 0 || stdout.trim().is_empty() {
+        return Err(err(
+            "git_rewrite_authors",
+            &format!("git hash-object rejected a rewritten commit: {}", stderr.trim()),
+        ));
+    }
+    Ok(stdout.trim().to_string())
+}
+
+pub(super) fn git_rewrite_authors(body: &Value) -> u64 {
+    git_async_entry("git_rewrite_authors", body, git_rewrite_authors_run)
+}
+
+fn git_rewrite_authors_run(body: &Value, plan: &mut GitPendingTokenReplayPlan) -> Result<u64, u64> {
+    const VERB: &str = "git_rewrite_authors";
+    let cwd = body_cwd(body);
+    let apply = body.get("apply").and_then(Value::as_bool).unwrap_or(false);
+    if apply && body.get("confirm").and_then(Value::as_str) != Some(REWRITE_CONFIRM) {
+        return Ok(err_json(
+            VERB,
+            json!({
+                "error": "apply:true needs confirm set to rewrite-pushed-history; nothing was changed",
+                "error_code": ERR_CODE_INVALID_ARGS,
+            }),
+        ));
+    }
+    let since = body
+        .get("since")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(s) = since {
+        if !(7..=64).contains(&s.len()) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Ok(err(VERB, "since must be a commit sha of 7 to 64 hex digits"));
+        }
+    }
+    let (_, branch_out, _) = rewrite_step(plan, cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if branch_out.trim() != "main" {
+        return Ok(err_json(
+            VERB,
+            json!({
+                "error": format!("HEAD is on '{}', not main; history rewrite runs on main only", branch_out.trim()),
+                "error_code": "not_on_main",
+            }),
+        ));
+    }
+    let (merge_code, _, _) = rewrite_step(plan, cwd, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"])?;
+    match merge_code {
+        0 => {
+            return Ok(err_json(
+                VERB,
+                json!({
+                    "error": "a merge is in progress (MERGE_HEAD present); resolve it first",
+                    "error_code": "merge_in_progress",
+                }),
+            ))
+        }
+        1 => {}
+        _ => return Ok(err(VERB, "unable to inspect repository merge state")),
+    }
+    let porcelain_argv = git_porcelain_argv(&[], cwd);
+    let porcelain_r = git_step_replayed_by_call_order(plan, &as_argv(&porcelain_argv), cwd)?;
+    let porcelain = require_complete_git_porcelain(VERB, &porcelain_r)?;
+    let dirty: Vec<String> = porcelain
+        .lines()
+        .map(|l| l.get(3..).unwrap_or("").trim().trim_matches('"').to_string())
+        .filter(|p| !(p == ".gm" || p.starts_with(".gm/")))
+        .collect();
+    if !dirty.is_empty() {
+        return Ok(err_json(
+            VERB,
+            json!({
+                "error": "the working tree has changes outside .gm; commit or stash them before rewriting",
+                "error_code": "dirty_worktree",
+                "dirty_paths": dirty,
+            }),
+        ));
+    }
+
+    let identity = commit_identity(body);
+    let (_, head_out, _) = rewrite_step(plan, cwd, &["rev-parse", "HEAD"])?;
+    let head = head_out.trim().to_string();
+    let (_, tree_out, _) = rewrite_step(plan, cwd, &["rev-parse", "HEAD^{tree}"])?;
+    let tree_before = tree_out.trim().to_string();
+    let range = match since {
+        Some(s) => format!("{s}..HEAD"),
+        None => "HEAD".to_string(),
+    };
+    let commits = rewrite_log(plan, cwd, &range, &identity)?;
+
+    let mut index_of: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, c) in commits.iter().enumerate() {
+        index_of.insert(c.sha.as_str(), i);
+    }
+    let mut child_count = vec![0usize; commits.len()];
+    for c in &commits {
+        for p in &c.parents {
+            if let Some(&pi) = index_of.get(p.as_str()) {
+                child_count[pi] += 1;
+            }
+        }
+    }
+    let mut groups: Vec<RewriteGroup> = Vec::new();
+    for (i, c) in commits.iter().enumerate() {
+        if c.human() {
+            if let Some(g) = groups.last_mut() {
+                if let Some(&tail) = g.members.last() {
+                    if g.rewrite
+                        && c.parents.len() == 1
+                        && c.parents[0] == commits[tail].sha
+                        && child_count[tail] == 1
+                    {
+                        g.members.push(i);
+                        continue;
+                    }
+                }
+            }
+        }
+        groups.push(RewriteGroup {
+            members: vec![i],
+            rewrite: c.human(),
+        });
+    }
+
+    let human_count = commits.iter().filter(|c| c.human()).count();
+    let bot_count = commits.iter().filter(|c| c.bot).count();
+    let identity_count = commits.iter().filter(|c| c.identity && !c.bot).count();
+    let squash_runs = groups.iter().filter(|g| g.rewrite && g.members.len() > 1).count();
+    let mut action: Vec<&str> = vec!["keep"; commits.len()];
+    for g in &groups {
+        for &m in &g.members {
+            action[m] = if !g.rewrite {
+                if commits[m].bot { "skip-bot" } else { "keep" }
+            } else if g.members.len() > 1 {
+                "squash"
+            } else {
+                "rewrite"
+            };
+        }
+    }
+    let changes: Vec<Value> = commits
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| action[*i] != "keep")
+        .map(|(i, c)| {
+            json!({
+                "sha": c.sha,
+                "author": format!("{} <{}>", c.author_name, c.author_email),
+                "subject": c.subject,
+                "action": action[i],
+            })
+        })
+        .collect();
+    let summary = json!({
+        "dry_run": !apply,
+        "applied": false,
+        "range": range,
+        "head": head,
+        "identity": format!("{} <{}>", identity.0, identity.1),
+        "commits_in_range": commits.len(),
+        "human_commits": human_count,
+        "bot_commits_skipped": bot_count,
+        "identity_commits_kept": identity_count,
+        "squash_runs": squash_runs,
+        "resulting_commits": groups.len(),
+        "changes": changes,
+    });
+    if !apply || human_count == 0 {
+        return Ok(ok(VERB, summary));
+    }
+
+    let gm_dir = rewrite_gm_dir(cwd);
+    let _ = crate::pkfs::write(
+        &format!("{gm_dir}/git-snapshots/README.txt"),
+        "Pre-rewrite snapshots: git bundles of refs/heads/main written by git_rewrite_authors.\n",
+    );
+    let stamp = rewrite_stamp(plan);
+    let snapshot = format!("{gm_dir}/git-snapshots/{stamp}.bundle");
+    let (bcode, _, berr) = rewrite_step(
+        plan,
+        cwd,
+        &["bundle", "create", snapshot.as_str(), "refs/heads/main"],
+    )?;
+    if bcode != 0 {
+        return Ok(err_json(
+            VERB,
+            json!({
+                "error": format!("snapshot failed; nothing was changed: {}", berr.trim()),
+                "error_code": "snapshot_failed",
+            }),
+        ));
+    }
+    let (vcode, _, verr) = rewrite_step(plan, cwd, &["bundle", "verify", snapshot.as_str()])?;
+    if vcode != 0 {
+        return Ok(err_json(
+            VERB,
+            json!({
+                "error": format!("snapshot did not verify; nothing was changed: {}", verr.trim()),
+                "error_code": "snapshot_unverified",
+                "snapshot": snapshot,
+            }),
+        ));
+    }
+
+    let mut mapped: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut kept_reparented = 0usize;
+    for g in &groups {
+        let first = &commits[g.members[0]];
+        let last = &commits[g.members[g.members.len() - 1]];
+        let parents: Vec<String> = first
+            .parents
+            .iter()
+            .map(|p| mapped.get(p).cloned().unwrap_or_else(|| p.clone()))
+            .collect();
+        let new_sha = if g.rewrite {
+            let message = g
+                .members
+                .iter()
+                .map(|&m| commits[m].message.trim_end())
+                .collect::<Vec<&str>>()
+                .join("\n\n")
+                + "\n";
+            let object = rewrite_commit_object(
+                &last.tree,
+                &parents,
+                &format!("{} <{}> {}", identity.0, identity.1, first.author_date),
+                &format!("{} <{}> {}", identity.0, identity.1, last.committer_date),
+                &message,
+            );
+            rewrite_write_object(plan, cwd, &gm_dir, &object)?
+        } else if parents == first.parents {
+            first.sha.clone()
+        } else {
+            let object = rewrite_commit_object(
+                &first.tree,
+                &parents,
+                &first.author_line,
+                &first.committer_line,
+                &first.message,
+            );
+            let sha = rewrite_write_object(plan, cwd, &gm_dir, &object)?;
+            kept_reparented += 1;
+            sha
+        };
+        for &m in &g.members {
+            mapped.insert(commits[m].sha.clone(), new_sha.clone());
+        }
+    }
+    let new_tip = mapped.get(&head).cloned().unwrap_or_else(|| head.clone());
+    if new_tip == head {
+        return Ok(err(VERB, "the rewrite produced no new tip although human commits exist; refusing"));
+    }
+
+    let lease = format!("--force-with-lease=refs/heads/main:{head}");
+    let refspec = format!("{new_tip}:refs/heads/main");
+    let (pcode, _, perr) = rewrite_step(
+        plan,
+        cwd,
+        &["push", lease.as_str(), REWRITE_REMOTE, refspec.as_str()],
+    )?;
+    if pcode != 0 {
+        return Ok(err_json(
+            VERB,
+            json!({
+                "error": "push refused; local main is unchanged and the snapshot is kept",
+                "error_code": "push_refused",
+                "stderr": perr.trim(),
+                "old_tip": head,
+                "new_tip": new_tip,
+                "snapshot": snapshot,
+            }),
+        ));
+    }
+    let (ucode, _, uerr) = rewrite_step(
+        plan,
+        cwd,
+        &["update-ref", "refs/heads/main", new_tip.as_str(), head.as_str()],
+    )?;
+    if ucode != 0 {
+        return Ok(err_json(
+            VERB,
+            json!({
+                "error": "remote main was rewritten but the local ref did not move",
+                "error_code": "local_ref_not_moved",
+                "stderr": uerr.trim(),
+                "old_tip": head,
+                "new_tip": new_tip,
+                "snapshot": snapshot,
+            }),
+        ));
+    }
+    let (_, tree_after_out, _) = rewrite_step(plan, cwd, &["rev-parse", "HEAD^{tree}"])?;
+    let tree_unchanged = tree_after_out.trim() == tree_before;
+    let after = rewrite_log(plan, cwd, &range, &identity)?;
+    let remaining = after.iter().filter(|c| c.human()).count();
+    Ok(ok(
+        VERB,
+        json!({
+            "dry_run": false,
+            "applied": true,
+            "old_tip": head,
+            "new_tip": new_tip,
+            "tree": tree_before,
+            "tree_unchanged": tree_unchanged,
+            "snapshot": snapshot,
+            "snapshot_verified": true,
+            "rewritten_commits": human_count,
+            "squash_runs": squash_runs,
+            "kept_commits_reparented": kept_reparented,
+            "remaining_human_commits": remaining,
+            "push": {
+                "remote": REWRITE_REMOTE,
+                "ref": "refs/heads/main",
+                "force_with_lease_expect": head,
+                "result": "pushed",
+            },
+        }),
+    ))
 }
 
 pub(super) fn git_amend(body: &Value) -> u64 {

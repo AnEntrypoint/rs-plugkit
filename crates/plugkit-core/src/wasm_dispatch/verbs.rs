@@ -3189,6 +3189,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_add" => git_add(&body),
         "git_commit" => git_commit(&body),
         "git_amend" => git_amend(&body),
+        "git_rewrite_authors" => git_rewrite_authors(&body),
         "git_finalize" => git_finalize(&body),
         "git_log" => git_log(&body),
         "git_diff" => git_diff(&body),
