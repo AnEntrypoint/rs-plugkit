@@ -160,8 +160,8 @@ compiled artifact, not a mock or a narrated claim.
 
 ## Decision 6: L2 scene / L3 persona authority - file, not SQLite
 
-Resolved by direct read of the vendored `MemoryCore` source
-(`vendor/tencentdb-agent-memory`), not inference: neither L2 scenes nor L3
+Resolved by direct read of the upstream `MemoryCore` source, not
+inference: neither L2 scenes nor L3
 personas have a SQLite table at all.
 
 - **L2 scenes**: `scene_blocks/*.md` files, META-delimited
