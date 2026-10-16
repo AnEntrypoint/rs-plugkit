@@ -27,3 +27,10 @@ Cargo.lock
 .gm/prd.absorbed.json
 .gm/receipts/
 crates/**/.gm/
+.gm/prd/
+.gm/prd-log.jsonl
+.gm/mutables/
+.gm/mutables-log.jsonl
+.gm/pool/
+.gm/codeinsight-fiber-state/
+.gm/claim-audit-fired
