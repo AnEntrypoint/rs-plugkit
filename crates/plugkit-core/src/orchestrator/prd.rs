@@ -2597,6 +2597,50 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    if !annotate_only && deviation_refuses("prd-resolve-self-witness") {
+        if let Some(dispatch_id) = witness_dispatch_id.as_deref() {
+            let dispatch_session = crate::dispatch_ledger::lookup(
+                resolve_cwd.as_deref().unwrap_or(""),
+                dispatch_id,
+            )
+            .and_then(|entry| entry.get("session_id")?.as_str().map(str::to_string));
+            let row_session = existing_blocks
+                .iter()
+                .filter_map(|item| item.as_mapping())
+                .find(|map| {
+                    map.get(&Value::String("id".to_string())).and_then(|v| v.as_str())
+                        == Some(id_target.as_str())
+                })
+                .and_then(|map| map.get(&Value::String("session_id".to_string())))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if let (Some(dispatch_session), Some(row_session)) = (dispatch_session, row_session) {
+                if dispatch_session == row_session {
+                    let body = serde_json::json!({
+                        "error": format!(
+                            "prd-resolve refused: witness_dispatch_id {} was produced by session {}, the executor session of {} -- a row cannot be witnessed by the session that executed it",
+                            dispatch_id, row_session, id_target
+                        ),
+                        "deviation_kind": "prd-resolve-self-witness",
+                        "deviation_severity": "deny",
+                        "prd_id": id_target,
+                        "witness_dispatch_id": dispatch_id,
+                        "executor_session": row_session,
+                        "dispatch_session": dispatch_session,
+                        "hint": "The witness must be a live run dispatched under a different session than the row's executor. Re-run the witness from a verifier session and resolve with that dispatch id.",
+                    })
+                    .to_string();
+                    return (
+                        body,
+                        format!("prd-resolve refused: self-witness for {}", id_target),
+                        1,
+                    );
+                }
+            }
+        }
+    }
+
     let resolved_status = if policy
         .prd_closed_statuses
         .iter()
