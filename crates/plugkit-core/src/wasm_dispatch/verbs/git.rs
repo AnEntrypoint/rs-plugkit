@@ -2428,6 +2428,10 @@ pub(super) fn git_rewrite_authors(body: &Value) -> u64 {
     git_async_entry("git_rewrite_authors", body, git_rewrite_authors_run)
 }
 
+fn has_gm_component(path: &str) -> bool {
+    path.split('/').any(|component| component == ".gm")
+}
+
 fn git_rewrite_authors_run(body: &Value, plan: &mut GitPendingTokenReplayPlan) -> Result<u64, u64> {
     const VERB: &str = "git_rewrite_authors";
     let cwd = body_cwd(body);
@@ -2478,11 +2482,10 @@ fn git_rewrite_authors_run(body: &Value, plan: &mut GitPendingTokenReplayPlan) -
     let porcelain_argv = git_porcelain_argv(&[], cwd);
     let porcelain_r = git_step_replayed_by_call_order(plan, &as_argv(&porcelain_argv), cwd)?;
     let porcelain = require_complete_git_porcelain(VERB, &porcelain_r)?;
-    let dirty: Vec<String> = porcelain
+    let (dirty, ignored_gm): (Vec<String>, Vec<String>) = porcelain
         .lines()
         .map(|l| l.get(3..).unwrap_or("").trim().trim_matches('"').to_string())
-        .filter(|p| !(p == ".gm" || p.starts_with(".gm/")))
-        .collect();
+        .partition(|p| !has_gm_component(p));
     if !dirty.is_empty() {
         return Ok(err_json(
             VERB,
@@ -2490,6 +2493,7 @@ fn git_rewrite_authors_run(body: &Value, plan: &mut GitPendingTokenReplayPlan) -
                 "error": "the working tree has changes outside .gm; commit or stash them before rewriting",
                 "error_code": "dirty_worktree",
                 "dirty_paths": dirty,
+                "ignored_gm_paths": ignored_gm,
             }),
         ));
     }
