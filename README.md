@@ -272,10 +272,10 @@ GitHub Actions workflow-run query with each job's name and conclusion in `jobs`)
 `sql_smoke`, `task-spawn`/`task-list`/`task-output`/`task-stop`, `wait-for-task` (`{id, timeout_ms?}`, default and max 100000; blocks until the task leaves `running` and returns its output, or returns `timed_out:true` at the deadline),
 `background-convert`, `kill-port`, `similarity`, `claim-audit`, `comment-audit`.
 
-`crawl` takes a plain-text body (not JSON). Its first line is `engine=lightpanda` (the default when the line is absent) or `engine=cdp`; the rest is the crawl request (URLs and steps). `chrome` is an alias that routes to `crawl engine=cdp`: it drops any engine line and always drives Chrome. `cdp` is HEADFUL: the host drives a visible Chrome over CDP through its `crawl_cdp` entry point. `lightpanda` is HEADLESS: the guest calls the `lightpanda` sibling plugin's `crawl` verb with the same body, and the host keeps that lightpanda process warm. Both engines return the host's reply object unchanged, with `ok`, `engine`, `headless`, `stdout`, `stderr`, `exit_code` and `duration_ms`. Any other engine answers `ok: false` with `error_code: unknown_engine`, naming `cdp` and `lightpanda`.
+`crawl` takes a plain-text body (not JSON). Its first line is `engine=cdp` (the default when the line is absent); the rest is the crawl request (URLs and steps). `chrome` is an alias that drops any engine line. The engine is always HEADFUL: the host drives a visible Chrome over CDP through its `crawl_cdp` entry point, and a `headless` line is refused. The reply carries `ok`, `engine`, `headless`, `stdout`, `stderr`, `exit_code` and `duration_ms`. Any other engine answers `ok: false` with `error_code: unknown_engine`, naming `cdp`.
 
 ```
-engine=lightpanda
+engine=cdp
 https://example.com/
 ```
 

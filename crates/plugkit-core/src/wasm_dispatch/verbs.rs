@@ -2,7 +2,7 @@ use super::events::{emit_event, install_panic_hook, log_deviation_push};
 use super::host_abi::{
     crawl_cdp_call, git_call, git_call_argv, host_env_get, host_exec_js, host_fetch,
     host_fs_readdir, host_kv_delete, host_kv_get, host_kv_put, host_kv_query, host_now_ms,
-    host_read, pack, plugin_call as call_plugin, plugin_call_text, read_str, unpack_to_string,
+    host_read, pack, plugin_call as call_plugin, read_str, unpack_to_string,
     unpack_to_value,
 };
 use crate::commit_scope::{
@@ -458,7 +458,7 @@ fn next_dispatch_hint_for(verb: &str) -> Value {
 
 fn session_not_implemented_in_guest(verb: &str, canonical: &str) -> u64 {
     let reason = format!(
-        "{canonical} needs a browser session registry, and this guest holds none: crawl sessions are owned by the host's crawl_cdp entry point and the lightpanda sibling, and neither exposes a list or close call to the guest"
+        "{canonical} needs a browser session registry, and this guest holds none: crawl sessions are owned by the host's crawl_cdp entry point, which exposes no list or close call to the guest"
     );
     pack(
         json!({
@@ -1283,7 +1283,6 @@ pub const FETCH_DEFAULT_TIMEOUT_MS: u64 = 60_000;
 pub const FETCH_MAX_TIMEOUT_MS: u64 = 600_000;
 
 const CRAWL_ENGINE_CDP: &str = "cdp";
-const CRAWL_ENGINE_LIGHTPANDA: &str = "lightpanda";
 const CRAWL_ERR_UNKNOWN_ENGINE: &str = "unknown_engine";
 
 fn split_crawl_engine(body_s: &str) -> (&str, &str) {
@@ -1296,24 +1295,19 @@ fn split_crawl_engine(body_s: &str) -> (&str, &str) {
 
 fn crawl(body_s: &str) -> u64 {
     let (engine, request) = split_crawl_engine(body_s);
-    crawl_engine(engine, request)
+    match engine {
+        CRAWL_ENGINE_CDP => crawl_reply(crawl_cdp_call(request)),
+        other => err_coded(
+            "crawl",
+            CRAWL_ERR_UNKNOWN_ENGINE,
+            &format!("unknown crawl engine \"{other}\": the first line must be engine=cdp (headful Chrome over CDP, the only engine) or be absent"),
+        ),
+    }
 }
 
 fn chrome(body_s: &str) -> u64 {
     let (_, request) = split_crawl_engine(body_s);
-    crawl_engine(CRAWL_ENGINE_CDP, request)
-}
-
-fn crawl_engine(engine: &str, request: &str) -> u64 {
-    match engine {
-        CRAWL_ENGINE_CDP => crawl_reply(crawl_cdp_call(request)),
-        CRAWL_ENGINE_LIGHTPANDA => crawl_reply(plugin_call_text("lightpanda", "crawl", request)),
-        other => err_coded(
-            "crawl",
-            CRAWL_ERR_UNKNOWN_ENGINE,
-            &format!("unknown crawl engine \"{other}\": the first line must be engine=cdp (headful Chrome over CDP, the default) or engine=lightpanda (headless, explicit only)"),
-        ),
-    }
+    crawl_reply(crawl_cdp_call(request))
 }
 
 fn crawl_reply(reply: Value) -> u64 {
