@@ -7,7 +7,6 @@ use super::mutables;
 #[cfg(target_arch = "wasm32")]
 use super::prd;
 #[cfg(target_arch = "wasm32")]
-#[cfg(target_arch = "wasm32")]
 use super::state::{read_state, Phase};
 #[cfg(target_arch = "wasm32")]
 use crate::pkfs;
