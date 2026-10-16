@@ -17,8 +17,8 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 
 ## Embedding, vectors and host boundaries
 
-- `slim` omits compiled-in safetensors and requires host `host_vec_embed`; keep candle on the validated 0.8 WASM-compatible line unless the target build proves a replacement.
-- A model-width change updates weights, `EMBED_DIM`, `bge_small_config().hidden_size`, `vecstore::EXPECTED_EMBED_DIM` and `EmbedDimConfig::default().dim` together; `memory_md::flat_vec_embedding` checks `cfg.dim()`.
+- No candle dependency: the in-wasm bert model was removed because candle-core pulls zip 1.x, which is fully yanked. Restore from git history at 68ae320be2 or earlier only after a resolvable candle release exists. The build always uses the host `host_vec_embed` path.
+- A model-width change updates weights, `EMBED_DIM`, `vecstore::EXPECTED_EMBED_DIM` and `EmbedDimConfig::default().dim` together; `memory_md::flat_vec_embedding` checks `cfg.dim()`.
 - BGE queries carry `BGE_QUERY_PREFIX` via `condition_query`, passages do not; embedding cache slots compare the stored full key, though the slot name is an `fnv1a64` hash.
 - `host_vec_embed` and `try_sibling_plugin_embed` are distinct host routes to one BERT model. `build.rs` embeds `PLUGKIT_SOURCE_SHA`; fix `PLUGKIT_BUILD_SHA` for byte-for-byte A/B comparisons.
 - `crawl_cdp` is a required host import, so guest and runner ship together; `crawl` takes a plain-text body verbatim, `engine=lightpanda` reaches its sibling through `plugin_call_text`.
