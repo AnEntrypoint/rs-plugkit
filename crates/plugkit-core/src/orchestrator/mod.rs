@@ -410,6 +410,7 @@ orchestrator_dispatch_table! {
     "codeinsight-namespace-audit" => codeinsight_component::handle_audit(content),
     "calculus-model-check" => calculus::handle_model_check(content),
     "phase-status" => state::handle_status(),
+    "session-handover" => state::handle_session_handover(content),
     "wait" => wait::handle(content),
     "sleep" => wait::handle(content),
     "residual-scan" => residual::handle_scan(content),
