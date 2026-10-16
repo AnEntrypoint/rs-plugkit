@@ -1674,7 +1674,6 @@ const BROWSER_OR_GPU_WITNESS_MARKERS: &[&str] = &[
     "chrome-launcher",
     "puppeteer",
     "playwright",
-    "lightpanda",
     "remote-debugging",
     "requestadapter",
     "webgl",
