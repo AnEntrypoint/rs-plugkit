@@ -2,12 +2,6 @@
 
 use std::sync::OnceLock;
 
-#[cfg(feature = "candle")]
-use candle_core::{DType, Device, Tensor};
-#[cfg(feature = "candle")]
-use candle_nn::VarBuilder;
-#[cfg(feature = "candle")]
-use candle_transformers::models::bert::{BertModel, Config, HiddenAct, PositionEmbeddingType};
 use tokenizers::Tokenizer;
 
 #[link(wasm_import_module = "env")]
@@ -103,11 +97,6 @@ fn elog(msg: &str) {
     let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
 }
 
-#[cfg(feature = "candle")]
-static MODEL_SAFETENSORS: &[u8] = include_bytes!("../../../weights/bge-small-en-v1.5.safetensors");
-#[cfg(feature = "candle")]
-static TOKENIZER_JSON: &[u8] = include_bytes!("../../../weights/bge-tokenizer.json");
-
 pub const EMBED_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 
 pub const EMBED_QUERY_PREFIX_IDENTITY: &str = BGE_QUERY_PREFIX;
@@ -121,8 +110,6 @@ const _: () = {
          a store created at one width cannot hold vectors of the other"
     );
 };
-
-const MAX_TOKENS: usize = 512;
 
 const BGE_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
 
@@ -144,17 +131,10 @@ getrandom::register_custom_getrandom!(custom_getrandom);
 
 struct EmbedCtx {
     tokenizer: Option<Tokenizer>,
-    #[cfg(feature = "candle")]
-    model: Option<BertModel>,
-    #[cfg(feature = "candle")]
-    device: Device,
     host_delegated: bool,
 }
 
 static CTX: OnceLock<EmbedCtx> = OnceLock::new();
-
-#[cfg(feature = "candle")]
-static LAZY_WASM_FALLBACK: OnceLock<Option<(Tokenizer, BertModel, Device)>> = OnceLock::new();
 
 fn probe_host_embed() -> bool {
     let probe_text = "init-probe";
@@ -170,83 +150,6 @@ fn probe_host_embed() -> bool {
     rc == EMBED_DIM as i32
 }
 
-#[cfg(feature = "candle")]
-fn bge_small_config() -> Config {
-    Config {
-        vocab_size: 30522,
-        hidden_size: 384,
-        num_hidden_layers: 12,
-        num_attention_heads: 12,
-        intermediate_size: 1536,
-        hidden_act: HiddenAct::Gelu,
-        hidden_dropout_prob: 0.1,
-        max_position_embeddings: 512,
-        type_vocab_size: 2,
-        initializer_range: 0.02,
-        layer_norm_eps: 1e-12,
-        pad_token_id: 0,
-        position_embedding_type: PositionEmbeddingType::Absolute,
-        use_cache: true,
-        classifier_dropout: None,
-        model_type: Some("bert".to_string()),
-    }
-}
-
-#[cfg(feature = "candle")]
-fn load_wasm_model_uncached() -> Result<(Tokenizer, BertModel, Device), String> {
-    gemm::set_wasm_simd128(true);
-    crate::wasm_dispatch::emit_event(
-        "gemm_simd128_flag_check",
-        serde_json::json!({
-            "set_to": true,
-            "read_back": gemm::get_wasm_simd128(),
-        }),
-    );
-
-    let tokenizer =
-        Tokenizer::from_bytes(TOKENIZER_JSON).map_err(|e| format!("tokenizer load: {}", e))?;
-
-    let device = Device::Cpu;
-
-    let vb = VarBuilder::from_slice_safetensors(MODEL_SAFETENSORS, DType::F32, &device)
-        .map_err(|e| format!("varbuilder safetensors: {}", e))?;
-
-    let config = bge_small_config();
-    let model = BertModel::load(vb, &config).map_err(|e| format!("bert init: {}", e))?;
-
-    crate::wasm_dispatch::emit_event(
-        "embed.model-loaded",
-        serde_json::json!({
-            "model": EMBED_MODEL_NAME,
-            "embed_dim": EMBED_DIM,
-            "num_hidden_layers": config.num_hidden_layers,
-            "safetensors_bytes": MODEL_SAFETENSORS.len(),
-            "tokenizer_bytes": TOKENIZER_JSON.len(),
-        }),
-    );
-
-    Ok((tokenizer, model, device))
-}
-
-#[cfg(feature = "candle")]
-fn lazy_wasm_fallback() -> Option<&'static (Tokenizer, BertModel, Device)> {
-    LAZY_WASM_FALLBACK
-        .get_or_init(|| {
-            crate::wasm_dispatch::emit_event("embed.lazy-wasm-fallback-loading", serde_json::json!({
-                "reason": "host_delegated context's live host_vec_embed call failed; loading wasm-side bert model on demand instead of refusing outright",
-            }));
-            match load_wasm_model_uncached() {
-                Ok(t) => Some(t),
-                Err(e) => {
-                    elog(&format!("embed::lazy_wasm_fallback load failed: {}", e));
-                    crate::wasm_dispatch::emit_event("embed.lazy-wasm-fallback-load-failed", serde_json::json!({ "error": e }));
-                    None
-                }
-            }
-        })
-        .as_ref()
-}
-
 fn init_ctx() -> Result<EmbedCtx, String> {
     if probe_host_embed() {
         crate::wasm_dispatch::emit_event(
@@ -259,41 +162,17 @@ fn init_ctx() -> Result<EmbedCtx, String> {
         elog("embed::init_ctx host-delegated (probe ok); skipping safetensors+tokenizer load");
         return Ok(EmbedCtx {
             tokenizer: None,
-            #[cfg(feature = "candle")]
-            model: None,
-            #[cfg(feature = "candle")]
-            device: Device::Cpu,
             host_delegated: true,
         });
     }
 
-    #[cfg(not(feature = "candle"))]
-    {
-        crate::wasm_dispatch::emit_event(
-            "embed.slim-build-no-fallback",
-            serde_json::json!({
-                "reason": "this is a slim build (feature=slim): no wasm-embedded safetensors fallback exists, and the host_vec_embed probe just failed -- embedding is genuinely unavailable this session, not a bug",
-            }),
-        );
-        return Err("slim build has no wasm-side embedding fallback -- host_vec_embed must be implemented by the host (e.g. agentplug-runner's native candle path)".to_string());
-    }
-
-    #[cfg(feature = "candle")]
-    {
-        crate::wasm_dispatch::emit_event(
-            "embed.wasm-loading",
-            serde_json::json!({
-                "reason": "host_vec_embed probe failed; loading wasm-side bert model",
-            }),
-        );
-        let (tokenizer, model, device) = load_wasm_model_uncached()?;
-        Ok(EmbedCtx {
-            tokenizer: Some(tokenizer),
-            model: Some(model),
-            device,
-            host_delegated: false,
-        })
-    }
+    crate::wasm_dispatch::emit_event(
+        "embed.slim-build-no-fallback",
+        serde_json::json!({
+            "reason": "this is a slim build (feature=slim): no wasm-embedded safetensors fallback exists, and the host_vec_embed probe just failed -- embedding is genuinely unavailable this session, not a bug",
+        }),
+    );
+    Err("slim build has no wasm-side embedding fallback -- host_vec_embed must be implemented by the host (e.g. agentplug-runner's native candle path)".to_string())
 }
 
 fn ctx() -> Result<&'static EmbedCtx, &'static str> {
@@ -307,13 +186,6 @@ fn ctx() -> Result<&'static EmbedCtx, &'static str> {
                 "embed::init_ctx OK (host_delegated={})",
                 c.host_delegated
             ));
-            #[cfg(feature = "candle")]
-            let (safetensors_bytes, tokenizer_bytes) = if c.host_delegated {
-                (0, 0)
-            } else {
-                (MODEL_SAFETENSORS.len(), TOKENIZER_JSON.len())
-            };
-            #[cfg(not(feature = "candle"))]
             let (safetensors_bytes, tokenizer_bytes) = (0, 0);
             crate::wasm_dispatch::emit_event(
                 "embed_init_ok",
@@ -352,26 +224,6 @@ fn l2_normalize(v: &mut [f32]) {
             *x /= n;
         }
     }
-}
-
-macro_rules! step {
-    ($label:expr, $expr:expr) => {
-        match $expr {
-            Ok(v) => v,
-            Err(e) => {
-                let err_s = format!("{}", e);
-                record_embed_failure(format!(
-                    "in-wasm embedding forward pass failed at step '{}': {}. A retry will not help unless the input itself changes",
-                    $label, err_s
-                ));
-                crate::wasm_dispatch::emit_event("embed_fail", serde_json::json!({
-                    "step": $label,
-                    "error": err_s,
-                }));
-                return None;
-            }
-        }
-    };
 }
 
 pub fn embed_text(text: &str) -> Option<Vec<f32>> {
@@ -422,15 +274,8 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
     };
 
     if c.host_delegated {
-        #[cfg(feature = "candle")]
-        {
-            if let Some((tokenizer, model, device)) = lazy_wasm_fallback() {
-                elog("embed::embed_text host-delegated live call failed; using lazily-loaded wasm fallback");
-                return run_embed_forward(tokenizer, model, device, text);
-            }
-        }
         record_embed_failure(format!(
-            "host-delegated embedding failed ({host_failure}) and no in-wasm fallback is available (slim build, or the lazy weight load itself failed), so nothing can produce a vector for this text"
+            "host-delegated embedding failed ({host_failure}) and no in-wasm fallback is available (slim build), so nothing can produce a vector for this text"
         ));
         crate::wasm_dispatch::emit_event(
             "embed_fail",
@@ -442,130 +287,8 @@ fn embed_text_uncached(text: &str) -> Option<Vec<f32>> {
         return None;
     }
 
-    #[cfg(not(feature = "candle"))]
-    {
-        record_embed_failure("this build has no candle feature, so no in-wasm embedding model is compiled in: host_vec_embed must answer. A retry will not help until the host embedder recovers".to_string());
-        None
-    }
-    #[cfg(feature = "candle")]
-    {
-        let tokenizer = match c.tokenizer.as_ref() {
-            Some(t) => t,
-            None => {
-                record_embed_failure("tokenizer missing from a non-host-delegated embedding context: the compiled-in tokenizer never loaded. A retry will not help".to_string());
-                return None;
-            }
-        };
-        let model = match c.model.as_ref() {
-            Some(m) => m,
-            None => {
-                record_embed_failure("model missing from a non-host-delegated embedding context: the compiled-in safetensors never loaded. A retry will not help".to_string());
-                return None;
-            }
-        };
-        run_embed_forward(tokenizer, model, &c.device, text)
-    }
-}
-
-#[cfg(feature = "candle")]
-fn run_embed_forward(
-    tokenizer: &Tokenizer,
-    model: &BertModel,
-    device: &Device,
-    text: &str,
-) -> Option<Vec<f32>> {
-    let t0 = now_ms();
-    let enc = step!("tokenizer.encode", tokenizer.encode(text, true));
-    let t_tokenize = now_ms();
-    let mut ids: Vec<u32> = enc.get_ids().to_vec();
-    let mut mask: Vec<u32> = enc.get_attention_mask().to_vec();
-    if ids.len() > MAX_TOKENS {
-        ids.truncate(MAX_TOKENS);
-        mask.truncate(MAX_TOKENS);
-    }
-    let seq_len = ids.len();
-    if seq_len == 0 {
-        record_embed_failure(format!(
-            "tokenizing a {}-byte input produced zero tokens, so there is nothing to embed. A retry will not help -- the input carries no tokenizable content",
-            text.len()
-        ));
-        return None;
-    }
-
-    let ids_t = step!(
-        "Tensor::from_vec(ids)",
-        Tensor::from_vec(ids.clone(), (1, seq_len), device)
-    );
-    let mask_t = step!(
-        "Tensor::from_vec(mask)",
-        Tensor::from_vec(mask.clone(), (1, seq_len), device)
-    );
-    let token_type_ids = step!(
-        "Tensor::zeros(token_type_ids)",
-        Tensor::zeros((1, seq_len), DType::U32, device)
-    );
-    let t_tensor_build = now_ms();
-
-    let hidden_raw = step!(
-        "model.forward",
-        model.forward(&ids_t, &token_type_ids, Some(&mask_t))
-    );
-    let t_forward = now_ms();
-    let total_ms = t_forward - t0;
-    if total_ms > 1000 {
-        let msg = format!(
-            "embed::embed_text_uncached SLOW total={}ms tokenize={}ms tensor_build={}ms forward={}ms seq_len={} text_len={}",
-            total_ms, t_tokenize - t0, t_tensor_build - t_tokenize, t_forward - t_tensor_build, seq_len, text.len()
-        );
-        elog(&msg);
-        crate::wasm_dispatch::emit_event(
-            "embed_text_step_timing",
-            serde_json::json!({
-                "total_ms": total_ms,
-                "tokenize_ms": t_tokenize - t0,
-                "tensor_build_ms": t_tensor_build - t_tokenize,
-                "forward_ms": t_forward - t_tensor_build,
-                "seq_len": seq_len,
-                "text_len": text.len(),
-            }),
-        );
-    }
-    drop(ids_t);
-    drop(token_type_ids);
-    let hidden = step!("hidden.to_dtype(F32)", hidden_raw.to_dtype(DType::F32));
-    drop(hidden_raw);
-
-    let mask_f = step!("mask.to_dtype(F32)", mask_t.to_dtype(DType::F32));
-    drop(mask_t);
-    let mask_e = step!("mask.unsqueeze(2)", mask_f.unsqueeze(2));
-    let masked = step!("hidden.broadcast_mul(mask)", hidden.broadcast_mul(&mask_e));
-    drop(hidden);
-    drop(mask_e);
-    let sum = step!("masked.sum(1)", masked.sum(1));
-    drop(masked);
-    let denom_s = step!("mask.sum(1)", mask_f.sum(1));
-    drop(mask_f);
-    let denom = step!("denom.unsqueeze(1)", denom_s.unsqueeze(1));
-    drop(denom_s);
-    let pooled = step!("sum.broadcast_div(denom)", sum.broadcast_div(&denom));
-    drop(sum);
-    drop(denom);
-
-    let flat_t = step!("pooled.flatten_all", pooled.flatten_all());
-    drop(pooled);
-    let flat: Vec<f32> = step!("flat.to_vec1", flat_t.to_vec1());
-    drop(flat_t);
-    if flat.len() != EMBED_DIM {
-        elog(&format!(
-            "embed::embed_text dim mismatch: got={} expected={}",
-            flat.len(),
-            EMBED_DIM
-        ));
-        return None;
-    }
-    let mut out = flat;
-    l2_normalize(&mut out);
-    Some(out)
+    record_embed_failure("this build has no in-wasm embedding model compiled in: host_vec_embed must answer. A retry will not help until the host embedder recovers".to_string());
+    None
 }
 
 pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
@@ -609,191 +332,12 @@ pub fn embed_texts_batch(texts: &[String]) -> Option<Vec<Option<Vec<f32>>>> {
         return Some(out);
     }
 
-    let c = match ctx() {
-        Ok(c) => c,
-        Err(_) => {
-            for &i in &still_uncached {
-                out[i] = embed_text(&texts[i]);
-            }
-            return Some(out);
+    if ctx().is_err() {
+        for &i in &still_uncached {
+            out[i] = embed_text(&texts[i]);
         }
-    };
-    if c.host_delegated {
-        return Some(out);
-    }
-    #[cfg(not(feature = "candle"))]
-    {
-        return Some(out);
-    }
-    #[cfg(feature = "candle")]
-    {
-    let (tokenizer, model) = match (c.tokenizer.as_ref(), c.model.as_ref()) {
-        (Some(t), Some(m)) => (t, m),
-        _ => {
-            for &i in &still_uncached {
-                out[i] = embed_text(&texts[i]);
-            }
-            return Some(out);
-        }
-    };
-
-    let batch_texts: Vec<&str> = still_uncached.iter().map(|&i| texts[i].as_str()).collect();
-    let encodings = match tokenizer.encode_batch(batch_texts, true) {
-        Ok(e) => e,
-        Err(e) => {
-            elog(&format!(
-                "embed::embed_texts_batch tokenizer.encode_batch failed: {}; falling back per-item",
-                e
-            ));
-            for &i in &still_uncached {
-                out[i] = embed_text(&texts[i]);
-            }
-            return Some(out);
-        }
-    };
-
-    let mut per_item_ids: Vec<Vec<u32>> = Vec::with_capacity(encodings.len());
-    let mut per_item_mask: Vec<Vec<u32>> = Vec::with_capacity(encodings.len());
-    for enc in &encodings {
-        let mut ids = enc.get_ids().to_vec();
-        let mut mask = enc.get_attention_mask().to_vec();
-        if ids.len() > MAX_TOKENS {
-            ids.truncate(MAX_TOKENS);
-            mask.truncate(MAX_TOKENS);
-        }
-        per_item_ids.push(ids);
-        per_item_mask.push(mask);
-    }
-
-    let max_subbatch_items = crate::ragconfig::RagConfig::resolved()
-        .bulk_embed
-        .max_subbatch_items;
-    let max_subbatch_items_times_max_len_budget = max_subbatch_items * MAX_TOKENS;
-
-    let n = per_item_ids.len();
-    let mut start = 0usize;
-    while start < n {
-        let mut end = start;
-        let mut sub_max_len = 1usize;
-        while end < n && (end - start) < max_subbatch_items {
-            let candidate_max_len = sub_max_len.max(per_item_ids[end].len().max(1));
-            let candidate_items = end - start + 1;
-            if candidate_items * candidate_max_len > max_subbatch_items_times_max_len_budget
-                && candidate_items > 1
-            {
-                break;
-            }
-            sub_max_len = candidate_max_len;
-            end += 1;
-        }
-        if end == start {
-            end = start + 1;
-            sub_max_len = sub_max_len.max(per_item_ids[start].len().max(1));
-        }
-
-        let sub_ids = &per_item_ids[start..end];
-        let sub_mask = &per_item_mask[start..end];
-        let batch_n = sub_ids.len();
-        let max_len = sub_max_len;
-
-        let mut ids_flat: Vec<u32> = Vec::with_capacity(batch_n * max_len);
-        let mut mask_flat: Vec<u32> = Vec::with_capacity(batch_n * max_len);
-        for i in 0..batch_n {
-            let ids = &sub_ids[i];
-            let mask = &sub_mask[i];
-            let len = ids.len();
-            ids_flat.extend_from_slice(ids);
-            ids_flat.extend(std::iter::repeat(0u32).take(max_len - len));
-            mask_flat.extend_from_slice(mask);
-            mask_flat.extend(std::iter::repeat(0u32).take(max_len - len));
-        }
-
-        let build = || -> Result<Vec<Option<Vec<f32>>>, String> {
-            let ids_t = Tensor::from_vec(ids_flat.clone(), (batch_n, max_len), &c.device)
-                .map_err(|e| format!("Tensor::from_vec(ids) batch: {}", e))?;
-            let mask_t = Tensor::from_vec(mask_flat.clone(), (batch_n, max_len), &c.device)
-                .map_err(|e| format!("Tensor::from_vec(mask) batch: {}", e))?;
-            let token_type_ids = Tensor::zeros((batch_n, max_len), DType::U32, &c.device)
-                .map_err(|e| format!("Tensor::zeros(token_type_ids) batch: {}", e))?;
-
-            let hidden_raw = model
-                .forward(&ids_t, &token_type_ids, Some(&mask_t))
-                .map_err(|e| format!("model.forward batch: {}", e))?;
-            let hidden = hidden_raw
-                .to_dtype(DType::F32)
-                .map_err(|e| format!("hidden.to_dtype batch: {}", e))?;
-            let mask_f = mask_t
-                .to_dtype(DType::F32)
-                .map_err(|e| format!("mask.to_dtype batch: {}", e))?;
-            let mask_e = mask_f
-                .unsqueeze(2)
-                .map_err(|e| format!("mask.unsqueeze batch: {}", e))?;
-            let masked = hidden
-                .broadcast_mul(&mask_e)
-                .map_err(|e| format!("broadcast_mul batch: {}", e))?;
-            let sum = masked
-                .sum(1)
-                .map_err(|e| format!("masked.sum batch: {}", e))?;
-            let denom_s = mask_f
-                .sum(1)
-                .map_err(|e| format!("mask.sum batch: {}", e))?;
-            let denom = denom_s
-                .unsqueeze(1)
-                .map_err(|e| format!("denom.unsqueeze batch: {}", e))?;
-            let pooled = sum
-                .broadcast_div(&denom)
-                .map_err(|e| format!("broadcast_div batch: {}", e))?;
-
-            let mut results = Vec::with_capacity(batch_n);
-            for row in 0..batch_n {
-                let row_t = pooled
-                    .get(row)
-                    .map_err(|e| format!("pooled.get({}): {}", row, e))?;
-                let flat: Vec<f32> = row_t
-                    .to_vec1()
-                    .map_err(|e| format!("row.to_vec1({}): {}", row, e))?;
-                if flat.len() != EMBED_DIM {
-                    results.push(None);
-                    continue;
-                }
-                let mut v = flat;
-                l2_normalize(&mut v);
-                results.push(Some(v));
-            }
-            Ok(results)
-        };
-
-        let sub_uncached = &still_uncached[start..end];
-        match build() {
-            Ok(results) => {
-                for (j, &i) in sub_uncached.iter().enumerate() {
-                    if let Some(v) = &results[j] {
-                        let cacheable = texts[i].len() <= plain_cache_max_text();
-                        if cacheable {
-                            cache_put(&PLAIN_CACHE, &texts[i], v);
-                        }
-                    }
-                    out[i] = results[j].clone();
-                }
-            }
-            Err(e) => {
-                elog(&format!("embed::embed_texts_batch sub-batch failed: {}; falling back per-item for this sub-batch", e));
-                crate::wasm_dispatch::emit_event(
-                    "embed_fail",
-                    serde_json::json!({
-                        "step": "embed_texts_batch",
-                        "error": e,
-                    }),
-                );
-                for &i in sub_uncached {
-                    out[i] = embed_text(&texts[i]);
-                }
-            }
-        }
-        start = end;
     }
     Some(out)
-    }
 }
 
 pub fn embed_text_json(text: &str) -> Option<serde_json::Value> {
