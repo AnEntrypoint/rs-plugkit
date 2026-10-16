@@ -1,5 +1,6 @@
 pub const LEAN_PROSE: &[(&str, &str)] = &[
     ("acceptport", include_str!("prose/acceptport.md")),
+    ("ach", include_str!("prose/ach.md")),
     ("adrn", include_str!("prose/adrn.md")),
     ("adversarial", include_str!("prose/adversarial.md")),
     ("agentqa", include_str!("prose/agentqa.md")),
