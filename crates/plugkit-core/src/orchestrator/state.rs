@@ -261,13 +261,11 @@ pub fn handle_status() -> (String, String, i32) {
 
 pub fn handle_session_handover(content: &str) -> (String, String, i32) {
     let body: Value = serde_json::from_str(content).unwrap_or(Value::Null);
-    let incoming = dispatch_session_id().or_else(|| {
-        ["session_id", "SESSION_ID", "sessionId"]
-            .iter()
-            .find_map(|k| body.get(*k).and_then(|v| v.as_str()))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    });
+    let incoming = ["session_id", "SESSION_ID", "sessionId"]
+        .iter()
+        .find_map(|k| body.get(*k).and_then(|v| v.as_str()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let Some(incoming) = incoming else {
         return (
             String::new(),
