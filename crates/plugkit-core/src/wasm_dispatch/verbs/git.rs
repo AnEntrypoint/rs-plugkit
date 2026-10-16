@@ -2958,7 +2958,7 @@ fn scope_reland_commits(
     merge_base: &str,
     commits: &[(String, Vec<String>)],
     scope: &[String],
-    identity: Option<&(String, String)>,
+    identity: &(String, String),
 ) -> Result<(String, Vec<Value>), String> {
     let tree_of = |rev: &str| -> String {
         exec_git_in(cwd, &format!("rev-parse {}^{{tree}}", rev))
@@ -3048,13 +3048,12 @@ fn scope_reland_commits(
             .trim_end()
             .to_string();
         let subject = message.lines().next().unwrap_or("").to_string();
-        let mut argv: Vec<String> = Vec::new();
-        if let Some((name, email)) = identity {
-            argv.push("-c".to_string());
-            argv.push(format!("user.name={}", name));
-            argv.push("-c".to_string());
-            argv.push(format!("user.email={}", email));
-        }
+        let mut argv: Vec<String> = vec![
+            "-c".to_string(),
+            format!("user.name={}", identity.0),
+            "-c".to_string(),
+            format!("user.email={}", identity.1),
+        ];
         argv.push("commit-tree".to_string());
         argv.push(tree.clone());
         argv.push("-p".to_string());
@@ -3100,7 +3099,7 @@ pub(super) fn scope_recommit_past_remote_moved(
     branch: &str,
     local_sha: &str,
     scope: &[String],
-    identity: Option<&(String, String)>,
+    identity: &(String, String),
 ) -> RemoteMovedScopeFix {
     if scope.is_empty() {
         return RemoteMovedScopeFix::NotApplicable;
@@ -3356,7 +3355,7 @@ pub(super) fn pull_and_repush_remote_moved(
                 branch,
                 &local_sha,
                 &scope,
-                body_commit_identity(body).as_ref(),
+                &commit_identity(body),
             );
             match fix {
                 RemoteMovedScopeFix::NotApplicable => {}
