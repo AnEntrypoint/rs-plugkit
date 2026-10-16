@@ -101,6 +101,11 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
         Severity::Deny,
     ),
     (
+        "prd-resolve-self-witness",
+        "`prd-resolve` supplied a witness_dispatch_id recorded under the same session that executed the row (the row's session_id) -- the gm-prd rule forbids self-witness; the witness must come from another session",
+        Severity::Deny,
+    ),
+    (
         "prd-resolve-unbound-witness",
         "`prd-resolve` closed a row with witness text but neither a verified witness_dispatch_id nor a complete witness binding (witness_exit_code, witness_output_sha256, witness_output_path, witness_ts) -- the evidence cannot be traced to a run",
         Severity::Deny,
