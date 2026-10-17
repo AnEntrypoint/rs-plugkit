@@ -3,7 +3,7 @@ name: wasip2-component
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, ccr-a9aa2958-5hedeq]
   pull_request:
 
 permissions:
