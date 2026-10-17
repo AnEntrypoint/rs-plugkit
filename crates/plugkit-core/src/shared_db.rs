@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 pub const SHARED_DB: &str = "gm";
 
 #[link(wasm_import_module = "env")]
+#[cfg(not(feature = "wit-env"))]
 extern "C" {
     fn host_plugin_call(
         plugin_ptr: *const u8,
@@ -15,6 +16,8 @@ extern "C" {
         body_len: u32,
     ) -> u64;
 }
+#[cfg(feature = "wit-env")]
+use crate::wit_env::{host_plugin_call};
 
 fn call_libsql_plugin(plugin: &str, verb: &str, body: Value) -> Value {
     let body_str = body.to_string();

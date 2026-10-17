@@ -8,10 +8,14 @@ const HOST_FS_READ_EMPTY_SUCCESS: u64 = 1;
 
 macro_rules! host_abi_extern_block_and_host_imports_list_from_one_declaration {
     ($(fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?;)+) => {
+        #[cfg(not(feature = "wit-env"))]
         #[link(wasm_import_module = "env")]
         extern "C" {
             $(pub fn $name($($arg: $ty),*) $(-> $ret)?;)+
         }
+
+        #[cfg(feature = "wit-env")]
+        pub use crate::wit_env::{$($name),+};
 
         pub const HOST_IMPORTS: &[&str] = &[$(stringify!($name)),+];
     };

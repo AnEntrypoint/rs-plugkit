@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 slim = []
+wit-env = ["dep:wit-bindgen"]
 
 [dependencies]
 serde_json = "1"
@@ -22,6 +23,7 @@ sha2 = "0.10"
 gemm = { version = "0.17", default-features = false }
 tokenizers = { version = "0.23", default-features = false, features = ["unstable_wasm"] }
 getrandom = { version = "0.2", features = ["custom"] }
+wit-bindgen = { version = "0.57", optional = true }
 rs-search = { git = "https://github.com/AnEntrypoint/rs-search.git", package = "rs-search", default-features = false }
 ignore = "0.4.30"
 regex = "1"

@@ -7,6 +7,9 @@ pub mod git_index_lock;
 pub mod commit_scope;
 
 #[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "wit-env"))]
+pub mod wit_env;
+
 pub mod wasm_dispatch;
 
 #[cfg(target_arch = "wasm32")]

@@ -10,9 +10,12 @@ fn pipeline_cfg() -> crate::ragconfig::PipelineConfig {
 }
 
 #[link(wasm_import_module = "env")]
+#[cfg(not(feature = "wit-env"))]
 extern "C" {
     fn host_env_get(key_ptr: *const u8, key_len: u32) -> u64;
 }
+#[cfg(feature = "wit-env")]
+use crate::wit_env::{host_env_get};
 
 fn pipeline_db_path() -> String {
     crate::code_index::project_db_path(None)
