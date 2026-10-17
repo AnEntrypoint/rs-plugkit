@@ -43,6 +43,7 @@ pub const GIT_VERBS: &[&str] = &[
     "git_add",
     "git_commit",
     "git_amend",
+    "git_rewrite_authors",
     "git_finalize",
     "git_log",
     "git_diff",
@@ -53,6 +54,7 @@ pub const GIT_VERBS: &[&str] = &[
     "git_checkout",
     "git_merge",
     "git_merge_abort",
+    "git_cherry_pick",
     "git_branch_delete",
     "git_rm",
     "git_revert",
@@ -111,7 +113,6 @@ pub const META_VERBS: &[&str] = &[
     "cache_put",
     "cache_invalidate",
     "cache_stats",
-    "learn",
 ];
 
 pub const VERB_ALIASES: &[(&str, &str)] = &[

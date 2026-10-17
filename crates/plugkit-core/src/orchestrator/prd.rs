@@ -307,6 +307,17 @@ pub fn status_is_open(status: &str) -> bool {
         .any(|s| s.eq_ignore_ascii_case(&normalized))
 }
 
+pub fn status_is_blocked(status: &str) -> bool {
+    status.trim().eq_ignore_ascii_case("blocked")
+}
+
+fn status_matches_filter(want: &str, status: &str) -> bool {
+    if want.eq_ignore_ascii_case("pending") {
+        return status_is_open(status) && !status_is_blocked(status);
+    }
+    want == status
+}
+
 fn subject_from_fields(item_map: &serde_yaml::Mapping) -> &str {
     [
         "subject",
@@ -554,8 +565,10 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
             let id = row_text(row, &["id"]);
             let status = row_status(row);
             let id_ok = wanted_ids.is_empty() || wanted_ids.iter().any(|want| want == &id);
-            let status_ok =
-                wanted_statuses.is_empty() || wanted_statuses.iter().any(|want| want == &status);
+            let status_ok = wanted_statuses.is_empty()
+                || wanted_statuses
+                    .iter()
+                    .any(|want| status_matches_filter(want, &status));
             id_ok && status_ok
         })
         .collect();
@@ -2446,8 +2459,8 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                     return (
                         body,
                         format!(
-                            "prd-resolve refused: witness_dispatch_id {} not in the dispatch ledger for {}",
-                            dispatch_id, id_target
+                            "prd-resolve refused: witness_dispatch_id {} is not in the root's dispatch ledger for {}; the ledger keeps the most recent {} dispatches, so a witness older than that has aged out and must be re-run",
+                            dispatch_id, id_target, crate::dispatch_ledger::RETAINED_ENTRIES
                         ),
                         1,
                     );

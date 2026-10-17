@@ -2801,7 +2801,7 @@ fn body_parse_failure_response(verb: &str, body_s: &str, err: &serde_json::Error
 
 fn extract_session_id_from_plain_text_body(body_s: &str) -> Option<String> {
     let trimmed = body_s.trim_start();
-    for prefix in ["sessionId=", "session_id="] {
+    for prefix in ["sessionId=", "session_id=", "SESSION_ID="] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             let id = rest.split('\n').next().unwrap_or("").trim();
             if !id.is_empty() {
@@ -2887,10 +2887,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     strip_reserved_body_keys(&mut body);
     let body_parse_failed = parse_failure.is_some();
     set_caller_budget(caller_timeout_ms);
-    let dispatch_session_id = body.get("sessionId").and_then(|v| v.as_str())
-        .or_else(|| body.get("session_id").and_then(|v| v.as_str()))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    let dispatch_session_id = crate::validation::session_id_from_body(&body)
         .or_else(|| extract_session_id_from_plain_text_body(&raw_body_s));
     super::events::set_dispatch_session_id(dispatch_session_id.clone());
     if let Some(root_override) = body.get("git_root_override").and_then(|v| v.as_str()) {
@@ -3189,6 +3186,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_add" => git_add(&body),
         "git_commit" => git_commit(&body),
         "git_amend" => git_amend(&body),
+        "git_rewrite_authors" => git_rewrite_authors(&body),
         "git_finalize" => git_finalize(&body),
         "git_log" => git_log(&body),
         "git_diff" => git_diff(&body),
@@ -3218,7 +3216,6 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_worktree_remove" => git_worktree_remove(&body),
         "git_worktree_prune" => git_worktree_prune(&body),
         "git_poll" => git_poll(&body),
-        "learn" => err_coded("learn", ERR_CODE_RETIRED_VERB, "verb retired: the rs-learn crate is removed; memory routes through memorize/recall/memorize-prune (md corpus at .gm/memories + gm.db index)"),
         "cdp" => err_coded("cdp", ERR_CODE_RETIRED_VERB, "verb retired: the standalone cdp verb is removed in this build; dispatch verb crawl (or chrome) with a plain-text body whose first line is engine=cdp, then one step per line: sessionId=<name>, a URL or url=<url>, wait <ms>, eval=<js>, cdp <Domain.method> with its JSON params on the next line, events <Domain.event> [where <field>~<value>] [limit=N]. A session still answered by an older runner build serves cdp; a runner newer than that one retires it"),
         "discipline" => discipline(&body),
         "" => err_coded("", ERR_CODE_INVALID_ARGS, "verb required"),
