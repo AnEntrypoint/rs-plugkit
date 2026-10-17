@@ -39,8 +39,8 @@ interface host {
 }
 
 interface guest {
-    dispatch-verb: func(verb: string, body: string) -> string;
-    plugkit-version: func() -> string;
+    dispatch-verb: async func(verb: string, body: string) -> string;
+    plugkit-version: async func() -> string;
 }
 
 world plugkit-guest {

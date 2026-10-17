@@ -185,7 +185,7 @@ pub unsafe fn crawl_cdp(body_ptr: *const u8, body_len: u32) -> u64 {
 struct Component;
 
 impl bindings::exports::plugkit::env::guest::Guest for Component {
-    fn dispatch_verb(verb: String, body: String) -> String {
+    async fn dispatch_verb(verb: String, body: String) -> String {
         let packed = crate::wasm_dispatch::dispatch_verb(
             verb.as_ptr() as u32,
             verb.len() as u32,
@@ -195,7 +195,7 @@ impl bindings::exports::plugkit::env::guest::Guest for Component {
         crate::wasm_dispatch::host_abi::unpack_to_string(packed).unwrap_or_default()
     }
 
-    fn plugkit_version() -> String {
+    async fn plugkit_version() -> String {
         env!("CARGO_PKG_VERSION").to_string()
     }
 }
