@@ -38,6 +38,12 @@ interface host {
     crawl-cdp: func(body: string) -> option<list<u8>>;
 }
 
-world env-imports {
+interface guest {
+    dispatch-verb: func(verb: string, body: string) -> string;
+    plugkit-version: func() -> string;
+}
+
+world plugkit-guest {
     import host;
+    export guest;
 }
