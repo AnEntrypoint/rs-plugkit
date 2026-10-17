@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::super::pool_rank;
+use super::super::prd;
 use super::super::transitions::{prd_open_rows_with_recency, prd_row_ids};
 use super::admission::{dirty_target_verdict, row_by_id, worktree_dirt, writer_targets_of};
 use super::heartbeats::{count_of_record_live, declared_holds, held_rows, read_heartbeats};
@@ -34,6 +35,7 @@ pub(super) fn slot_parts(
         .into_iter()
         .partition(|(row, _)| pool_rank::is_blocker_row(row));
     let blockers: Vec<Value> = blocker_entries.into_iter().map(|(row, _)| row).collect();
+    let work: Vec<(Value, usize)> = work.into_iter().filter(|(row, _)| !row_is_blocked(row)).collect();
     let open_rows = work.len();
     let witness_gap_open = work
         .iter()
@@ -146,6 +148,10 @@ const RANK_SKIP_FIELDS: [&str; 6] = [
     "live_skipped_rows",
     "rows_with_pending_blocker",
 ];
+
+fn row_is_blocked(row: &Value) -> bool {
+    row.get("status").and_then(Value::as_str).is_some_and(prd::status_is_blocked)
+}
 
 fn clipped_text(text: &str, limit: usize) -> String {
     let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
