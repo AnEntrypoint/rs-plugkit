@@ -1,0 +1,39 @@
+name: wasip2-component
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  wasip2-component:
+    name: wasip2-component
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7
+        with:
+          key: wasip2-component
+      - name: install wasm-tools
+        run: cargo install wasm-tools --version 1.262.0 --locked
+      - name: build the wasip2 component guest
+        run: cargo build -p rs-plugkit --release --target wasm32-wasip2 --features slim,wit-env
+      - name: witness the component shape, exports and size
+        run: |
+          set -euo pipefail
+          artifact=target/wasm32-wasip2/release/rs_plugkit.wasm
+          wasm-tools component wit "$artifact" > component.wit
+          grep -q 'import plugkit:env/host@0.1.0;' component.wit
+          grep -q 'export plugkit:env/guest@0.1.0;' component.wit
+          size=$(stat -c %s "$artifact")
+          echo "component bytes: $size"
+          test "$size" -lt 104857600
