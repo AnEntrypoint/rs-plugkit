@@ -52,6 +52,7 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/receipts/",
     ".gm/witness-log.md",
     ".gm/witness-out/",
+    "crates/**/.gm/",
 ];
 
 pub const MUST_STAY_TRACKED: &[&str] = &[
