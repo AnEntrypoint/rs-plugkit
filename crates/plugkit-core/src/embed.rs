@@ -129,6 +129,11 @@ fn custom_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
 }
 getrandom::register_custom_getrandom!(custom_getrandom);
 
+#[unsafe(no_mangle)]
+unsafe extern "Rust" fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Result<(), getrandom::Error> {
+    custom_getrandom(unsafe { core::slice::from_raw_parts_mut(dest, len) })
+}
+
 struct EmbedCtx {
     tokenizer: Option<Tokenizer>,
     host_delegated: bool,

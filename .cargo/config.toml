@@ -3,3 +3,6 @@ rustflags = ["-C", "target-feature=+simd128"]
 
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]
+
+[target.wasm32-wasip3]
+rustflags = ["-C", "target-feature=+simd128", "--cfg", "getrandom_backend=\"custom\""]
