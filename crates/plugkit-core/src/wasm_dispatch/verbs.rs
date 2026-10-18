@@ -1035,9 +1035,15 @@ fn fs_read(body: &Value) -> u64 {
                 }
             }
         }
-        None => match host_abi::host_stat_is_directory(path) {
-            Some(true) => fs_read_directory(path, body),
-            _ => err("fs_read", "file read failed"),
+        None => match host_abi::host_stat(path) {
+            Some(stat) if !stat.is_null() => {
+                if stat.get("isDirectory").and_then(Value::as_bool) == Some(true) {
+                    fs_read_directory(path, body)
+                } else {
+                    err("fs_read", &format!("fs_read could not read '{path}': the file exists but its contents could not be read (permission denied or I/O error)"))
+                }
+            }
+            _ => err("fs_read", &format!("fs_read could not read '{path}': no such file under the project root (not found)")),
         },
     }
 }
@@ -1405,16 +1411,13 @@ fn fs_readdir(body: &Value) -> u64 {
 fn fs_readdir_unlisted(path: &str) -> u64 {
     let stat = super::host_abi::host_stat(path).filter(|v| !v.is_null());
     let Some(stat) = stat else {
-        return pack(
+        return err_json(
+            "fs_readdir",
             json!({
-                "ok": true,
-                "verb": "fs_readdir",
-                "data": [],
-                "total": 0,
-                "missing": true,
+                "error": format!("fs_readdir could not list '{path}': not found"),
                 "path": path,
-            })
-            .to_string(),
+                "missing": true,
+            }),
         );
     };
     let is_dir = stat.get("isDirectory").and_then(Value::as_bool) == Some(true);
