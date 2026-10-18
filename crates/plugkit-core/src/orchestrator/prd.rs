@@ -700,6 +700,27 @@ impl AddOutcome {
     }
 }
 
+const DISPOSITIONS: [&str; 4] = ["open", "accepted", "rejected", "deferred"];
+
+fn mapping_text(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
+    map.get(&Value::String(key.to_string()))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn disposition_head(disposition: &str) -> &str {
+    disposition.split(':').next().unwrap_or("").trim()
+}
+
+fn body_session_id(body: &serde_json::Value) -> Option<String> {
+    ["session_id", "session", "SESSION_ID", "sessionId"]
+        .iter()
+        .find_map(|key| body.get(*key).and_then(serde_json::Value::as_str))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 pub fn handle_add(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -731,7 +752,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             None => return (String::new(), "parse failed".to_string(), 1),
         },
     };
-    let item_map = match new_item.as_mapping() {
+    let mut item_map = match new_item.as_mapping() {
         Some(m) => m.clone(),
         None => {
             return (
@@ -741,6 +762,23 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             )
         }
     };
+    if let Some(disposition) = mapping_text(&item_map, "disposition") {
+        if !DISPOSITIONS.contains(&disposition_head(&disposition)) {
+            return (
+                String::new(),
+                format!(
+                    "prd-add refused: disposition '{}' must start with one of open, accepted, rejected, deferred (a reason may follow ':')",
+                    disposition
+                ),
+                1,
+            );
+        }
+    }
+    if mapping_text(&item_map, "owner").is_none() {
+        if let Some(filer) = body_session_id(&request_object(trimmed)) {
+            item_map.insert(Value::String("owner".to_string()), Value::String(filer));
+        }
+    }
     let has_external_block = item_map
         .get(&Value::String("blockedBy".to_string()))
         .and_then(|v| v.as_sequence())
@@ -2576,6 +2614,38 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             format!("{} holds no PRD rows", store.dir),
             1,
         );
+    }
+    if let Some(row) = existing_blocks.iter().filter_map(Value::as_mapping).find(|map| {
+        mapping_text(map, "id").as_deref() == Some(id_target.as_str())
+    }) {
+        let resolver = body_session_id(&request_object(trimmed));
+        let recheck_by = mapping_text(row, "recheck_by");
+        let disposition_is_open = mapping_text(row, "disposition")
+            .map(|d| disposition_head(&d) == "open")
+            .unwrap_or(false);
+        let refusal = if recheck_by.is_some() && recheck_by == resolver {
+            Some(format!(
+                "prd-resolve refused: {} has recheck_by equal to the resolving session; a row cannot be closed by the session that must recheck it",
+                id_target
+            ))
+        } else if disposition_is_open {
+            Some(format!(
+                "prd-resolve refused: {} has disposition open; set accepted, rejected or deferred before resolving",
+                id_target
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = refusal {
+            let body = serde_json::json!({
+                "error": message.clone(),
+                "deviation_kind": "prd-resolve-recheck-refused",
+                "deviation_severity": "deny",
+                "prd_id": id_target.clone(),
+            })
+            .to_string();
+            return (body, message, 1);
+        }
     }
 
     if !annotate_only
