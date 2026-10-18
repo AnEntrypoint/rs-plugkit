@@ -3291,14 +3291,26 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         }
         if add_all || !paths.is_empty() {
             let staged_paths: &[String] = if add_all { &[] } else { &paths };
-            let ignored = ignored_requested_paths(plan, cwd, staged_paths)?;
-            let stage_argv = if ignored.is_empty() {
-                git_stage_argv(staged_paths, cwd)
-            } else {
-                git_stage_argv_forced(staged_paths, cwd)
-            };
-            let stage = git_step_replayed_by_call_order(plan, &as_argv(&stage_argv), cwd)?;
-            write_steps.push(stage.clone());
+            let deleted = deleted_tracked_paths(cwd, staged_paths);
+            if !deleted.is_empty() {
+                let mut rm: Vec<String> = vec!["rm".to_string(), "--cached".to_string(), "--ignore-unmatch".to_string(), "-q".to_string(), "--".to_string()];
+                rm.extend(deleted.iter().cloned());
+                let removal = git_step_replayed_by_call_order(plan, &as_argv(&rm), cwd)?;
+                write_steps.push(removal);
+            }
+            let live: Vec<String> = staged_paths.iter().filter(|p| !deleted.contains(*p)).cloned().collect();
+            if add_all || !live.is_empty() {
+                let ignored = ignored_requested_paths(plan, cwd, &live)?;
+                let stage_argv = if ignored.is_empty() {
+                    git_stage_argv(&live, cwd)
+                } else {
+                    git_stage_argv_forced(&live, cwd)
+                };
+                let stage = git_step_replayed_by_call_order(plan, &as_argv(&stage_argv), cwd)?;
+                write_steps.push(stage.clone());
+                stage_stderr = stage.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                force_added_ignored_paths = ignored;
+            }
             if !add_all && !paths.is_empty() {
                 let extra = staged_outside_requested(cwd, &staged_before, &paths);
                 if !extra.is_empty() {
@@ -3311,8 +3323,6 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                     ));
                 }
             }
-            stage_stderr = stage.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-            force_added_ignored_paths = ignored;
         }
         let scoped_paths: &[String] = if add_all { &[] } else { &paths };
         if !scoped_paths.is_empty() {
@@ -10025,6 +10035,15 @@ pub(super) fn git_stage_argv_forced(paths: &[String], cwd: Option<&str>) -> Vec<
     let mut argv: Vec<String> = vec!["add".to_string(), "--force".to_string(), "--".to_string()];
     argv.extend(git_pathspec_scope(paths, cwd));
     argv
+}
+
+pub(super) fn deleted_tracked_paths(cwd: Option<&str>, paths: &[String]) -> Vec<String> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let mut argv: Vec<String> = vec!["ls-files".to_string(), "--deleted".to_string(), "--".to_string()];
+    argv.extend(paths.iter().cloned());
+    parse_ignore_list(git_call_argv(&as_argv(&argv), cwd).get("stdout").and_then(|v| v.as_str()).unwrap_or(""))
 }
 
 pub(super) fn parse_ignore_list(stdout: &str) -> Vec<String> {
