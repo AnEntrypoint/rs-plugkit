@@ -78,7 +78,9 @@ fn evaluate(content: &str) -> Result<Value, String> {
     fields["cycle_id"] = json!(cycle_id);
     fields["last_dispatch_id"] = json!(latest);
     if let Some(violation) = contract_violation(&fields) {
-        return Ok(refused(owner, cycle_id, violation));
+        let mut reply = refused(owner, cycle_id, violation);
+        reply["dampened_probe"] = json!(dampen_session_probe(owner));
+        return Ok(reply);
     }
     match super::dream_rsi::persist_replay_result(
         super::dream_rsi::ReplayFile::Cycle,
@@ -105,6 +107,12 @@ fn refused(owner: &str, cycle_id: Option<&str>, error: String) -> Value {
         "ok": false, "error_code": "postcondition_failed", "kind": "observations",
         "status": "refused", "owner_session_id": owner, "cycle_id": cycle_id, "error": error
     })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn dampen_session_probe(owner: &str) -> Option<String> {
+    let path = format!(".gm/dream-rsi/{owner}/{}.json", super::dream_rsi::REPLAY_RESULT_FILE);
+    crate::pkfs::remove_file(&path).then_some(path)
 }
 
 #[cfg(target_arch = "wasm32")]
