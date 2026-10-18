@@ -2700,6 +2700,7 @@ fn result_json(result: &DreamRsiResult) -> Value {
             "nodes_verified": part_b.nodes_verified,
             "backreference_edges": part_b.backreference_edges,
             "backreferences_verified": part_b.backreferences_verified,
+            "backreference_judgement": "model-judged",
             "forward_edge_coverage_approx": part_b.forward_edge_coverage_approx,
             "rejected_walks": part_b
                 .rejected_walks
