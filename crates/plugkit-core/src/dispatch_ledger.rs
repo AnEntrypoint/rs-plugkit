@@ -1,9 +1,10 @@
 #![cfg(target_arch = "wasm32")]
 
-use crate::wasm_dispatch::{host_cas_write, host_now_ms, host_read, host_write};
+use crate::wasm_dispatch::{host_cas_write, host_now_ms, host_read};
 use serde_json::{json, Value};
 
-const MAX_ENTRIES: usize = 500;
+const MAX_ENTRIES: usize = 5000;
+const RETAIN_MS: u64 = 24 * 60 * 60 * 1000;
 
 pub const RETAINED_ENTRIES: usize = MAX_ENTRIES;
 
@@ -35,24 +36,20 @@ pub fn record(
     loop {
         attempt += 1;
         let existing = host_read(&path).unwrap_or_default();
-        let mut list: Vec<Value> = if existing.trim().is_empty() {
-            vec![]
+        let parsed: Option<Vec<Value>> = if existing.trim().is_empty() {
+            Some(vec![])
         } else {
-            serde_json::from_str::<Value>(&existing)
-                .ok()
-                .and_then(|v| v.as_array().cloned())
-                .unwrap_or_default()
+            match serde_json::from_str::<Value>(&existing) {
+                Ok(Value::Array(a)) => Some(a),
+                _ => None,
+            }
         };
         let ts = now_ms();
+        let Some(mut list) = parsed else {
+            return new_dispatch_id(verb, fingerprint, ts, 0);
+        };
         let seq = list.len() as u64;
-        let dispatch_id = format!("{}-{}-{:x}", ts, seq, {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            verb.hash(&mut h);
-            fingerprint.hash(&mut h);
-            ts.hash(&mut h);
-            h.finish()
-        });
+        let dispatch_id = new_dispatch_id(verb, fingerprint, ts, seq);
         list.push(json!({
             "dispatch_id": dispatch_id,
             "verb": verb,
@@ -62,6 +59,11 @@ pub fn record(
             "output_bytes": output_bytes,
             "session_id": session_id,
         }));
+        list.retain(|e| {
+            e.get("ts")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|t| t.saturating_add(RETAIN_MS) >= ts)
+        });
         if list.len() > MAX_ENTRIES {
             let drop = list.len() - MAX_ENTRIES;
             list.drain(0..drop);
@@ -70,12 +72,18 @@ pub fn record(
         match host_cas_write(&path, &existing, &serialized) {
             CAS_SWAPPED => return dispatch_id,
             CAS_MISMATCH if attempt < CAS_MAX_ATTEMPTS => continue,
-            _ => {
-                host_write(&path, &serialized);
-                return dispatch_id;
-            }
+            _ => return dispatch_id,
         }
     }
+}
+
+fn new_dispatch_id(verb: &str, fingerprint: &str, ts: u64, seq: u64) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    verb.hash(&mut h);
+    fingerprint.hash(&mut h);
+    ts.hash(&mut h);
+    format!("{}-{}-{:x}", ts, seq, h.finish())
 }
 
 const CAS_SWAPPED: u32 = 1;
