@@ -6103,15 +6103,6 @@ pub(super) fn ci_status_resolve_repo_preferring_unambiguous_github_repo_field(
     }
 }
 
-fn ci_status_repo_is_explicit(body: &Value) -> bool {
-    ["github_repo", "repo"].iter().any(|field| {
-        body.get(*field)
-            .and_then(Value::as_str)
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
-    })
-}
-
 fn ci_status_commit_present(repo: Option<&str>, sha: &str) -> bool {
     !exec_git_in(repo, &format!("rev-parse --verify --quiet {}^{{commit}}", sha))
         .trim()
@@ -6736,11 +6727,7 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
         .map_err(|packed| unpack_to_value(packed))?;
     let resolution = ci_status_resolve_sha(body, cwd).map_err(|packed| unpack_to_value(packed))?;
     let sha = resolution.sha.clone();
-    let repo = if ci_status_repo_is_explicit(body) {
-        repo
-    } else {
-        ci_status_repo_for_sha(cwd, &sha, repo)
-    };
+    let repo = ci_status_repo_for_sha(cwd, &sha, repo);
     let runs_path = format!("repos/{}/actions/runs?head_sha={}&per_page=20", repo, sha);
     let tree_path = format!("repos/{}/git/trees/{}?recursive=1", repo, sha);
     let token = body
