@@ -132,6 +132,21 @@ jobs:
           sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$NEW_VERSION\"/}" "$MANIFEST"
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Commit and push the version bump before the build starts
+        id: push
+        env:
+          GH_TOKEN: ${{ secrets.publisher_token }}
+          VER: ${{ steps.bump.outputs.version }}
+        shell: bash
+        run: |
+          set -e
+          git config user.name "lanmower"
+          git config user.email "lanmower@users.noreply.github.com"
+          git add "${{ inputs.version_manifest }}"
+          git commit -m "chore: auto-bump version to $VER [skip ci]"
+          git push origin HEAD:main || { echo "::error::version bump push rejected; main moved during build, rerun the release"; exit 1; }
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Build
         shell: bash
         env:
@@ -152,21 +167,6 @@ jobs:
           cp "target/wasm32-wasip1/release/${{ inputs.wasm_artifact_name }}" "release-assets/${{ inputs.published_asset_basename }}.wasm"
           cd release-assets
           sha256sum "${{ inputs.published_asset_basename }}.wasm" | sed 's/ \*/  /' > "${{ inputs.published_asset_basename }}.wasm.sha256"
-
-      - name: Commit and push the version bump the built tree already carries
-        id: push
-        env:
-          GH_TOKEN: ${{ secrets.publisher_token }}
-          VER: ${{ steps.bump.outputs.version }}
-        shell: bash
-        run: |
-          set -e
-          git config user.name "lanmower"
-          git config user.email "lanmower@users.noreply.github.com"
-          git add "${{ inputs.version_manifest }}"
-          git commit -m "chore: auto-bump version to $VER [skip ci]"
-          git push origin HEAD:main || { echo "::error::version bump push rejected; main moved during build, rerun the release"; exit 1; }
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Publish release
         env:
