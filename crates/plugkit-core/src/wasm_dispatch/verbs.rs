@@ -1234,10 +1234,58 @@ fn fs_write(body: &Value) -> u64 {
         );
     }
     if super::host_abi::host_write(path, &content) {
-        ok("fs_write", json!({ "bytes": content.len(), "path": path }))
-    } else {
-        err("fs_write", "write failed")
+        return ok("fs_write", json!({ "bytes": content.len(), "path": path }));
     }
+    let parents = ensure_parent_dirs(path);
+    if parents.get("ok").and_then(Value::as_bool) == Some(true)
+        && super::host_abi::host_write(path, &content)
+    {
+        return ok(
+            "fs_write",
+            json!({ "bytes": content.len(), "path": path, "parents_created": true }),
+        );
+    }
+    let cause = parents
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("the host refused the write after its parent directory existed");
+    err_json(
+        "fs_write",
+        json!({
+            "error": format!("write failed for {path}: {cause}"),
+            "error_code": parents.get("code").and_then(Value::as_str).unwrap_or(ERR_CODE_FAILED),
+            "path": path,
+            "blocking_path": parents.get("blocking").cloned().unwrap_or(Value::Null),
+            "next_dispatch": "fs_stat",
+        }),
+    )
+}
+
+fn ensure_parent_dirs(path: &str) -> Value {
+    let Ok(target) = serde_json::to_string(&crate::pkfs::anchor(path)) else {
+        return json!({ "ok": false, "error": "the path is not encodable" });
+    };
+    let code = r#"const fs=require('fs');const P=require('path');const d=P.dirname(__TARGET__);
+const out=o=>process.stdout.write(JSON.stringify(o));
+try{fs.mkdirSync(d,{recursive:true});out({ok:true});}
+catch(e){let b=d;while(b!==P.dirname(b)&&!fs.existsSync(b))b=P.dirname(b);
+let blocking=null;try{if(!fs.statSync(b).isDirectory())blocking=b;}catch(_){}
+out({ok:false,code:String((e&&e.code)||'EIO'),blocking,error:blocking?('a file sits where a parent directory is needed: '+blocking):('creating the parent directory failed: '+String((e&&e.message)||e))});}"#
+        .replace("__TARGET__", &target);
+    let options = json!({ "timeoutMs": 15_000 }).to_string();
+    let packed = unsafe {
+        super::host_abi::host_exec_js(
+            code.as_ptr(),
+            code.len() as u32,
+            options.as_ptr(),
+            options.len() as u32,
+        )
+    };
+    unpack_to_string(packed)
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|envelope| envelope.get("stdout").and_then(Value::as_str).map(str::to_string))
+        .and_then(|stdout| serde_json::from_str::<Value>(&stdout).ok())
+        .unwrap_or_else(|| json!({ "ok": false, "error": "host_exec_js returned no stdout" }))
 }
 
 fn is_append_only_path(path: &str) -> bool {
@@ -1320,17 +1368,7 @@ fn fs_readdir(body: &Value) -> u64 {
     let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
     let v = unpack_to_value(packed);
     if v.is_null() {
-        return err_json(
-            "fs_readdir",
-            json!({
-                "error": format!(
-                    "fs_readdir could not list '{path}': the directory is missing or unreadable (ENOENT or an access failure); the host returned no entries"
-                ),
-                "error_code": "ENOENT",
-                "path": path,
-                "next_dispatch_hint": "fs_stat",
-            }),
-        );
+        return fs_readdir_unlisted(path);
     }
     let entries = match v {
         Value::Array(entries) => entries,
@@ -1361,6 +1399,38 @@ fn fs_readdir(body: &Value) -> u64 {
         reply["partial_reason"] = json!("listing_paged");
     }
     pack(reply.to_string())
+}
+
+fn fs_readdir_unlisted(path: &str) -> u64 {
+    let stat = super::host_abi::host_stat(path).filter(|v| !v.is_null());
+    let Some(stat) = stat else {
+        return pack(
+            json!({
+                "ok": true,
+                "verb": "fs_readdir",
+                "data": [],
+                "total": 0,
+                "missing": true,
+                "path": path,
+            })
+            .to_string(),
+        );
+    };
+    let is_dir = stat.get("isDirectory").and_then(Value::as_bool) == Some(true);
+    let (error_code, reason) = if is_dir {
+        ("EACCES", "the directory exists but the host could not read it")
+    } else {
+        ("ENOTDIR", "the path is a file, not a directory")
+    };
+    err_json(
+        "fs_readdir",
+        json!({
+            "error": format!("fs_readdir could not list '{path}': {reason}"),
+            "error_code": error_code,
+            "path": path,
+            "next_dispatch_hint": if is_dir { "fs_stat" } else { "fs_read" },
+        }),
+    )
 }
 
 fn fs_stat(body: &Value) -> u64 {
