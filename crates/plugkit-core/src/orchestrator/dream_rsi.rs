@@ -1477,7 +1477,9 @@ fn register_policy(content: &str) -> Result<Value, String> {
             let proven = crate::pkfs::read_to_string(&replay_path)
                 .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
                 .is_some_and(|result| {
-                    result.get("selected_policy_id").and_then(Value::as_str) == Some(policy.id.as_str())
+                    result.get("owner_session_id").and_then(Value::as_str)
+                        == Some(owner_session_id.as_str())
+                        && result.get("selected_policy_id").and_then(Value::as_str) == Some(policy.id.as_str())
                         && result.get("baseline_policy_id").and_then(Value::as_str) == Some(incumbent.as_str())
                         && result.get("improved").and_then(Value::as_bool) == Some(true)
                         && result.get("never_worse").and_then(Value::as_bool) == Some(true)
@@ -2543,6 +2545,7 @@ fn replay_proposals(replay: &Value) -> Vec<VerbProposal> {
 struct LeanWalkFile {
     node: String,
     session: String,
+    verified_by: Option<String>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2565,6 +2568,7 @@ fn lean_walk_files() -> Vec<LeanWalkFile> {
             Some(LeanWalkFile {
                 node: field("node").unwrap_or_else(|| file_node.to_owned()),
                 session: field("session").unwrap_or_else(|| file_session.to_owned()),
+                verified_by: field("verified_by"),
             })
         })
         .collect()
@@ -2578,7 +2582,9 @@ fn derive_part_b(
 ) -> PartB {
     let self_scored: BTreeSet<&str> = walk_files
         .iter()
-        .filter(|walk| walk.session == scorer)
+        .filter(|walk| {
+            walk.session == scorer || walk.verified_by.as_deref() == Some(walk.session.as_str())
+        })
         .map(|walk| walk.node.as_str())
         .collect();
     let mut walks: BTreeMap<String, (bool, Vec<String>)> = BTreeMap::new();
@@ -2587,10 +2593,10 @@ fn derive_part_b(
             continue;
         };
         let walk = walks.entry(node.to_owned()).or_insert((false, Vec::new()));
-        if record.succeeded() {
-            walk.0 = true;
-        } else if let Some(dispatch_id) = record.dispatch_id.as_deref() {
-            walk.1.push(dispatch_id.to_owned());
+        match record.dispatch_id.as_deref() {
+            Some(_) if record.succeeded() => walk.0 = true,
+            Some(dispatch_id) => walk.1.push(dispatch_id.to_owned()),
+            None => {}
         }
     }
     let traversable_nodes = walks.len() as u64;
