@@ -10568,7 +10568,15 @@ pub(super) fn push_dirty_scope(
             dirty_tracked_files,
         };
     };
-    let Some(delta) = delta_paths_between(cwd, remote_sha.as_str(), source_sha) else {
+    let merge_base = exec_git_in(cwd, &format!("merge-base {} {}", remote_sha, source_sha))
+        .trim()
+        .to_string();
+    let pushed_delta = if is_full_sha(&merge_base) {
+        delta_paths_between(cwd, &merge_base, source_sha)
+    } else {
+        None
+    };
+    let Some(delta) = pushed_delta else {
         return PushDirtyScope {
             dirty_count,
             delta_known: false,
