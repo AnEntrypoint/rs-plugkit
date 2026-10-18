@@ -136,16 +136,34 @@ jobs:
         id: push
         env:
           GH_TOKEN: ${{ secrets.publisher_token }}
+          MANIFEST: ${{ inputs.version_manifest }}
           VER: ${{ steps.bump.outputs.version }}
         shell: bash
         run: |
           set -e
           git config user.name "lanmower"
           git config user.email "lanmower@users.noreply.github.com"
-          git add "${{ inputs.version_manifest }}"
-          git commit -m "chore: auto-bump version to $VER [skip ci]"
-          git push origin HEAD:main || { echo "::error::version bump push rejected; main moved during build, rerun the release"; exit 1; }
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          ver="$VER"
+          for attempt in 1 2 3 4 5; do
+            if [ "$attempt" -gt 1 ]; then
+              echo "[retry] attempt $attempt: main moved, re-bumping on origin/main"
+              git fetch origin main
+              git reset --hard origin/main
+              current=$(grep '^version' "$MANIFEST" | head -1 | sed 's/.*= *"//;s/"//')
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$current"
+              ver="$MAJOR.$MINOR.$((PATCH + 1))"
+              sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$ver\"/}" "$MANIFEST"
+            fi
+            git add "$MANIFEST"
+            git commit -m "chore: auto-bump version to $ver [skip ci]"
+            if git push origin HEAD:main; then
+              echo "version=$ver" >> "$GITHUB_OUTPUT"
+              echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "::error::version bump push rejected after 5 attempts; main kept moving"
+          exit 1
 
       - name: Build
         shell: bash
@@ -171,7 +189,7 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.publisher_token }}
-          VER: ${{ steps.bump.outputs.version }}
+          VER: ${{ steps.push.outputs.version }}
           REPO: ${{ inputs.release_repo }}
           TITLE_PREFIX: ${{ inputs.release_title_prefix }}
           SOURCE_HEAD: ${{ steps.push.outputs.commit }}
@@ -192,7 +210,7 @@ jobs:
 
       - name: Verify every uploaded asset is actually fetchable, not just reported as uploaded
         env:
-          VER: ${{ steps.bump.outputs.version }}
+          VER: ${{ steps.push.outputs.version }}
           REPO: ${{ inputs.release_repo }}
         working-directory: ${{ inputs.crate_dir }}
         shell: bash
