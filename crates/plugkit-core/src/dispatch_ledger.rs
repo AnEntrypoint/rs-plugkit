@@ -90,6 +90,26 @@ const CAS_SWAPPED: u32 = 1;
 const CAS_MISMATCH: u32 = 2;
 const CAS_MAX_ATTEMPTS: u32 = 16;
 
+pub fn attach_reply_sha256(cwd: &str, dispatch_id: &str, reply_sha256: &str) {
+    let path = ledger_path(cwd);
+    for _ in 0..CAS_MAX_ATTEMPTS {
+        let existing = host_read(&path).unwrap_or_default();
+        let Ok(Value::Array(mut list)) = serde_json::from_str::<Value>(&existing) else {
+            return;
+        };
+        let Some(entry) = list
+            .iter_mut()
+            .find(|e| e.get("dispatch_id").and_then(|v| v.as_str()) == Some(dispatch_id))
+        else {
+            return;
+        };
+        entry["reply_sha256"] = json!(reply_sha256);
+        if host_cas_write(&path, &existing, &Value::Array(list).to_string()) == CAS_SWAPPED {
+            return;
+        }
+    }
+}
+
 pub fn subagent_running_count(
     cwd: &str,
     parent_session: &str,
