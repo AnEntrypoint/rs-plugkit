@@ -815,6 +815,7 @@ struct LedgerCheck {
     entries: std::collections::HashMap<String, Value>,
     unreadable: Option<&'static str>,
     evicted_possible: bool,
+    newest_ts: u64,
     spool_out_names: Option<Vec<String>>,
     spool_out_ids_by_session: std::collections::HashMap<String, BTreeSet<String>>,
 }
@@ -847,11 +848,12 @@ impl LedgerCheck {
             return LedgerCheck { unreadable: Some("ledger_unparsed"), ..Default::default() };
         };
         let evicted_possible = parsed.len() >= crate::dispatch_ledger::RETAINED_ENTRIES;
+        let newest_ts = parsed.iter().filter_map(|entry| entry.get("ts")?.as_u64()).max().unwrap_or(0);
         let entries = parsed
             .into_iter()
             .filter_map(|entry| Some((entry.get("dispatch_id")?.as_str()?.to_owned(), entry)))
             .collect();
-        LedgerCheck { entries, evicted_possible, ..Default::default() }
+        LedgerCheck { entries, evicted_possible, newest_ts, ..Default::default() }
     }
 
     fn spool_out_confirms(&mut self, session_id: &str, dispatch_id: &str) -> bool {
@@ -878,6 +880,10 @@ impl LedgerCheck {
                 return Ok(Confirmation::SpoolOut);
             }
             if self.evicted_possible && self.unreadable.is_none() {
+                return Ok(Confirmation::Retained);
+            }
+            let aged_out = record.ts.is_some_and(|ts| u64::try_from(ts).is_ok_and(|ts| ts.saturating_add(crate::dispatch_ledger::RETAIN_MS) < self.newest_ts));
+            if aged_out && self.unreadable.is_none() {
                 return Ok(Confirmation::Retained);
             }
             return Err(self.unreadable.unwrap_or("unconfirmed_by_ledger_or_spool_out"));

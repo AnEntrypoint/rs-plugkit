@@ -1,10 +1,15 @@
 #![cfg(target_arch = "wasm32")]
 
-use crate::wasm_dispatch::{host_cas_write, host_now_ms, host_read};
+use crate::wasm_dispatch::{
+    host_cas_write, host_fs_readdir, host_now_ms, host_read, host_remove_file_never_directory,
+    host_stat, unpack_to_value_pub,
+};
 use serde_json::{json, Value};
 
 const MAX_ENTRIES: usize = 5000;
-const RETAIN_MS: u64 = 24 * 60 * 60 * 1000;
+pub const RETAIN_MS: u64 = 24 * 60 * 60 * 1000;
+const SPOOL_TMP_MARKER: &str = ".tmp-";
+const SPOOL_TMP_STALE_MS: u64 = 30 * 1000;
 
 pub const RETAINED_ENTRIES: usize = MAX_ENTRIES;
 
@@ -23,6 +28,38 @@ fn now_ms() -> u64 {
     unsafe { host_now_ms() }
 }
 
+fn spool_dir(cwd: &str) -> String {
+    if cwd.is_empty() {
+        ".gm/exec-spool".to_string()
+    } else {
+        format!(
+            "{}/.gm/exec-spool",
+            cwd.trim_end_matches('/').trim_end_matches('\\')
+        )
+    }
+}
+
+fn sweep_stale_spool_tmp(cwd: &str, now: u64) {
+    let dir = spool_dir(cwd);
+    let Value::Array(entries) =
+        unpack_to_value_pub(unsafe { host_fs_readdir(dir.as_ptr(), dir.len() as u32) })
+    else {
+        return;
+    };
+    for name in entries.iter().filter_map(Value::as_str) {
+        if !name.contains(SPOOL_TMP_MARKER) {
+            continue;
+        }
+        let path = format!("{dir}/{name}");
+        let stale = host_stat(&path)
+            .and_then(|stat| stat.get("mtimeMs").and_then(Value::as_u64))
+            .is_some_and(|mtime| mtime.saturating_add(SPOOL_TMP_STALE_MS) < now);
+        if stale {
+            host_remove_file_never_directory(&path);
+        }
+    }
+}
+
 pub fn record(
     cwd: &str,
     verb: &str,
@@ -32,6 +69,7 @@ pub fn record(
     output_bytes: Option<u64>,
 ) -> Result<String, String> {
     let path = ledger_path(cwd);
+    sweep_stale_spool_tmp(cwd, now_ms());
     let mut attempt = 0;
     loop {
         attempt += 1;
