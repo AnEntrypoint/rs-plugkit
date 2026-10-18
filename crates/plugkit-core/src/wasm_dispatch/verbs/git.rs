@@ -7312,15 +7312,26 @@ function emit(kind, k, j, s, ts, m) {
     if (k == 0 || !SF[k]) next
     seen[k]++
     if (TAIL > 0) { TT[k, seen[k] % TAIL] = ts; TM[k, seen[k] % TAIL] = m }
+    generic_exit = (index(m, "##[error]Process completed with exit code") == 1)
+    if (generic_exit && PAT == "" && (k in PEND_SET) && !PEND_DONE[k]) {
+      total++
+      PEND_DONE[k] = 1
+      if (printed < CAP && used <= BCAP) emit("E", k, j, s, PENDT[k], PENDM[k])
+    }
+    emitted = 0
     if ((PAT != "") ? keep(m, PAT) : iserr(m)) {
       total++
       errs[k]++
-      if (index(m, "##[error]Process completed with exit code") == 1) generic[k]++
+      if (generic_exit) generic[k]++
       ctx[k] = AFTER
       if (printed < CAP && used <= BCAP) emit("E", k, j, s, ts, m)
+      emitted = 1
     } else if (ctx[k] > 0) {
       ctx[k]--
       if (printed < CAP && used <= BCAP) emit("C", k, j, s, ts, m)
+    }
+    if (!generic_exit && m != "" && index(m, "##[") != 1) {
+      PEND_SET[k] = 1; PEND_DONE[k] = emitted; PENDT[k] = ts; PENDM[k] = m
     }
     next
   }
