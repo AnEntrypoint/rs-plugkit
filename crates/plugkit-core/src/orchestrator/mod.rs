@@ -428,6 +428,8 @@ orchestrator_dispatch_table! {
     "prd-block" => prd::handle_block(content),
     "prd-repair" => prd_repair::handle_repair(content),
     "prd-defer" => prd::handle_defer(content),
+    "prd-witness-request" => prd::handle_witness_request(content),
+    "expansion-audit" => prd::handle_expansion_audit(content),
     "task-spawn" => task::handle_spawn(content),
     "task-list" => task::handle_list(content),
     "task-stop" => task::handle_stop(content),

@@ -641,14 +641,22 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-pub fn append_log(store: &Store, mut entry: serde_json::Value) -> Result<serde_json::Value, String> {
+pub fn append_log(store: &Store, entry: serde_json::Value) -> Result<serde_json::Value, String> {
+    append_chained(&store.log, store.kind.label(), entry)
+}
+
+pub fn append_chained(
+    log_path: &str,
+    kind_label: &str,
+    mut entry: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let ts_ms = super::state::now_ms();
     {
         let Some(map) = entry.as_object_mut() else {
             return Err("commit-log entry must be a JSON object".to_string());
         };
         map.insert("v".to_string(), serde_json::json!(LOG_VERSION));
-        map.insert("kind".to_string(), serde_json::json!(store.kind.label()));
+        map.insert("kind".to_string(), serde_json::json!(kind_label));
         map.insert("ts_ms".to_string(), serde_json::json!(ts_ms as u64));
         map.insert("ts".to_string(), serde_json::json!(iso_ms(ts_ms)));
         if let Some(session) = super::state::dispatch_session_id() {
@@ -658,7 +666,7 @@ pub fn append_log(store: &Store, mut entry: serde_json::Value) -> Result<serde_j
         }
     }
     for attempt in 0..super::fsm::graph().policy.cas_max_attempts.max(1) {
-        let before = pkfs::read_to_string(&store.log).unwrap_or_default();
+        let before = pkfs::read_to_string(log_path).unwrap_or_default();
         let prev = before
             .lines()
             .rev()
@@ -681,17 +689,17 @@ pub fn append_log(store: &Store, mut entry: serde_json::Value) -> Result<serde_j
         } else {
             format!("{}\n{}\n", before, line)
         };
-        match pkfs::cas_write(&store.log, &before, &after) {
+        match pkfs::cas_write(log_path, &before, &after) {
             pkfs::CasWriteOutcome::Swapped => return Ok(entry),
             pkfs::CasWriteOutcome::Mismatch => continue,
             pkfs::CasWriteOutcome::IoError => {
                 if attempt + 1 >= super::fsm::graph().policy.cas_max_attempts.max(1) {
-                    return Err(format!("append to {} failed", store.log));
+                    return Err(format!("append to {} failed", log_path));
                 }
             }
         }
     }
-    Err(format!("append to {} failed: concurrent writer", store.log))
+    Err(format!("append to {} failed: concurrent writer", log_path))
 }
 
 pub fn retire_to_log(

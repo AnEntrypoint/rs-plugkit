@@ -120,6 +120,51 @@ const DISPATCH_ENVELOPE_FIELDS: &[&str] = &[
     "_plan",
 ];
 
+const MUTABLE_OWNER_SESSION_FIELDS: &[&str] = &["session_id", "SESSION_ID", "sessionId"];
+
+const MUTABLE_OWNER_ROW_FIELDS: &[&str] = &["row", "row_id", "prd_id", "prd_row"];
+
+fn owner_field(map: &serde_yaml::Mapping, fields: &[&str]) -> Option<String> {
+    fields.iter().find_map(|field| {
+        map.get(&Value::String((*field).to_string()))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn owner_collision(
+    existing: &Value,
+    caller_session: Option<&str>,
+    caller_row: Option<&str>,
+    resolved_statuses: &[String],
+    default_status: &str,
+) -> Option<String> {
+    let existing_map = existing.as_mapping()?;
+    if resolved_statuses
+        .iter()
+        .any(|s| s == row_status(existing, default_status))
+    {
+        return None;
+    }
+    let existing_row = owner_field(existing_map, MUTABLE_OWNER_ROW_FIELDS);
+    if let (Some(theirs), Some(ours)) = (existing_row.as_deref(), caller_row) {
+        if theirs != ours {
+            return Some(format!("row {}", theirs));
+        }
+        return None;
+    }
+    let existing_session = owner_field(existing_map, MUTABLE_OWNER_SESSION_FIELDS);
+    match (existing_session.as_deref(), caller_session) {
+        (Some(theirs), Some(ours)) if theirs != ours => Some(match existing_row {
+            Some(row) => format!("session {} (row {})", theirs, row),
+            None => format!("session {}", theirs),
+        }),
+        _ => None,
+    }
+}
+
 const MUTABLE_ADD_SHAPE: &str = "mutable-add needs {\"id\":\"<kebab-case-slug>\",\"value\":\"<what is unknown>\",\"status\":\"unknown\"} -- `value`/`subject`/`description`/`notes` carry the unknown, `obligation_kind`/`depends_on`/`witness_evidence` type it as an obligation.";
 
 pub fn handle_add(content: &str) -> (String, String, i32) {
@@ -182,6 +227,23 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         );
         return (String::new(), err, 1);
     }
+    let rescope_requested = map
+        .get(&Value::String("rescope".to_string()))
+        .and_then(|v| v.as_bool())
+        == Some(true);
+    let mut map = map;
+    map.remove(&Value::String("rescope".to_string()));
+    let caller_session = owner_field(&map, MUTABLE_OWNER_SESSION_FIELDS)
+        .or_else(super::state::dispatch_session_id);
+    if let Some(session) = caller_session.as_deref() {
+        if owner_field(&map, MUTABLE_OWNER_SESSION_FIELDS).is_none() {
+            map.insert(
+                Value::String("session_id".to_string()),
+                Value::String(session.to_string()),
+            );
+        }
+    }
+    let caller_row = owner_field(&map, MUTABLE_OWNER_ROW_FIELDS);
     let new_depends_on = extract_depends_on(&map);
     let store = row_store::Store::mutables();
     let policy = super::fsm::graph().policy.clone();
@@ -236,6 +298,32 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                 );
                 match seq.iter_mut().find(|it| row_id(it) == Some(id.as_str())) {
                     Some(slot) => {
+                        if !rescope_requested {
+                            if let Some(collision) = owner_collision(
+                                slot,
+                                caller_session.as_deref(),
+                                caller_row.as_deref(),
+                                &policy.mutables_resolved_statuses,
+                                &policy.mutables_default_status,
+                            ) {
+                                return cas::CasOutcome::Abort(
+                                    serde_json::json!({
+                                        "error": format!("mutable-add refused: id {} collides with an open unknown owned by {} -- nothing was written", id, collision),
+                                        "deviation_kind": "mutable-add-id-collision",
+                                        "id": id,
+                                        "owner": collision,
+                                        "suggested_id": caller_row.as_deref().map(|row| format!("{}/{}", row, id)),
+                                        "hint": "Unknown ids are global across lanes, so a generic id such as U1 from two rows overwrites the other lane's entry. Namespace the id by its row (<row-id>/<name>), or pass rescope:true to replace the open entry deliberately.",
+                                    })
+                                    .to_string(),
+                                    format!(
+                                        "mutable-add refused: id {} collides with an open unknown owned by {}; namespace it as <row-id>/{} or pass rescope:true",
+                                        id, collision, id
+                                    ),
+                                    1,
+                                );
+                            }
+                        }
                         replaced_existing_id = true;
                         let mut row = new_row;
                         if !map.contains_key(&Value::String("status".to_string())) {
