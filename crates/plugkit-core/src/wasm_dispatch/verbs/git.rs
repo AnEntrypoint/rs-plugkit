@@ -5673,6 +5673,18 @@ pub(super) const GIT_PULL_ACCEPTED_FIELDS: &[&str] = &[
     "author_email",
 ];
 
+fn git_pull_record_own_merge(cwd: Option<&str>, head_before: &str, head_after: &str) {
+    if head_before.is_empty() || head_after.is_empty() || head_before == head_after {
+        return;
+    }
+    if resolve_ref(cwd, "HEAD^2").is_none() {
+        return;
+    }
+    if exec_git_in(cwd, "rev-parse HEAD^1").trim() == head_before {
+        git_session_commit_record(head_after);
+    }
+}
+
 pub(super) fn git_pull(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields("git_pull", body, GIT_PULL_ACCEPTED_FIELDS) {
         return refusal;
@@ -5818,6 +5830,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
                 && !head_after.is_empty()
                 && remote_head.as_deref() == Some(head_after.as_str())
             {
+                git_pull_record_own_merge(cwd, &head_before, &head_after);
                 return ok(
                     "git_pull",
                     json!({
@@ -5849,6 +5862,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         );
     }
     let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    git_pull_record_own_merge(cwd, &head_before, &head_after);
     ok(
         "git_pull",
         json!({
