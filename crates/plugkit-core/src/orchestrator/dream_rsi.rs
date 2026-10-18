@@ -481,6 +481,8 @@ fn evaluate_worlds(
             "below_margin"
         },
         "promotion_margin": PROMOTION_MARGIN,
+        "n_observations": worlds.len(),
+        "domain": if worlds.len() < PROMOTION_MIN_WORLDS { "disorder" } else { "order" },
         "beta1": beta1,
         "beta2": beta2,
         "rankings": rankings,
@@ -2440,6 +2442,8 @@ fn persist_sealed_replay(source: &'static str, replay: &mut Value) {
         "selected_policy_id": replay.get("selected_policy_id"),
         "baseline_score": baseline_score,
         "selected_score": selected_score,
+        "n_observations": replay.get("n_observations"),
+        "domain": replay.get("domain"),
         "improved": replay.get("improved"),
         "never_worse": matches!((baseline_score, selected_score), (Some(base), Some(sel)) if sel >= base),
         "beta1": replay.get("beta1"),
