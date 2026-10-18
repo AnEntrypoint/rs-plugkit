@@ -654,8 +654,8 @@ const STORE_LOCK_SETTLE_ON_HOST_JS: &str = r#"(function () {
     if (pid === process.pid) { alive = true; }
     else { try { process.kill(pid, 0); alive = true; } catch (e) { alive = !!(e && e.code === 'EPERM'); } }
   }
-  var ownerAge = ts > 0 ? now - ts : 0;
-  var stale = !hasPid || !alive || (ts > 0 && ownerAge >= P.ttl);
+  var ownerAge = ts > 0 ? now - ts : Infinity;
+  var stale = !hasPid || !alive || ownerAge >= P.ttl;
   var shape = function (state, extra) {
     var o = { state: state, owner_pid: hasPid ? pid : null, owner_alive: alive, owner_age_ms: ts > 0 ? ownerAge : null };
     for (var k in extra) { o[k] = extra[k]; }
@@ -665,7 +665,7 @@ const STORE_LOCK_SETTLE_ON_HOST_JS: &str = r#"(function () {
   try {
     fs.rmSync(P.dir, { recursive: true, force: true });
     fs.rmSync(P.own, { force: true });
-    out(shape('reaped', { stale_reason: !hasPid ? 'no owner record' : (!alive ? 'owner pid is not alive' : 'owner heartbeat is older than ' + P.ttl + ' ms') }));
+    out(shape('reaped', { stale_reason: !hasPid ? 'no owner record' : (!alive ? 'owner pid is not alive' : (ts > 0 ? 'owner heartbeat is older than ' + P.ttl + ' ms' : 'owner heartbeat is missing or unparseable')) }));
   } catch (e) {
     out(shape('held', { reap_error: String((e && e.message) || e) }));
   }
