@@ -5972,6 +5972,25 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
         .collect();
+    if output.contains("Applying autostash resulted in conflicts") {
+        let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+        git_pull_record_own_merge(cwd, &head_before, &head_after);
+        return err_json(
+            "git_pull",
+            json!({
+                "error": output,
+                "error_code": "autostash_pop_conflicted",
+                "remote": remote,
+                "branch": if branch.is_empty() { Value::Null } else { json!(branch) },
+                "ff_only": ff_only,
+                "conflicted": true,
+                "conflicts": conflicts,
+                "head_before": head_before,
+                "head_after": head_after,
+                "hint": "The pull landed, but the shelved local changes conflict with it and the stash remains. Resolve the conflicted paths, git_add them, then git_commit; git_stash_pop restores the shelved changes once the worktree is clean.",
+            }),
+        );
+    }
     if code != 0 {
         let lower_output = output.to_ascii_lowercase();
         if lower_output.contains("committer identity unknown")
@@ -6072,7 +6091,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
     }
     let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
     git_pull_record_own_merge(cwd, &head_before, &head_after);
-    if !conflicts.is_empty() || output.contains("Applying autostash resulted in conflicts") {
+    if !conflicts.is_empty() {
         return err_json(
             "git_pull",
             json!({
