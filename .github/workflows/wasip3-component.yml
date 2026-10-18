@@ -1,0 +1,66 @@
+name: wasip3-component
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - '.github/workflows/wasip3-component.yml'
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - '.github/workflows/wasip3-component.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wasip3-component:
+    name: wasip3 component build and env.wit witness
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: nightly
+          targets: wasm32-wasip3
+
+      - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7
+        with:
+          key: wasip3-component
+
+      - name: Build the guest as a wasip3 component (slim, wit-env)
+        run: cargo build -p rs-plugkit --release --target wasm32-wasip3 --features slim,wit-env
+
+      - name: Install wasm-tools
+        run: cargo install wasm-tools --locked
+
+      - name: Parse env.wit
+        run: wasm-tools component wit crates/plugkit-core/wit > /dev/null
+
+      - name: Witness the component against env.wit
+        run: |
+          set -euo pipefail
+          wasm=target/wasm32-wasip3/release/rs_plugkit.wasm
+          wasm-tools validate "$wasm"
+          wasm-tools component wit "$wasm" > component.wit
+          cat component.wit
+          grep -q 'gm:plugkit/env' component.wit
+          grep -q 'gm:plugkit/guest' component.wit
+          grep -q 'dispatch-verb' component.wit
+          grep -q 'plugkit-version' component.wit
+          for fn in $(sed -n 's/^  \([a-z-]*\): func.*/\1/p' crates/plugkit-core/wit/env.wit); do
+            grep -q "$fn" component.wit || { echo "::error::env.wit function $fn not in component"; exit 1; }
+          done
+          echo "size_bytes=$(stat -c %s "$wasm")"
