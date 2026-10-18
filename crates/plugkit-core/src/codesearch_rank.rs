@@ -575,7 +575,7 @@ pub fn dual_channels(query: &str, raw: &Value, opts: &RankOptions) -> serde_json
         .and_then(|v| v.as_array())
         .map(|list| {
             list.iter()
-                .take(CHANNEL_TOP_K)
+                .take(channel_cap)
                 .map(|c| commit_hit(c, opts, &mut files))
                 .collect()
         })
@@ -625,20 +625,17 @@ fn commit_hit(
         .get("path")
         .and_then(|v| v.as_str())
         .zip(commit.get("line").and_then(|v| v.as_u64()));
-    let (at, snip) = match located {
-        Some((path, line)) => (
-            format!("{path}:{line}"),
-            tree_snippet(opts, path, line, files)
-                .unwrap_or_else(|| text_snippet(message)),
-        ),
-        None => (hash[..hash.len().min(8)].to_string(), text_snippet(message)),
-    };
-    json!({
-        "at": at,
-        "sym": format!("commit {}", &hash[..hash.len().min(8)]),
-        "snip": snip,
-        "message": squeeze(message, SNIPPET_CHARS),
-    })
+    let short = &hash[..hash.len().min(8)];
+    let message = squeeze(message, SNIPPET_CHARS);
+    match located {
+        Some((path, line)) => json!({
+            "at": format!("{path}:{line}"),
+            "sym": format!("commit {short}"),
+            "snip": tree_snippet(opts, path, line, files).unwrap_or_else(|| text_snippet(&message)),
+            "message": message,
+        }),
+        None => json!({ "at": short, "message": message }),
+    }
 }
 
 fn tree_snippet(
