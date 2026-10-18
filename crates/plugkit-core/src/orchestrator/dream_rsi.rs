@@ -959,9 +959,41 @@ fn session_world(session_id: &str, records: &[ObservationRecord]) -> Option<Worl
 }
 
 #[cfg(target_arch = "wasm32")]
+const SESSION_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
+
+#[cfg(target_arch = "wasm32")]
+fn newest_entry_mtime_ms(dir: &str) -> Option<i64> {
+    dir_entry_names(dir)
+        .iter()
+        .filter_map(|name| crate::pkfs::stat(&format!("{dir}/{name}")))
+        .filter_map(|s| s.get("mtime_ms").or_else(|| s.get("mtimeMs"))?.as_f64())
+        .map(|ms| ms as i64)
+        .max()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn prune_idle_sessions(now_ms: i64, keep: &str) {
+    for session in dir_entry_names(".gm/dream-rsi") {
+        if session.starts_with('.') || session == keep {
+            continue;
+        }
+        let dir = format!(".gm/dream-rsi/{session}");
+        if let Some(newest) = newest_entry_mtime_ms(&dir) {
+            if now_ms.saturating_sub(newest) > SESSION_RETENTION_MS {
+                crate::pkfs::remove_tree(&dir);
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 fn scan_history() -> HistoryScan {
     let mut ledger = LedgerCheck::load();
     let mut scan = HistoryScan::default();
+    prune_idle_sessions(
+        super::state::now_ms() as i64,
+        &session_id().unwrap_or_default(),
+    );
     let mut sessions = dir_entry_names(".gm/dream-rsi");
     sessions.retain(|name| !name.starts_with('.'));
     sessions.sort();
