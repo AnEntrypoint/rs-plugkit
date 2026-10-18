@@ -87,58 +87,8 @@ jobs:
           echo "skip=$skip" >> "$GITHUB_OUTPUT"
           echo "deps=$deps" >> "$GITHUB_OUTPUT"
 
-  bump:
-    needs: plan
-    if: needs.plan.outputs.skip != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    outputs:
-      version: ${{ steps.bump.outputs.version }}
-      commit: ${{ steps.bump.outputs.commit }}
-    defaults:
-      run:
-        working-directory: ${{ inputs.crate_dir }}
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-        with:
-          repository: ${{ inputs.source_repository || github.repository }}
-          token: ${{ secrets.publisher_token }}
-          fetch-depth: 0
-          ref: main
-
-      - name: Auto-bump patch version BEFORE build
-        id: bump
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.publisher_token }}
-        run: |
-          set -e
-          git config user.name "lanmower"
-          git config user.email "lanmower@users.noreply.github.com"
-          git config url."https://${GH_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
-          MANIFEST="${{ inputs.version_manifest }}"
-          CURRENT=$(grep '^version' "$MANIFEST" | head -1 | sed 's/.*= *"//;s/"//')
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-          NEW_PATCH=$((PATCH + 1))
-          NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
-          sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$NEW_VERSION\"/}" "$MANIFEST"
-          git add "$MANIFEST"
-          if git diff --cached --quiet; then
-            echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
-          else
-            git commit -m "chore: auto-bump version to $NEW_VERSION [skip ci]"
-            pushed=false
-            for attempt in 1 2 3; do
-              if git push origin HEAD:main; then pushed=true; break; fi
-              git pull --rebase -q origin main
-            done
-            [ "$pushed" = true ] || { echo "::error::could not push the version bump after 3 attempts"; exit 1; }
-            echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
-          fi
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
   release:
-    needs: [plan, bump]
+    needs: [plan]
     if: needs.plan.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -149,7 +99,8 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ inputs.source_repository || github.repository }}
-          ref: ${{ needs.bump.outputs.commit }}
+          token: ${{ secrets.publisher_token }}
+          ref: main
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
         with:
@@ -168,6 +119,18 @@ jobs:
         run: |
           printf '%s\n' "$STEP_SCRIPT" > /tmp/pre_build_steps.sh
           bash /tmp/pre_build_steps.sh
+
+      - name: Compute the patch bump and write it into the manifest before build
+        id: bump
+        shell: bash
+        run: |
+          set -e
+          MANIFEST="${{ inputs.version_manifest }}"
+          CURRENT=$(grep '^version' "$MANIFEST" | head -1 | sed 's/.*= *"//;s/"//')
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$NEW_VERSION\"/}" "$MANIFEST"
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build
         shell: bash
@@ -190,13 +153,28 @@ jobs:
           cd release-assets
           sha256sum "${{ inputs.published_asset_basename }}.wasm" | sed 's/ \*/  /' > "${{ inputs.published_asset_basename }}.wasm.sha256"
 
+      - name: Commit and push the version bump the built tree already carries
+        id: push
+        env:
+          GH_TOKEN: ${{ secrets.publisher_token }}
+          VER: ${{ steps.bump.outputs.version }}
+        shell: bash
+        run: |
+          set -e
+          git config user.name "lanmower"
+          git config user.email "lanmower@users.noreply.github.com"
+          git add "${{ inputs.version_manifest }}"
+          git commit -m "chore: auto-bump version to $VER [skip ci]"
+          git push origin HEAD:main || { echo "::error::version bump push rejected; main moved during build, rerun the release"; exit 1; }
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.publisher_token }}
-          VER: ${{ needs.bump.outputs.version }}
+          VER: ${{ steps.bump.outputs.version }}
           REPO: ${{ inputs.release_repo }}
           TITLE_PREFIX: ${{ inputs.release_title_prefix }}
-          SOURCE_HEAD: ${{ needs.bump.outputs.commit }}
+          SOURCE_HEAD: ${{ steps.push.outputs.commit }}
           SOURCE_DEPS: ${{ needs.plan.outputs.deps }}
           SHA: ${{ github.sha }}
         working-directory: ${{ inputs.crate_dir }}
@@ -214,7 +192,7 @@ jobs:
 
       - name: Verify every uploaded asset is actually fetchable, not just reported as uploaded
         env:
-          VER: ${{ needs.bump.outputs.version }}
+          VER: ${{ steps.bump.outputs.version }}
           REPO: ${{ inputs.release_repo }}
         working-directory: ${{ inputs.crate_dir }}
         shell: bash
