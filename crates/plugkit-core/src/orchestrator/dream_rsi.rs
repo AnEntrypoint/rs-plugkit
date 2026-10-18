@@ -353,6 +353,9 @@ fn evaluate_policy(
     }))
 }
 
+const PROMOTION_MARGIN: f64 = 0.02;
+const PROMOTION_MIN_WORLDS: usize = 3;
+
 fn evaluate_worlds(
     baseline_id: String,
     mut policies: Vec<Policy>,
@@ -427,11 +430,12 @@ fn evaluate_worlds(
     let selected = rankings
         .iter()
         .filter(|ranking| {
-            ranking
-                .get("score")
-                .and_then(Value::as_f64)
-                .unwrap_or(f64::NEG_INFINITY)
-                > baseline_score
+            worlds.len() >= PROMOTION_MIN_WORLDS
+                && ranking
+                    .get("score")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(f64::NEG_INFINITY)
+                    > baseline_score + PROMOTION_MARGIN
         })
         .max_by(|left, right| {
             let score = |ranking: &Value| {
@@ -469,6 +473,14 @@ fn evaluate_worlds(
         "group_size": declared("group_size"),
         "stop": declared("stop"),
         "improved": selected.get("policy_id") != baseline.get("policy_id"),
+        "promotion_reason": if selected.get("policy_id") != baseline.get("policy_id") {
+            "improved"
+        } else if worlds.len() < PROMOTION_MIN_WORLDS {
+            "insufficient_worlds"
+        } else {
+            "below_margin"
+        },
+        "promotion_margin": PROMOTION_MARGIN,
         "beta1": beta1,
         "beta2": beta2,
         "rankings": rankings,
@@ -1080,7 +1092,17 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
     let baseline_score = replay.get("baseline_score").and_then(Value::as_f64).ok_or("dream-replay-cycle baseline score missing")?;
     let selected_id = replay.get("selected_policy_id").and_then(Value::as_str).unwrap_or(&incumbent.id).to_string();
     let selected_score = replay.get("selected_score").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY);
-    let never_worse = selected_score >= baseline_score;
+    let ranked_score = |id: &str| {
+        replay
+            .get("rankings")
+            .and_then(Value::as_array)
+            .and_then(|rankings| rankings.iter().find(|ranking| ranking.get("policy_id").and_then(Value::as_str) == Some(id)))
+            .and_then(|ranking| ranking.get("score").and_then(Value::as_f64))
+    };
+    let never_worse = match (ranked_score(&selected_id), ranked_score(&incumbent.id)) {
+        (Some(selected), Some(incumbent_score)) => selected >= incumbent_score && selected_score >= baseline_score,
+        _ => false,
+    };
     if !never_worse {
         defects.push("postcondition_selected_below_baseline");
     }
