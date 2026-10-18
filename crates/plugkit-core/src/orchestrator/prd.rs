@@ -2447,6 +2447,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                         "deviation_kind": kind,
                         "deviation_severity": "deny",
                         "prd_id": id_target,
+                        "field": "witness_dispatch_id",
                         "witness_dispatch_id": dispatch_id,
                         "witness_dispatch_id_field": "witness_dispatch_id",
                         "reason": reason,
@@ -2458,10 +2459,17 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                     .to_string();
                     return (
                         body,
-                        format!(
-                            "prd-resolve refused: witness_dispatch_id {} is not in the root's dispatch ledger for {}; the ledger keeps the most recent {} dispatches, so a witness older than that has aged out and must be re-run",
-                            dispatch_id, id_target, crate::dispatch_ledger::RETAINED_ENTRIES
-                        ),
+                        if aged_out {
+                            format!(
+                                "prd-resolve refused: field witness_dispatch_id {} for {} aged out of the dispatch ledger (it keeps the most recent {} dispatches); bind the four flat witness_* fields or re-run the witness",
+                                dispatch_id, id_target, crate::dispatch_ledger::RETAINED_ENTRIES
+                            )
+                        } else {
+                            format!(
+                                "prd-resolve refused: field witness_dispatch_id {} for {} is not recorded in {}; pass the dispatch_id of a live run in this project",
+                                dispatch_id, id_target, searched
+                            )
+                        },
                         1,
                     );
                 }
@@ -2638,10 +2646,12 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                         "deviation_kind": "prd-resolve-self-witness",
                         "deviation_severity": "deny",
                         "prd_id": id_target,
+                        "field": "witness_dispatch_id",
                         "witness_dispatch_id": dispatch_id,
                         "executor_session": row_session,
                         "dispatch_session": dispatch_session,
-                        "hint": "The witness must be a live run dispatched under a different session than the row's executor. Re-run the witness from a verifier session and resolve with that dispatch id.",
+                        "next_verb": "prd-witness-request",
+                        "hint": "The witness must be a live run dispatched under a different session than the row's executor. Dispatch prd-witness-request {id} to record the request and receive a verifier brief, run the witness from that verifier session, and resolve with its dispatch id.",
                     })
                     .to_string();
                     return (
@@ -2888,6 +2898,201 @@ pub fn handle_block(content: &str) -> (String, String, i32) {
     match outcome {
         Ok(()) => (serde_json::json!({"ok": true, "blocked_annotated": id}).to_string(), String::new(), 0),
         Err((out, err, rc)) => (out, err, rc),
+    }
+}
+
+fn json_body(content: &str) -> serde_json::Value {
+    serde_json::from_str::<serde_json::Value>(content.trim()).unwrap_or(serde_json::Value::Null)
+}
+
+fn body_str(body: &serde_json::Value, fields: &[&str]) -> Option<String> {
+    fields.iter().find_map(|field| {
+        body.get(*field)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+pub fn handle_witness_request(content: &str) -> (String, String, i32) {
+    let body = json_body(content);
+    let Some(id) = body_str(&body, &["id", "prd_id", "row"]) else {
+        return (
+            String::new(),
+            "prd-witness-request requires {\"id\":\"<prd row id>\"}; optional \"note\" names what the verifier must observe".to_string(),
+            1,
+        );
+    };
+    let note = body_str(&body, &["note", "expect", "observe"]);
+    let requester = super::state::dispatch_session_id();
+    let ts = super::state::now_ms() as u64;
+    let store = row_store::Store::prd();
+    let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
+    let outcome = row_store::cas_retry_write(&store, cas_max_attempts, "prd-witness-request", |mut doc: Value| {
+        let Some(seq) = doc.as_sequence_mut() else {
+            return cas::CasOutcome::Abort(String::new(), "the PRD store is not a sequence".to_string(), 1);
+        };
+        let key = Value::String("id".to_string());
+        let Some(row) = seq
+            .iter_mut()
+            .find(|it| it.as_mapping().and_then(|m| m.get(&key)).and_then(|v| v.as_str()) == Some(id.as_str()))
+        else {
+            return cas::CasOutcome::Abort(String::new(), format!("prd-witness-request refused: no open PRD row with id {}", id), 1);
+        };
+        let Some(map) = row.as_mapping_mut() else {
+            return cas::CasOutcome::Abort(String::new(), "PRD row is not a mapping".to_string(), 1);
+        };
+        let executor = map
+            .get(&Value::String("session_id".to_string()))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let mut request = serde_yaml::Mapping::new();
+        request.insert(Value::String("ts_ms".to_string()), Value::Number(ts.into()));
+        if let Some(r) = requester.as_deref() {
+            request.insert(Value::String("requested_by".to_string()), Value::String(r.to_string()));
+        }
+        if let Some(n) = note.as_deref() {
+            request.insert(Value::String("note".to_string()), Value::String(n.to_string()));
+        }
+        map.insert(Value::String("witness_request".to_string()), Value::Mapping(request));
+        cas::CasOutcome::Write(doc, executor)
+    });
+    let executor = match outcome {
+        Ok(v) => v,
+        Err((out, err, rc)) => return (out, err, rc),
+    };
+    invalidate_residual_marker("prd-witness-request");
+    let excluded: Vec<&str> = [executor.as_deref(), requester.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let reply = serde_json::json!({
+        "witness_requested": id,
+        "requested_by": requester,
+        "executor_session": executor,
+        "excluded_sessions": excluded,
+        "note": note,
+        "verifier_brief": format!(
+            "Load gm-prd with row={}; session=<a new session id, not {}>; mode=witness. Re-run the row's witness live{}, then prd-resolve {{\"id\":\"{}\",\"witness_evidence\":\"<observed output>\",\"witness_dispatch_id\":\"<your dispatch id>\"}}.",
+            id,
+            if excluded.is_empty() { "the executor".to_string() } else { excluded.join(" or ") },
+            note.as_deref().map(|n| format!(" observing: {}", n)).unwrap_or_default(),
+            id
+        ),
+    });
+    (reply.to_string(), String::new(), 0)
+}
+
+pub fn expansion_audit_log_path() -> String {
+    gm_dir().join("expansion-audit.jsonl").to_string_lossy().replace('\\', "/")
+}
+
+fn body_count(body: &serde_json::Value, field: &str) -> Result<Option<u64>, String> {
+    match body.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("expansion-audit refused: field {} must be a non-negative integer", field)),
+    }
+}
+
+pub fn handle_expansion_audit(content: &str) -> (String, String, i32) {
+    let body = json_body(content);
+    let log_path = expansion_audit_log_path();
+    let list_only = body.get("list").and_then(|v| v.as_bool()) == Some(true);
+    if list_only {
+        let text = pkfs::read_to_string(&log_path).unwrap_or_default();
+        let entries: Vec<serde_json::Value> = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let limit = body.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+        let tail = entries[entries.len().saturating_sub(limit)..].to_vec();
+        return (
+            serde_json::json!({
+                "log": ".gm/expansion-audit.jsonl",
+                "total": entries.len(),
+                "latest": entries.last(),
+                "entries": tail,
+            })
+            .to_string(),
+            String::new(),
+            0,
+        );
+    }
+    let Some(scope) = body_str(&body, &["scope", "goal", "subject"]) else {
+        return (
+            String::new(),
+            "expansion-audit requires {\"scope\":\"<what was swept>\",\"rows_added\":<n>,\"unknowns_added\":<n>}; optional \"result\" (fixed_point|expanded), \"note\"; {\"list\":true} reads the log".to_string(),
+            1,
+        );
+    };
+    let (rows_added, unknowns_added) = match (body_count(&body, "rows_added"), body_count(&body, "unknowns_added")) {
+        (Ok(Some(r)), Ok(Some(u))) => (r, u),
+        (Err(e), _) | (_, Err(e)) => return (String::new(), e, 1),
+        (Ok(None), _) => return (String::new(), "expansion-audit refused: field rows_added is required (rows this sweep filed with prd-add)".to_string(), 1),
+        (_, Ok(None)) => return (String::new(), "expansion-audit refused: field unknowns_added is required (unknowns this sweep filed with mutable-add)".to_string(), 1),
+    };
+    let derived = if rows_added == 0 && unknowns_added == 0 { "fixed_point" } else { "expanded" };
+    if let Some(claimed) = body_str(&body, &["result"]) {
+        if claimed != derived {
+            return (
+                String::new(),
+                format!(
+                    "expansion-audit refused: field result is {} but rows_added={} and unknowns_added={} make it {}",
+                    claimed, rows_added, unknowns_added, derived
+                ),
+                1,
+            );
+        }
+    }
+    let policy = super::fsm::graph().policy.clone();
+    let prd_open = match row_store::read_blocks(&row_store::Store::prd()) {
+        Ok(read) => read
+            .blocks
+            .iter()
+            .filter(|row| {
+                let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+                !policy.prd_closed_statuses.iter().any(|s| s == status)
+            })
+            .count(),
+        Err((message, code)) => return (String::new(), message, code),
+    };
+    let unknowns_open = super::mutables::pending_detailed().len();
+    let end_state = derived == "fixed_point" && prd_open == 0 && unknowns_open == 0;
+    let entry = serde_json::json!({
+        "id": format!("expansion-audit:{}", super::state::now_ms()),
+        "scope": scope,
+        "rows_added": rows_added,
+        "unknowns_added": unknowns_added,
+        "result": derived,
+        "prd_open": prd_open,
+        "unknowns_open": unknowns_open,
+        "verifiable_end_state": end_state,
+        "note": body_str(&body, &["note"]),
+    });
+    match row_store::append_chained(&log_path, "expansion-audit", entry) {
+        Ok(recorded) => (
+            serde_json::json!({
+                "recorded": recorded,
+                "log": ".gm/expansion-audit.jsonl",
+                "verifiable_end_state": end_state,
+                "hint": if end_state {
+                    "fixed point with zero open rows and unknowns: a goal stop may cite this entry's sha256"
+                } else if derived == "expanded" {
+                    "the sweep expanded scope: drain the new rows, then sweep again and record another audit"
+                } else {
+                    "fixed point reached but rows or unknowns are still open: drain them before a goal stop"
+                },
+            })
+            .to_string(),
+            String::new(),
+            0,
+        ),
+        Err(e) => (String::new(), format!("expansion-audit: {}", e), 1),
     }
 }
 
