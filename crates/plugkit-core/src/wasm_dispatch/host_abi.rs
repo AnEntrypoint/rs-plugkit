@@ -35,7 +35,6 @@ host_abi_extern_block_and_host_imports_list_from_one_declaration! {
     fn host_kv_put(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> u32;
     fn host_kv_delete(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u32;
     fn host_kv_query(ns_ptr: *const u8, ns_len: u32, q_ptr: *const u8, q_len: u32) -> u64;
-    fn host_vec_search(q_ptr: *const u8, q_len: u32, k: u32) -> u64;
     fn host_vec_embed(text_ptr: *const u8, text_len: u32, out_ptr: *mut f32, out_len: u32) -> i32;
     fn host_exec_js(code_ptr: *const u8, code_len: u32, opts_ptr: *const u8, opts_len: u32) -> u64;
     fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
