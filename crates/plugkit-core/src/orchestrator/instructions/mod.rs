@@ -1057,7 +1057,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         if let Some(fields) = note.as_object_mut() {
             fields.insert(
                 "inlined_rows_shape".to_string(),
-                json!(if prd_full_detail { "full" } else { "summary (id, title, status) -- full description/acceptance_criteria/witness_plan via prd-list or {\"prd_full_detail\":true}" }),
+                json!(if prd_full_detail { "full" } else { "summary (id, title, status) -- full description/acceptance_criteria/witness_plan via prd-list or {\"full\":true}" }),
             );
         }
         note
