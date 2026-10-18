@@ -384,9 +384,9 @@ pub fn identifier_report(
     if shown_references.len() < references.len() || shown_definitions.len() < definitions.len() {
         out.insert("top_files".into(), json!(top_files));
         let all_matches = if substring {
-            "mode=regex query=(?i)<query> output=compact"
+            "mode=regex query=(?i)<query> output_mode=content"
         } else {
-            "mode=literal whole_word=true output=compact"
+            "mode=literal whole_word=true output_mode=content"
         };
         out.insert("more".into(), json!(format!("all matches (docs included): {all_matches}; docs in this ranked view: docs=true; raw BM25/vector/commit channels: verbose=true")));
     }
