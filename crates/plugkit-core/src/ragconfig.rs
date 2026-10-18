@@ -1362,6 +1362,8 @@ impl RagConfig {
             reject_unless_ascii_alnum_underscore_sql_ident(&names.table)?;
             reject_unless_ascii_alnum_underscore_sql_ident(&names.index)?;
         }
+        reject_unless_ascii_alnum_underscore_sql_ident(&self.memory_md_tables.meta)?;
+        reject_unless_ascii_alnum_underscore_sql_ident(&self.memory_md_tables.files)?;
         if self.namespaces.code.is_empty() || self.namespaces.default.is_empty() {
             return Err(
                 "ragconfig: namespaces.code and namespaces.default must be non-empty".to_string(),
