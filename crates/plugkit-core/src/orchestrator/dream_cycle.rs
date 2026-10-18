@@ -56,10 +56,22 @@ fn evaluate(content: &str) -> Result<Value, String> {
             "owner_session_id": owner, "cycle_id": cycle_id, "reason": reason
         }));
     }
+    let replay_result_path = super::dream_rsi::persist_replay_result(
+        super::dream_rsi::CYCLE_RESULT_FILE,
+        "dream-replay-cycle",
+        json!({
+            "cycle_id": cycle_id,
+            "last_dispatch_id": latest,
+            "selection": replay.get("selection"),
+            "score": replay.get("score"),
+            "replay_count": replay.get("replays").and_then(Value::as_array).map(Vec::len),
+        }),
+    );
     Ok(json!({
         "ok": true, "kind": "observations", "status": "replayed",
         "owner_session_id": owner, "cycle_id": cycle_id,
-        "last_dispatch_id": latest, "replay": replay
+        "last_dispatch_id": latest, "replay": replay,
+        "replay_result_path": replay_result_path
     }))
 }
 
