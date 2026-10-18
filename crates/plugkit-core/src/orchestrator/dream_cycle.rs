@@ -42,7 +42,13 @@ fn evaluate(content: &str) -> Result<Value, String> {
     let beta2 = optional_beta(&body, "beta2", super::dream_rsi::DEFAULT_CYCLE_BETA2)?;
     let stored = stored_cursor(owner);
     let daemon = owner_cursor(owner, ".cycle-state.json");
-    let round = super::dream_rsi::history_round(owner, after.or(stored.as_deref()), beta1, beta2)?;
+    let round = match super::dream_rsi::history_round(owner, after.or(stored.as_deref()), beta1, beta2) {
+        Ok(round) => round,
+        Err(error) if error.starts_with(super::dream_rsi::POSTCONDITION_FAILED) => {
+            return Ok(refused(owner, cycle_id, error));
+        }
+        Err(error) => return Err(error),
+    };
     let latest = round.latest_dispatch_id.as_deref();
     let reason = match latest {
         None => Some("no-verified-observations"),
@@ -53,7 +59,9 @@ fn evaluate(content: &str) -> Result<Value, String> {
         {
             Some("no-new-verified-observations")
         }
-        Some(_) if round.summary.get("rankings").is_none() => Some("no-replayable-worlds"),
+        Some(_) if round.summary.pointer("/history/worlds").and_then(Value::as_u64) == Some(0) => {
+            Some("no-replayable-worlds")
+        }
         Some(_) => None,
     };
     if let Some(reason) = reason {
@@ -69,6 +77,9 @@ fn evaluate(content: &str) -> Result<Value, String> {
     fields["lost_cursor"] = json!(lost_cursor);
     fields["cycle_id"] = json!(cycle_id);
     fields["last_dispatch_id"] = json!(latest);
+    if let Some(violation) = contract_violation(&fields) {
+        return Ok(refused(owner, cycle_id, violation));
+    }
     match super::dream_rsi::persist_replay_result(
         super::dream_rsi::ReplayFile::Cycle,
         super::dream_rsi::ReplaySource("dream-replay-cycle"),
@@ -86,6 +97,27 @@ fn evaluate(content: &str) -> Result<Value, String> {
             "last_dispatch_id": latest, "error": error
         })),
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn refused(owner: &str, cycle_id: Option<&str>, error: String) -> Value {
+    json!({
+        "ok": false, "error_code": "postcondition_failed", "kind": "observations",
+        "status": "refused", "owner_session_id": owner, "cycle_id": cycle_id, "error": error
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn contract_violation(fields: &Value) -> Option<String> {
+    let incumbent = fields.get("incumbent_score").and_then(Value::as_f64)?;
+    let selected = fields.get("selected_score").and_then(Value::as_f64)?;
+    if selected < incumbent {
+        return Some(format!("selected_score {selected} below incumbent_score {incumbent}"));
+    }
+    if fields.get("improved").and_then(Value::as_bool) == Some(true) && selected <= incumbent {
+        return Some(format!("improved without gain: selected_score {selected} <= incumbent_score {incumbent}"));
+    }
+    None
 }
 
 #[cfg(target_arch = "wasm32")]
