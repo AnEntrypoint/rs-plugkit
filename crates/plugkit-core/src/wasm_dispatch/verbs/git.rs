@@ -5546,17 +5546,20 @@ pub(super) fn git_show(body: &Value) -> u64 {
     let page = if whole_blob { full.len() } else { GIT_SHOW_PAGE_BYTES };
     let end = boundary_at_or_before(start + page);
     let next_offset = (end < full.len()).then_some(end);
-    ok(
-        "git_show",
-        json!({
-            "output": &full[start..end],
-            "rev": refspec,
-            "truncated": host_truncated || next_offset.is_some(),
-            "offset": start,
-            "total_bytes": full.len(),
-            "next_offset": next_offset,
-        }),
-    )
+    let mut reply = json!({
+        "output": &full[start..end],
+        "rev": refspec,
+        "truncated": host_truncated || next_offset.is_some(),
+        "offset": start,
+        "total_bytes": full.len(),
+        "next_offset": next_offset,
+    });
+    if let Some(next) = next_offset {
+        reply["hint"] = json!(format!(
+            "output is paged at {page} bytes: pass offset {next} to read the next page, or full:true for the whole blob"
+        ));
+    }
+    ok("git_show", reply)
 }
 
 fn git_show_repo_name(cwd: Option<&str>) -> String {
