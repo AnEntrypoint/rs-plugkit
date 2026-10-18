@@ -3408,7 +3408,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             return Ok(ok(
                 "git_commit",
                 json!({
-                    "committed": true, "sha": sha, "summary": summary,
+                    "committed": true, "sha_full": prior.get("sha_full").and_then(|v| v.as_str()).unwrap_or(""), "sha": sha, "summary": summary,
                     "replayed_from_recent_identical_dispatch": true,
                 }),
             ));
@@ -3595,7 +3595,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary }),
         );
         record_commit_in_liqology(&summary, &head_after);
-        let mut payload = json!({ "committed": true, "sha": sha, "summary": summary });
+        let mut payload = json!({ "committed": true, "sha_full": head_after, "sha": sha, "summary": summary });
         if let Some(rows) = prd_own_rows.as_ref() {
             payload["prd_own_rows_only"] = json!(true);
             payload["prd_own_rows"] = json!(rows);
