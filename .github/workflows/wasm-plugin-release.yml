@@ -49,6 +49,7 @@ on:
 jobs:
   plan:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       skip: ${{ steps.check.outputs.skip }}
       deps: ${{ steps.check.outputs.deps }}
@@ -90,6 +91,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.skip != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       version: ${{ steps.bump.outputs.version }}
       commit: ${{ steps.bump.outputs.commit }}
@@ -139,6 +141,7 @@ jobs:
     needs: [plan, bump]
     if: needs.plan.outputs.skip != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: ${{ inputs.crate_dir }}
