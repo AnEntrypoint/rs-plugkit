@@ -4,11 +4,15 @@ use std::sync::OnceLock;
 
 use tokenizers::Tokenizer;
 
+#[cfg(not(feature = "wit-env"))]
 #[link(wasm_import_module = "env")]
 extern "C" {
     fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
     fn host_vec_embed(text_ptr: *const u8, text_len: u32, out_ptr: *mut f32, out_len: u32) -> i32;
 }
+
+#[cfg(feature = "wit-env")]
+use crate::wasm_dispatch::host_abi::{host_log, host_vec_embed};
 
 static LAST_EMBED_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 

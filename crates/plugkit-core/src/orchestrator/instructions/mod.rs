@@ -484,8 +484,12 @@ fn pending_step_block(st: &super::state::TurnState) -> Option<serde_json::Value>
     }))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wit-env"))]
+use crate::wasm_dispatch::host_abi::host_log;
+
 #[cfg(target_arch = "wasm32")]
 fn ilog(msg: &str) {
+    #[cfg(not(feature = "wit-env"))]
     #[link(wasm_import_module = "env")]
     extern "C" {
         fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;
@@ -495,6 +499,7 @@ fn ilog(msg: &str) {
 
 #[cfg(target_arch = "wasm32")]
 fn idev(event: &str, detail: &str) {
+    #[cfg(not(feature = "wit-env"))]
     #[link(wasm_import_module = "env")]
     extern "C" {
         fn host_log(level: u32, msg_ptr: *const u8, msg_len: u32) -> u32;

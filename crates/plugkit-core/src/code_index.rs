@@ -9,6 +9,7 @@ use crate::wasm_dispatch::{
     host_read, host_stat, plugin_call, plugin_failure_code, plugin_ok, unpack_to_value_pub,
 };
 
+#[cfg(not(feature = "wit-env"))]
 #[link(wasm_import_module = "env")]
 extern "C" {
     fn host_fs_readdir(path_ptr: *const u8, path_len: u32) -> u64;
@@ -24,6 +25,11 @@ extern "C" {
     fn host_kv_query(ns_ptr: *const u8, ns_len: u32, q_ptr: *const u8, q_len: u32) -> u64;
     fn host_kv_delete(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u32;
 }
+
+#[cfg(feature = "wit-env")]
+use crate::wasm_dispatch::host_abi::{
+    host_fs_readdir, host_kv_delete, host_kv_put, host_kv_query, host_log,
+};
 
 use crate::libsql_wasm;
 
