@@ -538,6 +538,29 @@ fn fold_last_blocks(rows: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
         .collect()
 }
 
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            cur.push((prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+fn nearest_ids(ids: &[String], want: &str, n: usize) -> Vec<String> {
+    let mut scored: Vec<(usize, &String)> = ids
+        .iter()
+        .map(|id| (edit_distance(id, want), id))
+        .collect();
+    scored.sort();
+    scored.into_iter().take(n).map(|(_, id)| id.clone()).collect()
+}
+
 pub fn handle_list(content: &str) -> (String, String, i32) {
     let request = request_object(content);
     let limit = match request_limit(&request) {
@@ -559,7 +582,12 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
     } else {
         requested_statuses
     };
-    let selected: Vec<serde_json::Value> = fold_last_blocks(rows)
+    let folded_rows = fold_last_blocks(rows);
+    let open_ids: Vec<String> = folded_rows
+        .iter()
+        .map(|row| row_text(row, &["id"]))
+        .collect();
+    let selected: Vec<serde_json::Value> = folded_rows
         .into_iter()
         .filter(|row| {
             let id = row_text(row, &["id"]);
@@ -605,9 +633,10 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         return (
             String::new(),
             format!(
-                "no PRD row with id {} of the {} rows in .gm/prd/ or the resolved rows in .gm/prd-log.jsonl -- pass no id for the listing",
+                "no PRD row with exact id {} among the {} open rows in .gm/prd/ (or the resolved rows in .gm/prd-log.jsonl; ids match exactly, not by prefix); nearest open ids: [{}] -- pass no id for the listing",
                 wanted_ids.join(", "),
-                store_total
+                open_ids.len(),
+                nearest_ids(&open_ids, &wanted_ids[0], 3).join(", ")
             ),
             1,
         );
