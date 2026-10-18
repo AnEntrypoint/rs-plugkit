@@ -1026,8 +1026,11 @@ pub fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2: f64) 
     rankings.sort_by(|left, right| {
         right.get("score").and_then(Value::as_f64).partial_cmp(&left.get("score").and_then(Value::as_f64)).unwrap_or(std::cmp::Ordering::Equal)
     });
+    let improved = selected_id != incumbent.id && selected_score > baseline_score;
+    if !improved {
+        selected_id = incumbent.id.clone();
+    }
     let selected_policy = candidates.iter().find(|policy| policy.id == selected_id).map(policy_json);
-    let improved = selected_id != incumbent.id;
     Ok(HistoryRound {
         latest_dispatch_id,
         lost_cursor,
