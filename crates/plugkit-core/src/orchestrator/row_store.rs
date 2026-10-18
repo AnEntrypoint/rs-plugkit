@@ -568,7 +568,19 @@ pub fn read_log(store: &Store) -> Result<LogRead, String> {
             continue;
         }
         match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(entry) => entries.push(entry),
+            Ok(entry) => {
+                let version = entry.get("v").and_then(|v| v.as_u64()).unwrap_or(0);
+                if version > LOG_VERSION as u64 {
+                    return Err(format!(
+                        "prd_log_unknown_version: {} line {} has entry version {} but this build reads version {}; upgrade the runner before reading the log",
+                        store.log,
+                        index + 1,
+                        version,
+                        LOG_VERSION
+                    ));
+                }
+                entries.push(entry)
+            }
             Err(err) => {
                 return Err(format!(
                     "prd_log_midfile_parse_error: {} line {} is not JSON ({}); repair or remove that line before reading the log",
