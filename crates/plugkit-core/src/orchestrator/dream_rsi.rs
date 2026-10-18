@@ -19,7 +19,36 @@ struct Policy {
     max_nodes: usize,
     attempt: Option<u64>,
     group_size: Option<u64>,
-    stop: Option<String>,
+    stop: Option<Stop>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Stop {
+    Budget,
+    Converged,
+    Exhausted,
+}
+
+impl Stop {
+    const NAMES: [(&'static str, Stop); 3] = [
+        ("budget", Stop::Budget),
+        ("converged", Stop::Converged),
+        ("exhausted", Stop::Exhausted),
+    ];
+
+    fn parse(raw: &str) -> Option<Stop> {
+        Self::NAMES
+            .iter()
+            .find(|(name, _)| *name == raw)
+            .map(|(_, stop)| *stop)
+    }
+
+    fn name(self) -> &'static str {
+        Self::NAMES
+            .iter()
+            .find(|(_, stop)| *stop == self)
+            .map_or("budget", |(name, _)| name)
+    }
 }
 
 struct World {
@@ -128,8 +157,6 @@ fn nonneg_f64_field(value: &Value, field: &str) -> Result<f64, String> {
         .ok_or_else(|| format!("dream-replay requires non-negative finite {field}"))
 }
 
-const STOP_CONDITIONS: &[&str] = &["budget", "converged", "exhausted"];
-
 fn parse_policy(value: &Value) -> Result<Policy, String> {
     let id = string_field(value, "id")?;
     let roots = array_field(value, "roots")?
@@ -164,9 +191,11 @@ fn parse_policy(value: &Value) -> Result<Policy, String> {
         None | Some(Value::Null) => None,
         Some(raw) => Some(
             raw.as_str()
-                .filter(|value| STOP_CONDITIONS.contains(value))
-                .ok_or_else(|| format!("dream-replay policy {id} field stop must be one of {STOP_CONDITIONS:?} when present"))?
-                .to_owned(),
+                .and_then(Stop::parse)
+                .ok_or_else(|| {
+                    let names = Stop::NAMES.map(|(name, _)| name);
+                    format!("dream-replay policy {id} field stop must be one of {names:?} when present")
+                })?,
         ),
     };
     Ok(Policy {
@@ -244,9 +273,9 @@ fn evaluate_policy(
     beta1: f64,
     beta2: f64,
 ) -> Result<Value, String> {
-    let budget = match policy.stop.as_deref() {
-        Some("exhausted") => usize::MAX,
-        _ => policy.max_nodes,
+    let (budget, budget_source) = match policy.stop {
+        Some(Stop::Exhausted) => (usize::MAX, "stop-exhausted"),
+        _ => (policy.max_nodes, "max_nodes"),
     };
     let wave_size = policy.group_size.map_or(1, |size| size as usize).max(1);
     let attempts_per_node = policy.attempt.unwrap_or(1).max(1);
@@ -291,7 +320,7 @@ fn evaluate_policy(
         if expanded_in_wave > 0 {
             waves += 1;
         }
-        converged = policy.stop.as_deref() == Some("converged")
+        converged = policy.stop == Some(Stop::Converged)
             && waves > 1
             && quality <= quality_before_wave;
     }
@@ -318,6 +347,7 @@ fn evaluate_policy(
         "retries": retries,
         "rounds": rounds,
         "converged": converged,
+        "budget_source": budget_source,
         "parallelism_bonus": parallelism_bonus,
         "replay_score": replay_score,
     }))
@@ -379,7 +409,7 @@ fn evaluate_worlds(
             "cost": cost,
             "attempt": policy.attempt,
             "group_size": policy.group_size,
-            "stop": policy.stop,
+            "stop": policy.stop.map(Stop::name),
             "replays": replays,
         }));
     }
@@ -647,7 +677,7 @@ fn read_observations(raw: &str) -> (Vec<ObservationRecord>, usize) {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn reply_sha256_hex(reply: &str) -> String {
+pub(crate) fn reply_sha256_hex(reply: &str) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(reply.as_bytes()))
 }
@@ -845,6 +875,11 @@ impl LedgerCheck {
         if entry.get("verb").and_then(Value::as_str) != record.verb.as_deref() {
             return Err("ledger_verb_mismatch");
         }
+        if let Some(stamped) = entry.get("reply_sha256").and_then(Value::as_str) {
+            if record.reply_sha256.as_deref() != Some(stamped) {
+                return Err("ledger_reply_sha256_mismatch");
+            }
+        }
         Ok(Confirmation::Ledger)
     }
 }
@@ -978,8 +1013,8 @@ fn dream_candidates(incumbent: &Policy) -> Vec<Policy> {
         variant("double-nodes", &|policy: &mut Policy| policy.max_nodes = policy.max_nodes.saturating_mul(2)),
         variant("group-2", &|policy: &mut Policy| policy.group_size = Some(2)),
         variant("group-4", &|policy: &mut Policy| policy.group_size = Some(4)),
-        variant("stop-converged", &|policy: &mut Policy| policy.stop = Some("converged".into())),
-        variant("stop-exhausted", &|policy: &mut Policy| policy.stop = Some("exhausted".into())),
+        variant("stop-converged", &|policy: &mut Policy| policy.stop = Some(Stop::Converged)),
+        variant("stop-exhausted", &|policy: &mut Policy| policy.stop = Some(Stop::Exhausted)),
         variant("attempt-2", &|policy: &mut Policy| policy.attempt = Some(2)),
     ];
     let mut seen = BTreeSet::new();
@@ -993,7 +1028,7 @@ fn dream_candidates(incumbent: &Policy) -> Vec<Policy> {
 fn policy_json(policy: &Policy) -> Value {
     json!({
         "id": policy.id, "roots": policy.roots, "max_nodes": policy.max_nodes,
-        "group_size": policy.group_size, "stop": policy.stop, "attempt": policy.attempt,
+        "group_size": policy.group_size, "stop": policy.stop.map(Stop::name), "attempt": policy.attempt,
     })
 }
 
@@ -1249,9 +1284,9 @@ fn automatic_replay(session_id: Option<&str>) -> Value {
         .iter()
         .any(|entry| entry.get("quality").and_then(Value::as_f64) == Some(0.0))
     {
-        "replay-recorded-successes-first"
+        SELECTION_REPLAY_RECORDED_SUCCESSES_FIRST
     } else {
-        "continue-current-exploration"
+        SELECTION_CONTINUE_CURRENT_EXPLORATION
     };
     let replay_count = replays.len();
     replays.truncate(AUTOMATIC_REPLAY_SAMPLE);
@@ -1274,6 +1309,12 @@ pub(super) fn persisted_cycle_result(session_id: Option<&str>) -> Value {
 const AUTOMATIC_REPLAY_SAMPLE: usize = 8;
 
 #[cfg(target_arch = "wasm32")]
+const SELECTION_REPLAY_RECORDED_SUCCESSES_FIRST: &str = "replay-recorded-successes-first";
+
+#[cfg(target_arch = "wasm32")]
+const SELECTION_CONTINUE_CURRENT_EXPLORATION: &str = "continue-current-exploration";
+
+#[cfg(target_arch = "wasm32")]
 fn propose_strategy() -> Result<Value, String> {
     let owner = session_id()?;
     if owner.len() > 256
@@ -1289,7 +1330,7 @@ fn propose_strategy() -> Result<Value, String> {
         .get("selection")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .unwrap_or_else(|| "continue-current-exploration".to_string());
+        .unwrap_or_else(|| SELECTION_CONTINUE_CURRENT_EXPLORATION.to_string());
     let path = format!(".gm/dream-rsi/{owner}/proposed-strategy.json");
     let proposal = json!({
         "ok": true,
