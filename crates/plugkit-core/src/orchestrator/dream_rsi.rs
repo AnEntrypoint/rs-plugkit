@@ -726,17 +726,19 @@ fn dir_entry_names(dir: &str) -> Vec<String> {
 
 #[cfg(target_arch = "wasm32")]
 fn archive_names(session_id: &str) -> Vec<String> {
-    let mut names: Vec<String> = dir_entry_names(&format!(".gm/dream-rsi/{session_id}"))
+    let mut names: Vec<(i64, String)> = dir_entry_names(&format!(".gm/dream-rsi/{session_id}"))
         .into_iter()
-        .filter(|name| name.starts_with(OBSERVATIONS_ARCHIVE_PREFIX) && name.ends_with(".json"))
+        .filter_map(|name| {
+            let ts = name
+                .strip_prefix(OBSERVATIONS_ARCHIVE_PREFIX)?
+                .strip_suffix(".json")?
+                .parse::<i64>()
+                .ok()?;
+            Some((ts, name))
+        })
         .collect();
-    names.sort_by_key(|name| {
-        name.trim_start_matches(OBSERVATIONS_ARCHIVE_PREFIX)
-            .trim_end_matches(".json")
-            .parse::<i64>()
-            .unwrap_or(0)
-    });
-    names
+    names.sort_by_key(|(ts, _)| *ts);
+    names.into_iter().map(|(_, name)| name).collect()
 }
 
 #[cfg(target_arch = "wasm32")]
