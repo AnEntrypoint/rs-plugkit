@@ -615,18 +615,34 @@ impl ObservationRecord {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn read_observation_values(raw: &str) -> Vec<Value> {
+fn read_observation_values(raw: &str) -> (Vec<Value>, usize) {
     if raw.trim_start().starts_with('[') {
-        return serde_json::from_str::<Vec<Value>>(raw).unwrap_or_default();
+        return match serde_json::from_str::<Vec<Value>>(raw) {
+            Ok(values) => (values, 0),
+            Err(_) => (Vec::new(), 1),
+        };
     }
-    raw.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .collect()
+    let mut rejected = 0;
+    let values = raw
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| match serde_json::from_str::<Value>(line) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                rejected += 1;
+                None
+            }
+        })
+        .collect();
+    (values, rejected)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn read_observations(raw: &str) -> Vec<ObservationRecord> {
-    read_observation_values(raw).iter().filter_map(ObservationRecord::from_value).collect()
+fn read_observations(raw: &str) -> (Vec<ObservationRecord>, usize) {
+    let (values, parse_rejected) = read_observation_values(raw);
+    let records: Vec<ObservationRecord> = values.iter().filter_map(ObservationRecord::from_value).collect();
+    let shape_rejected = values.len() - records.len();
+    (records, parse_rejected + shape_rejected)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -729,16 +745,23 @@ fn rotate_observations_if_full(session_id: &str, path: &str, ts: i64) {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn session_history(session_id: &str) -> Vec<ObservationRecord> {
-    let mut records: Vec<ObservationRecord> = archive_names(session_id)
-        .iter()
-        .filter_map(|name| crate::pkfs::read_to_string(&format!(".gm/dream-rsi/{session_id}/{name}")))
-        .flat_map(|raw| read_observations(&raw))
-        .collect();
-    if let Some(raw) = crate::pkfs::read_to_string(&format!(".gm/dream-rsi/{session_id}/observations.json")) {
-        records.extend(read_observations(&raw));
+fn session_history(session_id: &str) -> (Vec<ObservationRecord>, usize) {
+    let mut records: Vec<ObservationRecord> = Vec::new();
+    let mut rejected = 0;
+    let mut absorb = |raw: &str| {
+        let (found, dropped) = read_observations(raw);
+        records.extend(found);
+        rejected += dropped;
+    };
+    for name in archive_names(session_id) {
+        if let Some(raw) = crate::pkfs::read_to_string(&format!(".gm/dream-rsi/{session_id}/{name}")) {
+            absorb(&raw);
+        }
     }
-    records
+    if let Some(raw) = crate::pkfs::read_to_string(&format!(".gm/dream-rsi/{session_id}/observations.json")) {
+        absorb(&raw);
+    }
+    (records, rejected)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -883,7 +906,7 @@ fn scan_history() -> HistoryScan {
     sessions.retain(|name| !name.starts_with('.'));
     sessions.sort();
     for session_id in sessions {
-        let mut records = session_history(&session_id);
+        let (mut records, _) = session_history(&session_id);
         if records.is_empty() {
             continue;
         }
@@ -1185,12 +1208,15 @@ fn automatic_replay(session_id: Option<&str>) -> Value {
     let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
         return Value::Null;
     };
-    let observations = session_history(session_id);
-    if observations.is_empty() {
+    let (observations, parse_rejected) = session_history(session_id);
+    if observations.is_empty() && parse_rejected == 0 {
         return Value::Null;
     }
     let mut ledger = LedgerCheck::load();
     let mut dropped: BTreeMap<&'static str, usize> = BTreeMap::new();
+    if parse_rejected > 0 {
+        dropped.insert("unparseable", parse_rejected);
+    }
     let mut replays = Vec::new();
     for observation in observations.iter().rev() {
         if !observation.succeeded() && !observation.is_gate_drift_failure() {
@@ -2397,14 +2423,7 @@ fn observations_for_result() -> Result<(Vec<ObservationRecord>, usize), String> 
     let session = session_id()?;
     let path = format!(".gm/dream-rsi/{session}/observations.json");
     let raw = crate::pkfs::read_to_string(&path).unwrap_or_default();
-    let values = read_observation_values(&raw);
-    let total = values.len();
-    let valid: Vec<ObservationRecord> = values
-        .iter()
-        .filter_map(ObservationRecord::from_value)
-        .collect();
-    let rejected = total - valid.len();
-    Ok((valid, rejected))
+    Ok(read_observations(&raw))
 }
 
 #[cfg(target_arch = "wasm32")]
