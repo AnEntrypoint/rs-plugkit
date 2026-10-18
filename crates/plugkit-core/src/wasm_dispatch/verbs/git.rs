@@ -1097,7 +1097,7 @@ pub(super) fn verify_push_landed(
             ))
         }
     };
-    if remote_after != local_head {
+    if remote_after != local_head && !ref_is_ancestor(cwd, local_head, remote_after.as_str()) {
         return Err(format!(
             "push claimed success but {} ({}) does not match local HEAD ({}) after fetch -- remote did not actually advance to this commit",
             tracking, remote_after, local_head
