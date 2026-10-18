@@ -6952,6 +6952,8 @@ pub(super) const CI_LOG_MAX_CHARS_CEILING: usize = 40000;
 pub(super) const CI_LOG_SCANNED_MARKER: &str = "ci_log_scanned=";
 pub(super) const CI_LOG_MATCHED_MARKER: &str = "ci_log_matched=";
 pub(super) const CI_LOG_FAILURE_MARKER: &str = "ci_log_gh_failed=";
+pub(super) const CI_LOG_TRANSIENT_MAX_ATTEMPTS: u32 = 3;
+pub(super) const CI_LOG_TRANSIENT_BACKOFF_MS: u64 = 1_000;
 
 pub(super) const CI_LOG_FIELDS: &[&str] = &[
     "github_repo",
@@ -7490,6 +7492,24 @@ pub(super) fn ci_log_gh_failure_class(detail: &str) -> (Option<&'static str>, Op
     }
 }
 
+pub(super) fn ci_log_is_transient_failure(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    [
+        "tls handshake timeout",
+        "i/o timeout",
+        "connection reset",
+        "connection refused",
+        "unexpected eof",
+        "temporary failure",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 pub(super) fn ci_log(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields("ci-log", body, CI_LOG_FIELDS) {
         return refusal;
@@ -7580,7 +7600,23 @@ pub(super) fn ci_log(body: &Value) -> u64 {
         tail_lines,
         &step_table,
     );
-    let result = ci_log_shell_result(&command);
+    let mut attempts = 1u32;
+    let mut result = ci_log_shell_result(&command);
+    while attempts < CI_LOG_TRANSIENT_MAX_ATTEMPTS
+        && ci_log_marker(&ci_status_shell_stream(&result, "stderr"), CI_LOG_FAILURE_MARKER)
+            .is_some_and(|_| {
+                ci_log_is_transient_failure(&ci_status_truncate_for_error(
+                    &ci_status_shell_stream(&result, "stderr"),
+                    400,
+                ))
+            })
+    {
+        std::thread::sleep(std::time::Duration::from_millis(
+            CI_LOG_TRANSIENT_BACKOFF_MS * attempts as u64,
+        ));
+        attempts += 1;
+        result = ci_log_shell_result(&command);
+    }
     if result.get("timed_out").and_then(Value::as_bool) == Some(true) {
         return err_json(
             "ci-log",
@@ -7598,6 +7634,7 @@ pub(super) fn ci_log(body: &Value) -> u64 {
             "error": format!("gh exited {} reading the log of {} run {}", code, repo, run_id),
             "detail": detail,
             "repo": repo, "run_id": run_id, "job_id": job_id,
+            "attempts": attempts,
         });
         if let Some(error_code) = error_code {
             reply["error_code"] = json!(error_code);
@@ -7749,6 +7786,7 @@ pub(super) fn ci_log(body: &Value) -> u64 {
                 tail_lines
             ));
         }
+        data["attempts"] = json!(attempts);
         return pack(json!({ "ok": true, "verb": "ci-log", "data": data }).to_string());
     }
     let truncated = truncated_by.is_some() || lines.len() < matched;
@@ -7784,6 +7822,7 @@ pub(super) fn ci_log(body: &Value) -> u64 {
         "lines": lines,
         "step_labels": step_labels,
         "transport": "gh_cli",
+        "attempts": attempts,
     });
     if lines.is_empty() {
         let hint = if matched == 0 && filtered {
