@@ -1,6 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 
-use crate::wasm_dispatch::{host_now_ms, host_read, host_write};
+use crate::wasm_dispatch::{host_cas_write, host_now_ms, host_read, host_write};
 use serde_json::{json, Value};
 
 const MAX_ENTRIES: usize = 500;
@@ -31,43 +31,56 @@ pub fn record(
     output_bytes: Option<u64>,
 ) -> String {
     let path = ledger_path(cwd);
-    let existing = host_read(&path).unwrap_or_default();
-    let mut list: Vec<Value> = if existing.trim().is_empty() {
-        vec![]
-    } else {
-        serde_json::from_str::<Value>(&existing)
-            .ok()
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default()
-    };
-    let ts = now_ms();
-    let seq = list.len() as u64;
-    let dispatch_id = format!("{}-{}-{:x}", ts, seq, {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        verb.hash(&mut h);
-        fingerprint.hash(&mut h);
-        ts.hash(&mut h);
-        h.finish()
-    });
-    let entry = json!({
-        "dispatch_id": dispatch_id,
-        "verb": verb,
-        "fingerprint": fingerprint,
-        "ts": ts,
-        "exit_code": exit_code,
-        "output_bytes": output_bytes,
-        "session_id": session_id,
-    });
-    list.push(entry);
-    if list.len() > MAX_ENTRIES {
-        let drop = list.len() - MAX_ENTRIES;
-        list.drain(0..drop);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let existing = host_read(&path).unwrap_or_default();
+        let mut list: Vec<Value> = if existing.trim().is_empty() {
+            vec![]
+        } else {
+            serde_json::from_str::<Value>(&existing)
+                .ok()
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+        };
+        let ts = now_ms();
+        let seq = list.len() as u64;
+        let dispatch_id = format!("{}-{}-{:x}", ts, seq, {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            verb.hash(&mut h);
+            fingerprint.hash(&mut h);
+            ts.hash(&mut h);
+            h.finish()
+        });
+        list.push(json!({
+            "dispatch_id": dispatch_id,
+            "verb": verb,
+            "fingerprint": fingerprint,
+            "ts": ts,
+            "exit_code": exit_code,
+            "output_bytes": output_bytes,
+            "session_id": session_id,
+        }));
+        if list.len() > MAX_ENTRIES {
+            let drop = list.len() - MAX_ENTRIES;
+            list.drain(0..drop);
+        }
+        let serialized = Value::Array(list).to_string();
+        match host_cas_write(&path, &existing, &serialized) {
+            CAS_SWAPPED => return dispatch_id,
+            CAS_MISMATCH if attempt < CAS_MAX_ATTEMPTS => continue,
+            _ => {
+                host_write(&path, &serialized);
+                return dispatch_id;
+            }
+        }
     }
-    let serialized = Value::Array(list).to_string();
-    host_write(&path, &serialized);
-    dispatch_id
 }
+
+const CAS_SWAPPED: u32 = 1;
+const CAS_MISMATCH: u32 = 2;
+const CAS_MAX_ATTEMPTS: u32 = 16;
 
 pub fn subagent_running_count(
     cwd: &str,
