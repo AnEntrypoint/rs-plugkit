@@ -265,6 +265,11 @@ pub(super) fn compact_dual_reply(body: &Value, query: &str, k: u32, raw: Value) 
     let mut reply = compact_dual_hits(body, query, k, &raw, &opts);
     if let Some(map) = reply.as_object_mut() {
         map.extend(channels);
+        for key in ["vector_hits", "bm25_hits"] {
+            if map.get(key).and_then(Value::as_array).is_some_and(Vec::is_empty) {
+                map.remove(key);
+            }
+        }
     }
     reply
 }
