@@ -1051,11 +1051,15 @@ pub fn automatic_replay(session_id: Option<&str>) -> Value {
             *dropped.entry(reason).or_default() += 1;
             continue;
         }
-        let quality = observation.quality.unwrap_or(if observation.succeeded() { 1.0 } else { 0.0 });
+        let Some(quality) = observation.quality else {
+            *dropped.entry("unscored").or_default() += 1;
+            continue;
+        };
         let cost = observation.prd_open_count.unwrap_or(0)
             + observation.mutable_open_count.unwrap_or(0)
             + 1;
-        replays.push(json!({ "dispatch_id": observation.dispatch_id, "verb": observation.verb, "fingerprint": observation.fingerprint, "score": quality, "cost": cost }));
+        let replay_score = quality - DEFAULT_CYCLE_BETA1 * cost as f64;
+        replays.push(json!({ "dispatch_id": observation.dispatch_id, "verb": observation.verb, "fingerprint": observation.fingerprint, "score": replay_score, "quality": quality, "cost": cost }));
     }
     if replays.is_empty() {
         return json!({ "ok": true, "selection": Value::Null, "replay_count": 0, "observations": observations.len(), "dropped": dropped, "replays": [] });
@@ -1066,7 +1070,7 @@ pub fn automatic_replay(session_id: Option<&str>) -> Value {
         .sum::<f64>();
     let selected = if replays
         .iter()
-        .any(|entry| entry.get("score").and_then(Value::as_f64) == Some(0.0))
+        .any(|entry| entry.get("quality").and_then(Value::as_f64) == Some(0.0))
     {
         "replay-recorded-successes-first"
     } else {
@@ -1075,6 +1079,18 @@ pub fn automatic_replay(session_id: Option<&str>) -> Value {
     let replay_count = replays.len();
     replays.truncate(AUTOMATIC_REPLAY_SAMPLE);
     json!({ "ok": true, "selection": selected, "score": score, "replay_count": replay_count, "observations": observations.len(), "dropped": dropped, "replays": replays })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn persisted_cycle_result(session_id: Option<&str>) -> Value {
+    let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
+        return Value::Null;
+    };
+    crate::pkfs::read_to_string(&format!(
+        ".gm/dream-rsi/{session_id}/{CYCLE_RESULT_FILE}.json"
+    ))
+    .and_then(|raw| serde_json::from_str(&raw).ok())
+    .unwrap_or(Value::Null)
 }
 
 #[cfg(target_arch = "wasm32")]
