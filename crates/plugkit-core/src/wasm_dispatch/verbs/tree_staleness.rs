@@ -1,5 +1,6 @@
-use super::{body_cwd, git_call, host_now_ms, pack, unpack_to_value};
+use super::{body_cwd, git_call, pack, unpack_to_value};
 use serde_json::{json, Value};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const STALE_FETCH_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -47,7 +48,8 @@ fn fetched_ago_ms(git_dir: &str) -> Option<u64> {
         .get("mtime_ms")
         .or_else(|| stat.get("mtimeMs"))
         .and_then(Value::as_f64)? as u64;
-    Some(host_now_ms().saturating_sub(mtime))
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
+    Some(now.saturating_sub(mtime))
 }
 
 pub(super) fn tree_staleness(body: &Value) -> Option<Value> {
