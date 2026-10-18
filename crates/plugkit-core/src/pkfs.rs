@@ -123,6 +123,16 @@ pub fn remove_file(path: &str) -> bool {
     crate::wasm_dispatch::host_remove_file_never_directory(&anchor(path))
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn remove_tree(path: &str) -> bool {
+    crate::wasm_dispatch::host_remove_tree(&anchor(path))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn remove_tree(_path: &str) -> bool {
+    false
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_to_string(_path: &str) -> Option<String> {
     None

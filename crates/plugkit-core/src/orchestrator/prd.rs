@@ -2255,6 +2255,13 @@ fn dispatch_id_in_text(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn prune_receipts(id: &str) {
+    let plain_segment = !id.is_empty() && id != "." && id != ".." && !id.contains(['/', '\\']);
+    if plain_segment {
+        crate::pkfs::remove_tree(&format!(".gm/receipts/{}", id));
+    }
+}
+
 pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -2831,7 +2838,10 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                     &resolved_status,
                     resolution.as_deref(),
                 ) {
-                    Ok(entry) => Some(entry),
+                    Ok(entry) => {
+                        prune_receipts(&id_target);
+                        Some(entry)
+                    }
                     Err(reason) => {
                         return (
                             String::new(),

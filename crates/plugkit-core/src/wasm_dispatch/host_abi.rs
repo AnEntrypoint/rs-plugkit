@@ -531,6 +531,24 @@ pub fn host_remove_file_never_directory(path: &str) -> bool {
     rc != 0
 }
 
+pub fn host_remove_tree(path: &str) -> bool {
+    let Ok(target) = serde_json::to_string(path) else {
+        return false;
+    };
+    let code = format!(
+        "const fs=require('fs');try{{fs.rmSync({target},{{recursive:true,force:true}});process.stdout.write(JSON.stringify({{ok:true}}));}}catch(e){{process.stdout.write(JSON.stringify({{ok:false}}));}}"
+    );
+    let options = json!({ "timeoutMs": 15_000 }).to_string();
+    let packed = unsafe {
+        host_exec_js(code.as_ptr(), code.len() as u32, options.as_ptr(), options.len() as u32)
+    };
+    unpack_to_string(packed)
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|envelope| envelope.get("stdout").and_then(Value::as_str).map(str::to_string))
+        .and_then(|stdout| serde_json::from_str::<Value>(&stdout).ok())
+        .is_some_and(|result| result.get("ok").and_then(Value::as_bool) == Some(true))
+}
+
 pub fn host_kv_read(namespace: &str, key: &str) -> Option<String> {
     if key.is_empty() {
         return None;
