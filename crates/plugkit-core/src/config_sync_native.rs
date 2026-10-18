@@ -118,7 +118,7 @@ enum ProbeDecision {
 }
 
 fn probe_decision(rec: &RemoteRecord, now: u64) -> ProbeDecision {
-    if rec.remote_sha.is_empty() {
+    if rec.remote_sha.is_empty() || rec.last_probe_ms > now {
         return ProbeDecision::Due;
     }
     if rec.consecutive_failures > 0 {
