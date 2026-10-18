@@ -726,3 +726,24 @@ pub fn retire_to_log(
     remove_item(store, id);
     Ok(entry)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::item_stem;
+
+    #[test]
+    fn item_stem_keeps_plain_ids_verbatim() {
+        assert_eq!(item_stem("row-1"), "row-1");
+    }
+
+    #[test]
+    fn item_stem_separates_ids_that_fold_to_one_name() {
+        assert_ne!(item_stem("a/b"), item_stem("a-b"));
+        assert!(item_stem("a/b").starts_with("a-b-"));
+    }
+
+    #[test]
+    fn item_stem_maps_blank_ids_to_placeholder() {
+        assert_eq!(item_stem("   "), "_no-id");
+    }
+}
