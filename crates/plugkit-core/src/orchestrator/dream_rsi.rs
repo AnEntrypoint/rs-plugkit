@@ -243,31 +243,56 @@ fn evaluate_policy(
     beta1: f64,
     beta2: f64,
 ) -> Result<Value, String> {
+    let budget = match policy.stop.as_deref() {
+        Some("exhausted") => usize::MAX,
+        _ => policy.max_nodes,
+    };
+    let wave_size = policy.group_size.map_or(1, |size| size as usize).max(1);
+    let attempts_per_node = policy.attempt.unwrap_or(1).max(1);
     let mut queue = VecDeque::from(policy.roots.clone());
     let mut observed = BTreeSet::new();
     let mut quality = f64::NEG_INFINITY;
     let mut cost = 0_u64;
-    let mut rounds = BTreeSet::new();
-    while let Some(id) = queue.pop_front() {
-        if observed.len() >= policy.max_nodes || !observed.insert(id.clone()) {
-            continue;
-        }
-        let node = world.nodes.get(&id).ok_or_else(|| {
-            format!(
-                "dream-replay policy {} asks world {} for unobserved node {id}",
-                policy.id, world.id
-            )
-        })?;
-        quality = quality.max(node.score);
-        cost = cost
-            .checked_add(node.cost)
-            .ok_or_else(|| "dream-replay cost overflow".to_string())?;
-        rounds.insert(node.round);
-        for child in &node.children {
-            if !observed.contains(child) {
-                queue.push_back(child.clone());
+    let mut retries = 0_u64;
+    let mut recorded_rounds = BTreeSet::new();
+    let mut waves = 0_usize;
+    let mut converged = false;
+    while !queue.is_empty() && observed.len() < budget && !converged {
+        let quality_before_wave = quality;
+        let mut expanded_in_wave = 0_usize;
+        while expanded_in_wave < wave_size && observed.len() < budget {
+            let Some(id) = queue.pop_front() else { break };
+            if !observed.insert(id.clone()) {
+                continue;
+            }
+            let node = world.nodes.get(&id).ok_or_else(|| {
+                format!(
+                    "dream-replay policy {} asks world {} for unobserved node {id}",
+                    policy.id, world.id
+                )
+            })?;
+            expanded_in_wave += 1;
+            quality = quality.max(node.score);
+            let node_attempts = if node.score < 1.0 { attempts_per_node } else { 1 };
+            retries += node_attempts - 1;
+            cost = node
+                .cost
+                .checked_mul(node_attempts)
+                .and_then(|charged| cost.checked_add(charged))
+                .ok_or_else(|| "dream-replay cost overflow".to_string())?;
+            recorded_rounds.insert(node.round);
+            for child in &node.children {
+                if !observed.contains(child) {
+                    queue.push_back(child.clone());
+                }
             }
         }
+        if expanded_in_wave > 0 {
+            waves += 1;
+        }
+        converged = policy.stop.as_deref() == Some("converged")
+            && waves > 1
+            && quality <= quality_before_wave;
     }
     if observed.is_empty() {
         return Err(format!(
@@ -275,15 +300,17 @@ fn evaluate_policy(
             policy.id, world.id
         ));
     }
-    let attempts = observed.len() as f64;
-    let parallelism_bonus = attempts / rounds.len().max(1) as f64;
+    let rounds = if policy.group_size.is_some() { waves } else { recorded_rounds.len() };
+    let parallelism_bonus = observed.len() as f64 / rounds.max(1) as f64;
     let replay_score = quality - beta1 * cost as f64 + beta2 * parallelism_bonus;
     Ok(json!({
         "world_id": world.id,
         "observed_node_ids": observed.into_iter().collect::<Vec<_>>(),
         "quality": quality,
         "cost": cost,
-        "rounds": rounds.len(),
+        "retries": retries,
+        "rounds": rounds,
+        "converged": converged,
         "parallelism_bonus": parallelism_bonus,
         "replay_score": replay_score,
     }))
@@ -539,6 +566,386 @@ pub struct ObservedDispatch<'a> {
 }
 
 #[cfg(target_arch = "wasm32")]
+const OBSERVATIONS_LIVE_CAP: usize = 256;
+
+#[cfg(target_arch = "wasm32")]
+const OBSERVATIONS_ARCHIVE_CHUNK: usize = 64;
+
+#[cfg(target_arch = "wasm32")]
+const OBSERVATIONS_ARCHIVE_MAX_CHUNKS: usize = 32;
+
+#[cfg(target_arch = "wasm32")]
+const OBSERVATIONS_ARCHIVE_PREFIX: &str = "observations-archive-";
+
+#[cfg(target_arch = "wasm32")]
+fn dir_entry_names(dir: &str) -> Vec<String> {
+    let Some(Value::Array(entries)) = crate::pkfs::readdir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .as_str()
+                .or_else(|| entry.get("name").and_then(Value::as_str))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn archive_names(session_id: &str) -> Vec<String> {
+    let mut names: Vec<String> = dir_entry_names(&format!(".gm/dream-rsi/{session_id}"))
+        .into_iter()
+        .filter(|name| name.starts_with(OBSERVATIONS_ARCHIVE_PREFIX) && name.ends_with(".json"))
+        .collect();
+    names.sort_by_key(|name| {
+        name.trim_start_matches(OBSERVATIONS_ARCHIVE_PREFIX)
+            .trim_end_matches(".json")
+            .parse::<i64>()
+            .unwrap_or(0)
+    });
+    names
+}
+
+#[cfg(target_arch = "wasm32")]
+fn archive_observations(session_id: &str, ts: i64, records: &[ObservationRecord]) -> bool {
+    let Ok(serialized) = serde_json::to_string(records) else {
+        return false;
+    };
+    let path = format!(".gm/dream-rsi/{session_id}/{OBSERVATIONS_ARCHIVE_PREFIX}{ts}.json");
+    if !crate::pkfs::write(&path, &serialized) {
+        return false;
+    }
+    let names = archive_names(session_id);
+    for stale in names.iter().take(names.len().saturating_sub(OBSERVATIONS_ARCHIVE_MAX_CHUNKS)) {
+        crate::pkfs::remove_file(&format!(".gm/dream-rsi/{session_id}/{stale}"));
+    }
+    true
+}
+
+#[cfg(target_arch = "wasm32")]
+fn session_history(session_id: &str) -> Vec<ObservationRecord> {
+    let mut records: Vec<ObservationRecord> = archive_names(session_id)
+        .iter()
+        .filter_map(|name| crate::pkfs::read_to_string(&format!(".gm/dream-rsi/{session_id}/{name}")))
+        .flat_map(|raw| read_observations(&raw))
+        .collect();
+    if let Some(raw) = crate::pkfs::read_to_string(&format!(".gm/dream-rsi/{session_id}/observations.json")) {
+        records.extend(read_observations(&raw));
+    }
+    records
+}
+
+#[cfg(target_arch = "wasm32")]
+const SPOOL_OUT_DIR: &str = ".gm/exec-spool/out";
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct LedgerCheck {
+    entries: std::collections::HashMap<String, Value>,
+    spool_out_names: Option<Vec<String>>,
+    spool_out_ids_by_session: std::collections::HashMap<String, BTreeSet<String>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, PartialEq)]
+enum Confirmation {
+    Ledger,
+    SpoolOut,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn reply_dispatch_ids(text: &str) -> impl Iterator<Item = String> + '_ {
+    const NEEDLE: &str = "\"dispatch_id\":\"";
+    text.match_indices(NEEDLE).filter_map(move |(start, _)| {
+        let rest = &text[start + NEEDLE.len()..];
+        rest.find('"').map(|end| rest[..end].to_owned())
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+impl LedgerCheck {
+    fn load() -> Self {
+        let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+        let raw = crate::pkfs::read_to_string(&crate::dispatch_ledger::ledger_path(&cwd)).unwrap_or_default();
+        let entries = serde_json::from_str::<Vec<Value>>(&raw)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|entry| Some((entry.get("dispatch_id")?.as_str()?.to_owned(), entry)))
+            .collect();
+        LedgerCheck { entries, ..Default::default() }
+    }
+
+    fn spool_out_confirms(&mut self, session_id: &str, dispatch_id: &str) -> bool {
+        if !self.spool_out_ids_by_session.contains_key(session_id) {
+            let names = self.spool_out_names.get_or_insert_with(|| {
+                dir_entry_names(SPOOL_OUT_DIR).into_iter().filter(|name| name.ends_with(".json")).collect()
+            });
+            let marker = format!("-{session_id}-");
+            let ids = names
+                .iter()
+                .filter(|name| name.contains(&marker))
+                .filter_map(|name| crate::pkfs::read_to_string(&format!("{SPOOL_OUT_DIR}/{name}")))
+                .flat_map(|text| reply_dispatch_ids(&text).collect::<Vec<_>>())
+                .collect();
+            self.spool_out_ids_by_session.insert(session_id.to_owned(), ids);
+        }
+        self.spool_out_ids_by_session.get(session_id).is_some_and(|ids| ids.contains(dispatch_id))
+    }
+
+    fn verdict(&mut self, session_id: &str, record: &ObservationRecord) -> Result<Confirmation, &'static str> {
+        let dispatch_id = record.dispatch_id.as_deref().ok_or("no_dispatch_id")?;
+        let Some(entry) = self.entries.get(dispatch_id) else {
+            return if self.spool_out_confirms(session_id, dispatch_id) {
+                Ok(Confirmation::SpoolOut)
+            } else {
+                Err("unconfirmed_by_ledger_or_spool_out")
+            };
+        };
+        if entry.get("session_id").and_then(Value::as_str) != Some(session_id) {
+            return Err("ledger_session_mismatch");
+        }
+        if entry.get("exit_code").and_then(Value::as_i64) != record.exit_code {
+            return Err("ledger_exit_mismatch");
+        }
+        if entry.get("verb").and_then(Value::as_str) != record.verb.as_deref() {
+            return Err("ledger_verb_mismatch");
+        }
+        Ok(Confirmation::Ledger)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct HistoryScan {
+    worlds: Vec<World>,
+    sessions: usize,
+    observations: usize,
+    ledger_confirmed: usize,
+    spool_out_confirmed: usize,
+    dropped: BTreeMap<&'static str, usize>,
+    latest: Option<(i64, String)>,
+}
+
+#[cfg(target_arch = "wasm32")]
+const HISTORY_ROOT_NODE: &str = "start";
+
+#[cfg(target_arch = "wasm32")]
+fn session_world(session_id: &str, records: &[ObservationRecord]) -> Option<World> {
+    let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
+    let mut quality_sums: BTreeMap<String, f64> = BTreeMap::new();
+    let mut previous = HISTORY_ROOT_NODE.to_string();
+    nodes.insert(previous.clone(), Node { id: previous.clone(), score: 0.0, cost: 0, round: 0, children: Vec::new() });
+    for record in records {
+        let Some(verb) = record.verb.clone() else { continue };
+        let quality = record.quality.unwrap_or(if record.succeeded() { 1.0 } else { 0.0 });
+        let next_round = nodes.len() as u64;
+        let node = nodes.entry(verb.clone()).or_insert_with(|| Node {
+            id: verb.clone(),
+            score: 0.0,
+            cost: 0,
+            round: next_round,
+            children: Vec::new(),
+        });
+        node.cost += 1;
+        *quality_sums.entry(verb.clone()).or_default() += quality;
+        if let Some(parent) = nodes.get_mut(&previous) {
+            if !parent.children.contains(&verb) {
+                parent.children.push(verb.clone());
+            }
+        }
+        previous = verb;
+    }
+    for (verb, sum) in quality_sums {
+        if let Some(node) = nodes.get_mut(&verb) {
+            node.score = sum / node.cost.max(1) as f64;
+        }
+    }
+    (nodes.len() > 1).then(|| World { id: format!("session:{session_id}"), nodes })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn scan_history() -> HistoryScan {
+    let mut ledger = LedgerCheck::load();
+    let mut scan = HistoryScan::default();
+    let mut sessions = dir_entry_names(".gm/dream-rsi");
+    sessions.retain(|name| name != PROJECT_WIDE_MARKER_SESSION && !name.starts_with('.'));
+    sessions.sort();
+    for session_id in sessions {
+        let mut records = session_history(&session_id);
+        if records.is_empty() {
+            continue;
+        }
+        scan.sessions += 1;
+        scan.observations += records.len();
+        records.retain(|record| match ledger.verdict(&session_id, record) {
+            Ok(Confirmation::Ledger) => {
+                scan.ledger_confirmed += 1;
+                true
+            }
+            Ok(Confirmation::SpoolOut) => {
+                scan.spool_out_confirmed += 1;
+                true
+            }
+            Err(reason) => {
+                *scan.dropped.entry(reason).or_default() += 1;
+                false
+            }
+        });
+        records.sort_by_key(|record| record.ts.unwrap_or(0));
+        if let Some(newest) = records.last() {
+            let candidate = (newest.ts.unwrap_or(0), newest.dispatch_id.clone().unwrap_or_default());
+            if scan.latest.as_ref().map_or(true, |latest| candidate > *latest) {
+                scan.latest = Some(candidate);
+            }
+        }
+        if let Some(world) = session_world(&session_id, &records) {
+            scan.worlds.push(world);
+        }
+    }
+    scan
+}
+
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_INCUMBENT_POLICY_ID: &str = "pi0-default";
+
+#[cfg(target_arch = "wasm32")]
+fn incumbent_policy(owner: &str) -> Policy {
+    active_strategy(Some(owner))
+        .get("policy")
+        .and_then(|policy| parse_policy(policy).ok())
+        .filter(|policy| policy.roots.iter().all(|root| root == HISTORY_ROOT_NODE))
+        .unwrap_or_else(|| Policy {
+            id: DEFAULT_INCUMBENT_POLICY_ID.to_string(),
+            roots: vec![HISTORY_ROOT_NODE.to_string()],
+            max_nodes: 16,
+            attempt: None,
+            group_size: None,
+            stop: None,
+        })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn dream_candidates(incumbent: &Policy) -> Vec<Policy> {
+    let variant = |label: &str, edit: &dyn Fn(&mut Policy)| {
+        let mut candidate = incumbent.clone();
+        edit(&mut candidate);
+        candidate.id = format!("{}.{label}", incumbent.id);
+        candidate
+    };
+    let mut candidates = vec![
+        incumbent.clone(),
+        variant("half-nodes", &|policy: &mut Policy| policy.max_nodes = (policy.max_nodes / 2).max(1)),
+        variant("double-nodes", &|policy: &mut Policy| policy.max_nodes = policy.max_nodes.saturating_mul(2)),
+        variant("group-2", &|policy: &mut Policy| policy.group_size = Some(2)),
+        variant("group-4", &|policy: &mut Policy| policy.group_size = Some(4)),
+        variant("stop-converged", &|policy: &mut Policy| policy.stop = Some("converged".into())),
+        variant("stop-exhausted", &|policy: &mut Policy| policy.stop = Some("exhausted".into())),
+        variant("attempt-2", &|policy: &mut Policy| policy.attempt = Some(2)),
+    ];
+    let mut seen = BTreeSet::new();
+    candidates.retain(|policy| {
+        seen.insert((policy.roots.clone(), policy.max_nodes, policy.group_size, policy.stop.clone(), policy.attempt.unwrap_or(1).max(1)))
+    });
+    candidates
+}
+
+#[cfg(target_arch = "wasm32")]
+fn policy_json(policy: &Policy) -> Value {
+    json!({
+        "id": policy.id, "roots": policy.roots, "max_nodes": policy.max_nodes,
+        "group_size": policy.group_size, "stop": policy.stop, "attempt": policy.attempt,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub const DEFAULT_CYCLE_BETA1: f64 = 0.01;
+
+#[cfg(target_arch = "wasm32")]
+pub const DEFAULT_CYCLE_BETA2: f64 = 0.05;
+
+#[cfg(target_arch = "wasm32")]
+pub struct HistoryRound {
+    pub latest_dispatch_id: Option<String>,
+    pub summary: Value,
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn history_round(owner: &str, beta1: f64, beta2: f64) -> Result<HistoryRound, String> {
+    let scan = scan_history();
+    let latest_dispatch_id = scan.latest.as_ref().map(|(_, id)| id.clone());
+    let incumbent = incumbent_policy(owner);
+    let candidates = dream_candidates(&incumbent);
+    let mut defects: Vec<&str> = Vec::new();
+    let mut post_selected_ge_baseline = true;
+    let incumbent_present = candidates.iter().any(|policy| policy.id == incumbent.id);
+    if !incumbent_present {
+        return Err("dream-replay-cycle precondition failed: incumbent absent from candidates".into());
+    }
+    let history = json!({
+        "sessions": scan.sessions, "observations": scan.observations,
+        "ledger_confirmed": scan.ledger_confirmed, "spool_out_confirmed": scan.spool_out_confirmed,
+        "dropped": scan.dropped, "worlds": scan.worlds.len(),
+    });
+    if scan.worlds.is_empty() {
+        return Ok(HistoryRound {
+            latest_dispatch_id: latest_dispatch_id.clone(),
+            summary: json!({ "history": history, "incumbent_policy_id": incumbent.id, "candidates": candidates.len() }),
+        });
+    }
+    let candidate_count = candidates.len();
+    let replay = evaluate_worlds(incumbent.id.clone(), candidates.clone(), scan.worlds, beta1, beta2)?;
+    let baseline_score = replay.get("baseline_score").and_then(Value::as_f64).ok_or("dream-replay-cycle baseline score missing")?;
+    let mut selected_id = replay.get("selected_policy_id").and_then(Value::as_str).unwrap_or(&incumbent.id).to_string();
+    let mut selected_score = replay.get("selected_score").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY);
+    if !(selected_score >= baseline_score) {
+        post_selected_ge_baseline = false;
+        defects.push("postcondition_selected_below_baseline");
+        selected_id = incumbent.id.clone();
+        selected_score = baseline_score;
+    }
+    let mut rankings: Vec<Value> = replay
+        .get("rankings")
+        .and_then(Value::as_array)
+        .map(|rankings| {
+            rankings
+                .iter()
+                .map(|ranking| json!({ "policy_id": ranking.get("policy_id"), "score": ranking.get("score"), "cost": ranking.get("cost") }))
+                .collect()
+        })
+        .unwrap_or_default();
+    if rankings.len() != candidate_count {
+        defects.push("postcondition_rankings_incomplete");
+    }
+    rankings.sort_by(|left, right| {
+        right.get("score").and_then(Value::as_f64).partial_cmp(&left.get("score").and_then(Value::as_f64)).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let selected_policy = candidates.iter().find(|policy| policy.id == selected_id).map(policy_json);
+    let improved = selected_id != incumbent.id;
+    Ok(HistoryRound {
+        latest_dispatch_id,
+        summary: json!({
+            "selection": if improved { "propose-challenger" } else { "keep-incumbent" },
+            "incumbent_policy_id": incumbent.id,
+            "incumbent_included": incumbent_present,
+            "selected_policy_id": selected_id,
+            "selected_policy": selected_policy,
+            "baseline_score": baseline_score,
+            "selected_score": selected_score,
+            "improved": improved,
+            "never_worse": selected_score >= baseline_score,
+            "candidates": candidate_count,
+            "rankings": rankings,
+            "beta1": beta1,
+            "beta2": beta2,
+            "history": history,
+            "contract": { "pre_incumbent_in_candidates": incumbent_present, "post_selected_ge_baseline": post_selected_ge_baseline, "defects": defects },
+        }),
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
     let ObservedDispatch {
         session_id,
@@ -558,8 +965,6 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
                 | "phase-status"
                 | "transition"
                 | "transition-revert"
-                | "prd-add"
-                | "prd-resolve"
                 | "prd-list"
                 | "prd-defer"
                 | "mutable-add"
@@ -600,8 +1005,13 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
         error_code: failure.error_code,
         no_match: failure.no_match,
     });
-    if observations.len() > 256 {
-        observations.drain(0..observations.len() - 256);
+    if observations.len() > OBSERVATIONS_LIVE_CAP + OBSERVATIONS_ARCHIVE_CHUNK
+        && archive_observations(session_id, ts, &observations[..OBSERVATIONS_ARCHIVE_CHUNK])
+    {
+        observations.drain(0..OBSERVATIONS_ARCHIVE_CHUNK);
+    }
+    if observations.len() > OBSERVATIONS_LIVE_CAP * 2 {
+        observations.drain(0..observations.len() - OBSERVATIONS_LIVE_CAP);
     }
     let _ = crate::pkfs::write(
         &path,
@@ -724,47 +1134,30 @@ pub fn automatic_replay(session_id: Option<&str>) -> Value {
     let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
         return Value::Null;
     };
-    let observations_path = format!(".gm/dream-rsi/{session_id}/observations.json");
-    let Some(raw) = crate::pkfs::read_to_string(&observations_path) else {
-        return Value::Null;
-    };
-    let observations = read_observations(&raw);
+    let observations = session_history(session_id);
     if observations.is_empty() {
         return Value::Null;
     }
-    let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let mut ledger = LedgerCheck::load();
+    let mut dropped: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut replays = Vec::new();
-    for observation in observations.iter().rev().take(8) {
-        let is_failure = !observation.succeeded();
-        if is_failure && !observation.is_gate_drift_failure() {
+    for observation in observations.iter().rev() {
+        if !observation.succeeded() && !observation.is_gate_drift_failure() {
+            *dropped.entry("non_gate_failure").or_default() += 1;
             continue;
         }
-        let Some(dispatch_id) = observation.dispatch_id.as_deref() else {
-            continue;
-        };
-        let Some(dispatch) = crate::dispatch_ledger::lookup(&cwd, dispatch_id) else {
-            continue;
-        };
-        if dispatch.get("session_id").and_then(Value::as_str) != Some(session_id) {
+        if let Err(reason) = ledger.verdict(session_id, observation) {
+            *dropped.entry(reason).or_default() += 1;
             continue;
         }
-        let Some(exit_code) = dispatch.get("exit_code").and_then(Value::as_i64) else {
-            continue;
-        };
-        let Some(verb) = dispatch.get("verb").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(fingerprint) = dispatch.get("fingerprint").and_then(Value::as_str) else {
-            continue;
-        };
-        let quality = observation.quality.unwrap_or(if exit_code == 0 { 1.0 } else { 0.0 });
+        let quality = observation.quality.unwrap_or(if observation.succeeded() { 1.0 } else { 0.0 });
         let cost = observation.prd_open_count.unwrap_or(0)
             + observation.mutable_open_count.unwrap_or(0)
             + 1;
-        replays.push(json!({ "dispatch_id": dispatch_id, "verb": verb, "fingerprint": fingerprint, "score": quality, "cost": cost }));
+        replays.push(json!({ "dispatch_id": observation.dispatch_id, "verb": observation.verb, "fingerprint": observation.fingerprint, "score": quality, "cost": cost }));
     }
     if replays.is_empty() {
-        return Value::Null;
+        return json!({ "ok": true, "selection": Value::Null, "replay_count": 0, "observations": observations.len(), "dropped": dropped, "replays": [] });
     }
     let score = replays
         .iter()
@@ -778,8 +1171,13 @@ pub fn automatic_replay(session_id: Option<&str>) -> Value {
     } else {
         "continue-current-exploration"
     };
-    json!({ "ok": true, "selection": selected, "score": score, "replays": replays })
+    let replay_count = replays.len();
+    replays.truncate(AUTOMATIC_REPLAY_SAMPLE);
+    json!({ "ok": true, "selection": selected, "score": score, "replay_count": replay_count, "observations": observations.len(), "dropped": dropped, "replays": replays })
 }
+
+#[cfg(target_arch = "wasm32")]
+const AUTOMATIC_REPLAY_SAMPLE: usize = 8;
 
 #[cfg(target_arch = "wasm32")]
 pub fn propose_strategy() -> Result<Value, String> {

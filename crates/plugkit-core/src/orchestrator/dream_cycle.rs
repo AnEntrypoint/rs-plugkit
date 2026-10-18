@@ -38,41 +38,48 @@ fn evaluate(content: &str) -> Result<Value, String> {
     }
     let cycle_id = optional_id(&body, "cycle_id", 128)?;
     let after = optional_id(&body, "after_dispatch_id", 512)?;
-    let replay = super::dream_rsi::automatic_replay(Some(owner));
-    let latest = replay
-        .get("replays")
-        .and_then(Value::as_array)
-        .and_then(|replays| replays.first())
-        .and_then(|entry| entry.get("dispatch_id"))
-        .and_then(Value::as_str);
+    let beta1 = optional_beta(&body, "beta1", super::dream_rsi::DEFAULT_CYCLE_BETA1)?;
+    let beta2 = optional_beta(&body, "beta2", super::dream_rsi::DEFAULT_CYCLE_BETA2)?;
+    let round = super::dream_rsi::history_round(owner, beta1, beta2)?;
+    let latest = round.latest_dispatch_id.as_deref();
     let reason = match latest {
         None => Some("no-verified-observations"),
         Some(latest) if Some(latest) == after => Some("no-new-verified-observations"),
+        Some(_) if round.summary.get("rankings").is_none() => Some("no-replayable-worlds"),
         Some(_) => None,
     };
     if let Some(reason) = reason {
         return Ok(json!({
             "ok": true, "kind": "observations", "status": "deferred",
-            "owner_session_id": owner, "cycle_id": cycle_id, "reason": reason
+            "owner_session_id": owner, "cycle_id": cycle_id, "reason": reason,
+            "history": round.summary.get("history"),
         }));
     }
+    let mut fields = round.summary;
+    fields["cycle_id"] = json!(cycle_id);
+    fields["last_dispatch_id"] = json!(latest);
     let replay_result_path = super::dream_rsi::persist_replay_result(
         super::dream_rsi::CYCLE_RESULT_FILE,
         "dream-replay-cycle",
-        json!({
-            "cycle_id": cycle_id,
-            "last_dispatch_id": latest,
-            "selection": replay.get("selection"),
-            "score": replay.get("score"),
-            "replay_count": replay.get("replays").and_then(Value::as_array).map(Vec::len),
-        }),
+        fields.clone(),
     );
     Ok(json!({
         "ok": true, "kind": "observations", "status": "replayed",
         "owner_session_id": owner, "cycle_id": cycle_id,
-        "last_dispatch_id": latest, "replay": replay,
+        "last_dispatch_id": latest, "cycle": fields,
         "replay_result_path": replay_result_path
     }))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn optional_beta(body: &Value, field: &str, default: f64) -> Result<f64, String> {
+    match body.get(field) {
+        None | Some(Value::Null) => Ok(default),
+        Some(raw) => raw
+            .as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .ok_or_else(|| format!("dream-replay-cycle {field} must be a non-negative finite number")),
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
