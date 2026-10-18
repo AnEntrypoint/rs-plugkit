@@ -1382,7 +1382,65 @@ pub(super) fn codesearch_exhaustive(
 
 pub(super) const GREP_OUTPUT_MODES: &[&str] = &["content", "files_with_matches", "count"];
 
-pub(super) const GREP_MODES: &[&str] = &["pattern", "comments"];
+pub(super) const GREP_MODES: &[&str] = &["pattern", "literal", "regex", "comments"];
+
+pub(super) const GREP_OUTPUT_MODE_ALIASES: &[(&str, &str)] = &[
+    ("content", "content"),
+    ("files", "files_with_matches"),
+    ("files_with_matches", "files_with_matches"),
+    ("count", "count"),
+];
+
+pub(super) fn grep_mode_overrides(
+    mode: &str,
+    body: &Value,
+) -> Result<(Option<bool>, Option<&'static str>), String> {
+    let flag = |name: &str| body.get(name).and_then(|v| v.as_bool());
+    let fixed = flag("fixed_strings").or_else(|| flag("fixedStrings")) == Some(true);
+    let regex_flag = flag("regex");
+    match mode {
+        "" | "pattern" | "comments" => Ok((None, None)),
+        "literal" if regex_flag == Some(true) => {
+            Err("mode \"literal\" and regex:true contradict each other -- pass one, not both".to_string())
+        }
+        "literal" => Ok((Some(false), None)),
+        "regex" if fixed || regex_flag == Some(false) => Err(
+            "mode \"regex\" contradicts fixed_strings:true / regex:false -- pass one, not both".to_string(),
+        ),
+        "regex" => Ok((Some(true), None)),
+        "dual" | "filename" => Err(format!(
+            "mode \"{mode}\" is a codesearch mode, not a grep mode -- dispatch codesearch \
+             {{\"query\":..., \"mode\":\"{mode}\"}}; grep modes are {}",
+            grep_mode_list()
+        )),
+        other => {
+            let Some((_, output_mode)) = GREP_OUTPUT_MODE_ALIASES.iter().find(|(alias, _)| *alias == other) else {
+                return Err(format!(
+                    "mode \"{other}\" is not a grep mode -- valid modes are {}. \"pattern\" (the default) \
+                     reads a pattern with regex metacharacters as a regex; \"literal\" matches it verbatim; \
+                     \"regex\" always compiles it; \"comments\" finds comment spans and needs no \"pattern\". \
+                     An output shape (\"content\", \"files\", \"files_with_matches\", \"count\") is accepted as \
+                     mode too and sets output_mode. Pass {{\"help\": true}} for the full parameter list.",
+                    grep_mode_list()
+                ));
+            };
+            let explicit = body
+                .get("output_mode")
+                .and_then(|v| v.as_str())
+                .or_else(|| body.get("outputMode").and_then(|v| v.as_str()));
+            match explicit {
+                Some(given) if given != *output_mode => Err(format!(
+                    "mode \"{other}\" sets output_mode \"{output_mode}\" but output_mode \"{given}\" was also passed -- pass one"
+                )),
+                _ => Ok((None, Some(*output_mode))),
+            }
+        }
+    }
+}
+
+fn grep_mode_list() -> String {
+    GREP_MODES.iter().map(|m| format!("\"{m}\"")).collect::<Vec<_>>().join(", ")
+}
 
 pub(super) const GREP_EXCLUDE_FIELDS: &[&str] = &["exclude", "exclude_glob", "exclude_globs"];
 
@@ -1440,7 +1498,12 @@ grep (alias \"rg\") is an exhaustive literal/regex scan of the tree. Every reply
                                                      listed and scanned like any other file. \"include_ignored\"
                                                      is an alias. .git is never listed either way.
   {\"mode\":\"pattern\"}                               scan for \"pattern\" (the default; naming it explicitly is
-                                                     always accepted)
+                                                     always accepted); a pattern with regex metacharacters
+                                                     is read as a regex
+  {\"mode\":\"literal\"}                               match the pattern verbatim (same as fixed_strings:true)
+  {\"mode\":\"regex\"}                                 always compile the pattern as a regex (same as regex:true)
+  {\"mode\":\"files\"}                                 an output shape named as mode sets output_mode: \"content\",
+                                                     \"files\" / \"files_with_matches\", \"count\"
   {\"mode\":\"comments\"}                              find comment spans instead of a pattern (no \"pattern\" needed)
 
 mode:\"comments\" -- one pass for every comment in the tree, column-1 and inline alike:
@@ -2010,21 +2073,14 @@ pub(super) fn grep(body: &Value) -> u64 {
         .unwrap_or(false);
     let want_comments = mode == "comments" || comments_flag;
     if let Some(refusal) = refuse_unknown_fields("grep", body, GREP_ACCEPTED_FIELDS) { return refusal; }
-    if !mode.is_empty() && !GREP_MODES.contains(&mode.as_str()) && !comments_flag {
-        return err(
-            "grep",
-            &format!(
-                "mode \"{mode}\" is not a grep mode -- valid modes are {}. \
-             \"pattern\" (the default) scans for a pattern; \"comments\" finds comment spans and \
-             needs no \"pattern\". Pass {{\"help\": true}} for the full parameter list.",
-                GREP_MODES
-                    .iter()
-                    .map(|m| format!("\"{m}\""))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ),
-        );
-    }
+    let (mode_regex, mode_output) = if comments_flag {
+        (None, None)
+    } else {
+        match grep_mode_overrides(&mode, body) {
+            Ok(overrides) => overrides,
+            Err(e) => return err("grep", &e),
+        }
+    };
     if want_comments {
         return grep_comments(&body, &cfg);
     }
@@ -2040,6 +2096,7 @@ pub(super) fn grep(body: &Value) -> u64 {
         .get("output_mode")
         .and_then(|v| v.as_str())
         .or_else(|| body.get("outputMode").and_then(|v| v.as_str()))
+        .or(mode_output)
         .unwrap_or("content");
     if !GREP_OUTPUT_MODES.contains(&output_mode) {
         return err(
@@ -2074,7 +2131,7 @@ pub(super) fn grep(body: &Value) -> u64 {
         .and_then(|v| v.as_bool())
         .or_else(|| body.get("fixedStrings").and_then(|v| v.as_bool()))
         .unwrap_or(false);
-    let regex_asked = body.get("regex").and_then(|v| v.as_bool());
+    let regex_asked = body.get("regex").and_then(|v| v.as_bool()).or(mode_regex);
     let auto_trigger = match (regex_asked, fixed_strings) {
         (None, false) => grep_regex_trigger(pattern),
         _ => None,
