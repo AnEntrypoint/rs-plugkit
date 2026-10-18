@@ -137,10 +137,6 @@ pub unsafe fn host_kv_query(ns_ptr: *const u8, ns_len: u32, q_ptr: *const u8, q_
     ))
 }
 
-pub unsafe fn host_vec_search(q_ptr: *const u8, q_len: u32, k: u32) -> u64 {
-    packed(wit::host_vec_search(&read_str(q_ptr, q_len), k))
-}
-
 pub unsafe fn host_vec_embed(
     text_ptr: *const u8,
     text_len: u32,

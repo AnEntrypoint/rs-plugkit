@@ -15,7 +15,7 @@ pub use host_abi::{
     host_kv_put, host_kv_query, host_kv_read, host_log, host_now_ms, host_plugin_call, host_read,
     host_remove_file_never_directory, host_stat, host_stat_is_directory, host_task,
     host_task_proc, host_vec_embed,
-    host_vec_search, host_write, pack_ptr_len_pub, plugin_call, unpack_to_string_pub,
+    host_write, pack_ptr_len_pub, plugin_call, unpack_to_string_pub,
     unpack_to_value_pub,
 };
 pub(crate) use verbs::GIT_PROTECTED_PATHSPECS;
