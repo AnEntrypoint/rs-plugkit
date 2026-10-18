@@ -610,7 +610,7 @@ fn native_search_gate(
             ),
         );
         return Some(GateVerdict::deny(format!(
-            "native-search-bypass:a `{}` verb invoking `find`, `grep` or `rg` is denied - codesearch is the first-class code search surface. Use the codesearch verb instead: gm.codesearch({{body:{{query, mode, path}}}}); mode grep or literal is its exhaustive scan. Command was: `{}`",
+            "native-search-bypass:a `{}` verb invoking `find`, `grep` or `rg` is denied - codesearch is the code search surface. Use the codesearch verb instead with body {{\"query\":\"<term>\",\"mode\":\"literal\",\"path\":\"<dir>\"}} (mode \"regex\" for patterns; add \"case_insensitive\":true or \"whole_word\":true as needed; \"path\" or \"glob\" narrows scope). Command was: `{}`",
             verb,
             cmd.chars().take(120).collect::<String>()
         ))
