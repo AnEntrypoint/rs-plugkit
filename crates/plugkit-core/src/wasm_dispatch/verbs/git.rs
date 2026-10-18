@@ -1933,16 +1933,6 @@ pub(super) fn git_add(body: &Value) -> u64 {
                     .collect()
             })
             .unwrap_or_default();
-        if body.get("hunks").is_some() {
-            return Ok(err_json(
-                "git_add",
-                json!({
-                    "error": "git_add stages whole paths only; hunks are staged by git_commit {hunks:{<file>:[<n>]}}",
-                    "error_code": ERR_CODE_INVALID_ARGS,
-                    "undeclared_keys": ["hunks"],
-                }),
-            ));
-        }
         let blocked_paths = hard_excluded_pathspecs(&paths);
         if !blocked_paths.is_empty() {
             return Ok(err_json(
@@ -2033,11 +2023,10 @@ pub(super) fn git_add(body: &Value) -> u64 {
             ));
         }
         let step_refs: Vec<&Value> = write_steps.iter().collect();
-        let reply = with_index_lock_report(with_exclusion_report(payload, cwd, &paths), &step_refs);
-        if !paths.is_empty() && staged.is_empty() {
-            return Ok(err_json("git_add", reply));
-        }
-        Ok(ok("git_add", reply))
+        Ok(ok(
+            "git_add",
+            with_index_lock_report(with_exclusion_report(payload, cwd, &paths), &step_refs),
+        ))
     })
 }
 
@@ -5510,25 +5499,16 @@ pub(super) fn git_show(body: &Value) -> u64 {
         } else {
             stderr.to_string()
         };
-        let spec = format!("{refspec}^{{commit}}");
-        let probe = git_call_argv(&["rev-parse", "--verify", "--quiet", spec.as_str()], cwd);
-        let rev_resolves = probe.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0
-            && probe.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
-        let (error_code, error) = match (path, rev_resolves) {
-            (Some(p), true) => (
-                "git_show_path_unresolved",
-                format!("path {} does not exist at rev {} in {}: {}", p, refspec, repo, detail),
-            ),
-            _ => (
-                "git_show_rev_unresolved",
-                format!("rev {} does not resolve in {}: {}", refspec, repo, detail),
-            ),
+        let error_code = if path.is_some() {
+            "git_show_path_unresolved"
+        } else {
+            "git_show_rev_unresolved"
         };
         return err_json(
             "git_show",
             json!({
                 "error_code": error_code,
-                "error": error,
+                "error": format!("rev {} does not resolve in {}: {}", refspec, repo, detail),
                 "rev": refspec,
                 "repo": repo,
                 "hint": "A git_show reply carrying no object is never a delivered commit; name a rev that resolves in this repo.",
@@ -6125,19 +6105,10 @@ pub(super) fn ci_status_gh_unusable_reason() -> Option<String> {
             "gh CLI is installed but not authenticated -- run `gh auth login`, or supply GITHUB_TOKEN/GH_TOKEN ({})",
             ci_status_truncate_for_error(&stdout, 300)
         )),
-        _ => {
-            let stderr = ci_status_shell_stream(&result, "stderr");
-            let detail = if stdout.trim().is_empty() {
-                stderr
-            } else {
-                stdout
-            };
-            Some(format!(
-                "gh CLI probe returned no usable answer (exit {}: {})",
-                result.get("exit_code").and_then(Value::as_i64).unwrap_or(-1),
-                ci_status_truncate_for_error(&detail, 300)
-            ))
-        }
+        _ => Some(format!(
+            "gh CLI probe returned no usable answer ({})",
+            ci_status_truncate_for_error(&stdout, 300)
+        )),
     }
 }
 
@@ -6427,13 +6398,10 @@ pub(super) fn ci_status_attempt(
         }),
         CiStatusTransport::GithubRest => {
             ci_status_rest_api_json(path, rest_opts).map_err(|(status, body, rate_limit)| {
-                let detail = ci_status_truncate_for_error(&body, 300);
                 let reason = if status > 0 {
-                    format!("HTTP {} {}", status, detail)
-                } else if detail.is_empty() {
-                    "host_fetch returned an empty reply (no status, no body)".to_string()
+                    format!("HTTP {} {}", status, ci_status_truncate_for_error(&body, 300))
                 } else {
-                    detail
+                    ci_status_truncate_for_error(&body, 300)
                 };
                 CiStatusAttemptFailure {
                     transport,
