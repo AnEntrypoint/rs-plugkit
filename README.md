@@ -415,7 +415,7 @@ runtime would: relative first, then bare against the nearest `package.json`
 workspaces under `packages/*`. `allow_dangling: ["<target>"]` waives named
 targets and `allow_dangling: true` waives all; either way the waived targets
 come back in `dangling_waived`. Scanning skips `node_modules/`, `dist/`,
-`vendor` (by name), `build/`, `coverage/`, `.git/`, `.gm/` and `.agentplug-kv/`, files
+vendor (by name), `build/`, `coverage/`, `.git/`, `.gm/` and `.agentplug-kv/`, files
 above 512 KiB, non-JS/TS/JSON extensions, and stops after 400 files.
 
 An explicit `paths` outranks the protected-path exclusion list: an entry the
@@ -436,7 +436,7 @@ runtime would: relative first, then bare against the nearest `package.json`
 workspaces under `packages/*`. `allow_dangling: ["<target>"]` waives named
 targets and `allow_dangling: true` waives all; either way the waived targets
 come back in `dangling_waived`. Scanning skips `node_modules/`, `dist/`,
-`vendor` (by name), `build/`, `coverage/`, `.git/`, `.gm/` and `.agentplug-kv/`, files
+vendor (by name), `build/`, `coverage/`, `.git/`, `.gm/` and `.agentplug-kv/`, files
 above 512 KiB, non-JS/TS/JSON extensions, and stops after 400 files.
 
 Async git hosts use a pending-token protocol shaped like `host_fetch`'s. A
