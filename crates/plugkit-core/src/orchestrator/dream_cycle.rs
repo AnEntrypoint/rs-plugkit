@@ -41,11 +41,16 @@ fn evaluate(content: &str) -> Result<Value, String> {
     let beta1 = optional_beta(&body, "beta1", super::dream_rsi::DEFAULT_CYCLE_BETA1)?;
     let beta2 = optional_beta(&body, "beta2", super::dream_rsi::DEFAULT_CYCLE_BETA2)?;
     let stored = stored_cursor(owner);
+    let daemon = owner_cursor(owner, ".cycle-state.json");
     let round = super::dream_rsi::history_round(owner, after.or(stored.as_deref()), beta1, beta2)?;
     let latest = round.latest_dispatch_id.as_deref();
     let reason = match latest {
         None => Some("no-verified-observations"),
-        Some(latest) if Some(latest) == after || Some(latest) == stored.as_deref() => {
+        Some(latest)
+            if Some(latest) == after
+                || Some(latest) == stored.as_deref()
+                || Some(latest) == daemon.as_deref() =>
+        {
             Some("no-new-verified-observations")
         }
         Some(_) if round.summary.get("rankings").is_none() => Some("no-replayable-worlds"),
@@ -85,10 +90,12 @@ fn evaluate(content: &str) -> Result<Value, String> {
 
 #[cfg(target_arch = "wasm32")]
 fn stored_cursor(owner: &str) -> Option<String> {
-    let path = format!(
-        ".gm/dream-rsi/{owner}/{}.json",
-        super::dream_rsi::CYCLE_RESULT_FILE
-    );
+    owner_cursor(owner, &format!("{}.json", super::dream_rsi::CYCLE_RESULT_FILE))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn owner_cursor(owner: &str, file: &str) -> Option<String> {
+    let path = format!(".gm/dream-rsi/{owner}/{file}");
     let text = crate::pkfs::read_to_string(&path)?;
     serde_json::from_str::<Value>(&text)
         .ok()?
