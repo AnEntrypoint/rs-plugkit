@@ -424,9 +424,9 @@ fn session_store_path(name: &str) -> Result<String, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn failure_is_gate_drift(result: &Value) -> bool {
+pub fn failure_is_gate_drift(result: &Value, exit_code: i64) -> bool {
     matches!(
-        result.get("error_code").and_then(Value::as_str),
+        failure_class(result, exit_code).error_code.as_deref(),
         Some(
             crate::wasm_dispatch::ERR_CODE_GATE_DENIED
                 | crate::wasm_dispatch::ERR_CODE_UNKNOWN_VERB
@@ -1039,106 +1039,6 @@ pub fn active_strategy(session_id: Option<&str>) -> Value {
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or(Value::Null)
 }
-
-#[cfg(target_arch = "wasm32")]
-const VETO_MAX_AGE_MS: i64 = 600_000;
-
-pub const PROJECT_WIDE_MARKER_SESSION: &str = "_any-session";
-
-#[cfg(target_arch = "wasm32")]
-fn reorientation_ts_path(session_id: &str) -> String {
-    format!(".gm/dream-rsi/{session_id}/reorientation-ts")
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum Admission {
-    Allow,
-    Advisory { reason: String, next_dispatch_hint: &'static str },
-}
-
-impl Admission {
-    pub fn is_advisory(&self) -> bool {
-        matches!(self, Admission::Advisory { .. })
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn veto_reason(verb: &str, strategy: &Strategy, now_ms: i64, newest_reorientation_ts: i64) -> Option<String> {
-    if strategy.selection.as_deref() != Some("replay-recorded-successes-first") { return None; }
-    let evidence = strategy.evidence.as_deref()?;
-    if evidence.iter().any(|entry| entry.verb.as_deref() == Some(verb) && entry.succeeded()) { return None; }
-    let last_failure_ts = evidence.iter()
-        .filter(|entry| entry.verb.as_deref() == Some(verb))
-        .filter(|entry| entry.is_gate_drift_failure())
-        .filter_map(|entry| entry.ts)
-        .max()?;
-    if now_ms.saturating_sub(last_failure_ts) > VETO_MAX_AGE_MS { return None; }
-    if newest_reorientation_ts >= last_failure_ts { return None; }
-    Some(format!(
-        "Dream-RSI recorded a gate-drift failure for {verb} and no later `instruction` re-orientation, so replay-recorded-successes-first ranks `instruction` above it; this dispatch ran anyway because its inputs are valid -- refusing is what strands the verb, since a refused dispatch is never recorded and so can never be the success that clears the ranking"
-    ))
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn stamp_reorientation() {
-    let now = super::state::now_ms().to_string();
-    if let Some(session_id) = crate::orchestrator::state::dispatch_session_id() {
-        if !session_id.trim().is_empty() {
-            let _ = crate::pkfs::write(&reorientation_ts_path(&session_id), &now);
-        }
-    }
-    let _ = crate::pkfs::write(&reorientation_ts_path(PROJECT_WIDE_MARKER_SESSION), &now);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn stamp_reorientation() {}
-
-#[cfg(target_arch = "wasm32")]
-fn read_ts(path: &str) -> i64 {
-    crate::pkfs::read_to_string(path).and_then(|raw| raw.trim().parse::<i64>().ok()).unwrap_or(0)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn newest_reorientation_marker(
-    per_session_marker_ts: i64,
-    project_wide_marker_ts: i64,
-    long_gap_instruction_marker_ts: i64,
-) -> i64 {
-    per_session_marker_ts
-        .max(project_wide_marker_ts)
-        .max(long_gap_instruction_marker_ts)
-}
-
-#[cfg(target_arch = "wasm32")]
-const LONG_GAP_INSTRUCTION_TS_PATH: &str = ".gm/last-instruction-ts";
-
-#[cfg(target_arch = "wasm32")]
-fn reorientation_ts(session_id: Option<&str>) -> i64 {
-    let per_session = match session_id.filter(|id| !id.trim().is_empty()) {
-        Some(id) => read_ts(&reorientation_ts_path(id)),
-        None => 0,
-    };
-    newest_reorientation_marker(
-        per_session,
-        read_ts(&reorientation_ts_path(PROJECT_WIDE_MARKER_SESSION)),
-        read_ts(LONG_GAP_INSTRUCTION_TS_PATH),
-    )
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn admit_dispatch(verb: &str) -> Admission {
-    if !matches!(verb, "codesearch" | "fetch" | "exec_js") { return Admission::Allow; }
-    let Some(session_id) = crate::orchestrator::state::dispatch_session_id() else { return Admission::Allow; };
-    let strategy = Strategy::from_value(&active_strategy(Some(&session_id)));
-    match veto_reason(verb, &strategy, super::state::now_ms() as i64, reorientation_ts(Some(&session_id))) {
-        Some(reason) => Admission::Advisory { reason, next_dispatch_hint: "instruction" },
-        None => Admission::Allow,
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn admit_dispatch(_verb: &str) -> Admission { Admission::Allow }
-
 
 #[cfg(target_arch = "wasm32")]
 pub fn automatic_replay(session_id: Option<&str>) -> Value {
@@ -2170,9 +2070,9 @@ pub const REPLAY_RESULT_FILE: &str = "replay-result";
 pub const CYCLE_RESULT_FILE: &str = "cycle-result";
 
 #[cfg(target_arch = "wasm32")]
-pub fn persist_replay_result(file: &str, source: &str, fields: Value) -> Option<String> {
-    let owner = session_id().ok()?;
-    let path = session_store_path(file).ok()?;
+pub fn persist_replay_result(file: &str, source: &str, fields: Value) -> Result<String, String> {
+    let owner = session_id()?;
+    let path = session_store_path(file)?;
     let mut record = json!({
         "kind": "replay-result",
         "source": source,
@@ -2182,7 +2082,11 @@ pub fn persist_replay_result(file: &str, source: &str, fields: Value) -> Option<
     if let (Some(target), Value::Object(extra)) = (record.as_object_mut(), fields) {
         target.extend(extra);
     }
-    crate::pkfs::write(&path, &record.to_string()).then_some(path)
+    if crate::pkfs::write(&path, &record.to_string()) {
+        Ok(path)
+    } else {
+        Err(format!("could not write replay result to {path}"))
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2214,7 +2118,7 @@ fn persist_sealed_replay(source: &str, replay: &mut Value) {
         "beta2": replay.get("beta2"),
         "rankings": rankings,
     });
-    let persisted = persist_replay_result(REPLAY_RESULT_FILE, source, summary);
+    let persisted = persist_replay_result(REPLAY_RESULT_FILE, source, summary).ok();
     replay["replay_result_path"] = persisted.map(Value::String).unwrap_or(Value::Null);
 }
 
