@@ -191,17 +191,6 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 - Percent-encoding keeps search qualifiers literal (`:`, `>`, `<`, `=`, `/`, `@`, `*`, `!`, parentheses, commas), since github reads `user:`, `repo:owner/name` and `stars:>=100`.
 - The wikipedia search uses `action=query` with `list=search`, since opensearch returns only titles; a caller-supplied MediaWiki url keeps its own action.
 
-## Witness scripts (rs-plugkit/scripts)
-
-- `config-cache-served-witness.mjs`: the native harness calls `config_sync_native::ensure_default_cache`, which `prose.rs` `read_from_config_repo` uses; the wasm section measures the deployed guest.
-- It runs cargo on every call (`ensureNativeRlib`, `ensureWasm`); an incremental build is a no-op when nothing changed.
-- `SHIM_SOURCE` refuses clone and fetch, so the probe reads refs (`ls-remote`) and cannot move a checkout; `answerRootProbe` answers `--show-toplevel` and `--is-inside-work-tree` because the temporary root is not a git repository.
-- `codeinsight-outline-deferred-witness.mjs`: 4000 files exceed one sync pass's wall budget (`collect_files_within_wall_budget`), so the first outline pass defers the listing's tail.
-- `codeinsight-spool-witness.mjs`: a window holds at least one spool event, so a stalled watcher cannot pass on earlier events; a checked record that fails JSON parse fails the run.
-- `callers-store-busy-witness.mjs`: a callers reply whose refresh completed while the store lock is held fails the witness, since the write path never saw the lock.
-- `git-branch-fields-witness.mjs` checks `unknown_fields` and `accepted_fields` for `git_branch` only; `git_log`, `git_diff` and `git_show` (`orchestrator/instructions/prose/entry.md`) are not checked there.
-- `config-degraded-refresh-witness.mjs` checks the chain `RepoFetcher::refresh` (config.rs), `Freshness::Degraded` (config_sync.rs), `Resolution.degraded`, then the `config_resolve` and `instruction` replies.
-
 ## Other contracts
 
 - `dataflow::default_document` is not executed for CompiledDefault: configured pipelines run declared steps then fuse nodes, with no topological scheduler, and `plugin == "gm"` calls internal functions, not WASM self-dispatch.
