@@ -943,6 +943,10 @@ pub(super) fn push_output_is_diverged_remote(low: &str) -> bool {
         || low.contains("remote contains work that you do")
 }
 
+pub(super) fn push_output_is_host_timeout(output: &str) -> bool {
+    output.contains("timed out after") && output.contains("killed")
+}
+
 pub(super) fn push_output_is_transient_remote_rejection(output: &str) -> bool {
     let low = output.to_ascii_lowercase();
     if push_output_is_diverged_remote(&low) || push_output_is_github_auth_failure(output) {
@@ -1699,6 +1703,26 @@ pub(super) fn git_push(body: &Value) -> u64 {
     let mut attempts = 0u32;
     let mut rebased = false;
     if !push_succeeded && explicit_source_ref.is_some() {
+        if push_output_is_host_timeout(&push_out) {
+            return pack(json!({
+                "ok": false,
+                "verb": "git_push",
+                "gate_denied": true,
+                "remote_moved": false,
+                "transport_hang": true,
+                "repo": repo,
+                "branch": branch,
+                "source_ref": source_ref,
+                "source_sha": local_source_before,
+                "preserved_dirty_worktree": preserved_dirty_worktree,
+                "reason": format!(
+                    "push of explicit source ref '{}' to {} was killed by the host git timeout before the remote answered; this is a transport hang, not evidence that the remote moved. Output:\\n{}",
+                    source_ref, branch, push_out
+                ),
+                "next_dispatch": "instruction",
+                "next_action_hint": format!("re-dispatch the same git_push {{\"rev\":\"{}\"}}; no git_pull is needed", source_ref),
+            }).to_string());
+        }
         if push_output_is_github_auth_failure(&push_out) {
             return pack(json!({
                 "ok": false,
@@ -5704,7 +5728,10 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         Ok(v) => v,
         Err(detail) => return err_json("git_pull", detail),
     };
-    let dirty_tracked: Vec<String> = git_porcelain_in(cwd)
+    let dirty_tracked: Vec<String> = super::host_abi::porcelain_or_dirty(git_call_argv(
+        &["status", "--porcelain"],
+        cwd,
+    ))
         .lines()
         .filter(|line| !line.starts_with("??"))
         .filter_map(|line| line.get(3..).map(|path| path.trim().to_string()))
@@ -5767,6 +5794,30 @@ pub(super) fn git_pull(body: &Value) -> u64 {
                         ["git", "config", "--local", "user.name", "<your GitHub name>"],
                         ["git", "config", "--local", "user.email", "<your verified GitHub email>"],
                     ],
+                }),
+            );
+        }
+        if lower_output.contains("would be overwritten by merge")
+            || lower_output.contains("would be overwritten by checkout")
+        {
+            let blocking_paths: Vec<String> = output
+                .lines()
+                .filter(|line| line.starts_with('\t'))
+                .map(|line| line.trim().to_string())
+                .collect();
+            return err_json(
+                "git_pull",
+                json!({
+                    "error": output,
+                    "error_code": "pull_blocked_by_local_changes",
+                    "remote": remote,
+                    "branch": if branch.is_empty() { Value::Null } else { json!(branch) },
+                    "ff_only": ff_only,
+                    "conflicted": false,
+                    "conflicts": [],
+                    "blocking_paths": blocking_paths,
+                    "head_before": head_before,
+                    "hint": "The incoming commit changes paths this worktree holds staged or modified (possibly another session's work). Nothing was merged, stashed or unstaged. Commit or unstage those paths from their own writer, then re-dispatch git_pull. Do not git_add them from this session.",
                 }),
             );
         }
