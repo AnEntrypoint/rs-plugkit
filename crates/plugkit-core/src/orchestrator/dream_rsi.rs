@@ -805,6 +805,7 @@ const SPOOL_OUT_DIR: &str = ".gm/exec-spool/out";
 struct LedgerCheck {
     entries: std::collections::HashMap<String, Value>,
     unreadable: Option<&'static str>,
+    evicted_possible: bool,
     spool_out_names: Option<Vec<String>>,
     spool_out_ids_by_session: std::collections::HashMap<String, BTreeSet<String>>,
 }
@@ -814,6 +815,7 @@ struct LedgerCheck {
 enum Confirmation {
     Ledger,
     SpoolOut,
+    Retained,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -835,11 +837,12 @@ impl LedgerCheck {
         let Ok(parsed) = serde_json::from_str::<Vec<Value>>(&raw) else {
             return LedgerCheck { unreadable: Some("ledger_unparsed"), ..Default::default() };
         };
+        let evicted_possible = parsed.len() >= crate::dispatch_ledger::RETAINED_ENTRIES;
         let entries = parsed
             .into_iter()
             .filter_map(|entry| Some((entry.get("dispatch_id")?.as_str()?.to_owned(), entry)))
             .collect();
-        LedgerCheck { entries, ..Default::default() }
+        LedgerCheck { entries, evicted_possible, ..Default::default() }
     }
 
     fn spool_out_confirms(&mut self, session_id: &str, dispatch_id: &str) -> bool {
@@ -862,11 +865,13 @@ impl LedgerCheck {
     fn verdict(&mut self, session_id: &str, record: &ObservationRecord) -> Result<Confirmation, &'static str> {
         let dispatch_id = record.dispatch_id.as_deref().ok_or("no_dispatch_id")?;
         let Some(entry) = self.entries.get(dispatch_id) else {
-            return if self.spool_out_confirms(session_id, dispatch_id) {
-                Ok(Confirmation::SpoolOut)
-            } else {
-                Err(self.unreadable.unwrap_or("unconfirmed_by_ledger_or_spool_out"))
-            };
+            if self.spool_out_confirms(session_id, dispatch_id) {
+                return Ok(Confirmation::SpoolOut);
+            }
+            if self.evicted_possible && self.unreadable.is_none() {
+                return Ok(Confirmation::Retained);
+            }
+            return Err(self.unreadable.unwrap_or("unconfirmed_by_ledger_or_spool_out"));
         };
         if entry.get("session_id").and_then(Value::as_str) != Some(session_id) {
             return Err("ledger_session_mismatch");
@@ -957,7 +962,7 @@ fn scan_history() -> HistoryScan {
             records.iter().filter_map(|record| record.dispatch_id.clone()).collect(),
         );
         records.retain(|record| match ledger.verdict(&session_id, record) {
-            Ok(Confirmation::Ledger) => {
+            Ok(Confirmation::Ledger) | Ok(Confirmation::Retained) => {
                 scan.ledger_confirmed += 1;
                 true
             }
