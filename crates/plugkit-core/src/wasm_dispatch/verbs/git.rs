@@ -7612,10 +7612,28 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
     })?;
     let runs = parsed.get("workflow_runs").and_then(Value::as_array);
     let newest_id = |run: &Value| run.get("id").and_then(Value::as_u64);
-    match runs
-        .and_then(|runs| runs.iter().find(|run| run.get("conclusion").and_then(Value::as_str) == Some("failure")))
-        .or_else(|| runs.and_then(|runs| runs.first()))
-        .and_then(newest_id)
+    let failing_run_ids: Vec<u64> = runs
+        .map(|runs| {
+            runs.iter()
+                .filter(|run| run.get("conclusion").and_then(Value::as_str) == Some("failure"))
+                .filter_map(newest_id)
+                .collect()
+        })
+        .unwrap_or_default();
+    let run_with_failed_job = failing_run_ids.iter().copied().find(|id| {
+        ci_status_gh_api_json(&format!("repos/{}/actions/runs/{}/jobs?per_page=100", repo, id))
+            .ok()
+            .and_then(|jobs| {
+                jobs.get("jobs").and_then(Value::as_array).map(|jobs| {
+                    jobs.iter()
+                        .any(|job| job.get("conclusion").and_then(Value::as_str) == Some("failure"))
+                })
+            })
+            .unwrap_or(false)
+    });
+    match run_with_failed_job
+        .or_else(|| failing_run_ids.first().copied())
+        .or_else(|| runs.and_then(|runs| runs.first()).and_then(newest_id))
     {
         Some(run_id) => Ok(run_id),
         None => Err(json!({
