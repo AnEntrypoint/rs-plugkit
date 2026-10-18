@@ -5683,6 +5683,8 @@ pub(super) fn git_show(body: &Value) -> u64 {
                 "error": format!("rev {} does not resolve in {}: {}", refspec, repo, detail),
                 "rev": refspec,
                 "repo": repo,
+                "argv": format!("git {}", argv.join(" ")),
+                "cwd": cwd,
                 "hint": "A git_show reply carrying no object is never a delivered commit; name a rev that resolves in this repo.",
             }),
         );
