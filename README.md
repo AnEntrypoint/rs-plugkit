@@ -53,7 +53,7 @@ compatibility alias with the same request body and response behavior.
 Orchestrator verbs: `instruction`, `transition`, `transition-revert`,
 `discipline-check-removal`, `discipline-audit`, `memory-namespace-audit`,
 `codeinsight-namespace-audit`, `calculus-model-check`, `phase-status`,
-`mutable-resolve`, `memorize-fire`, `residual-scan`, `auto-recall`,
+`mutable-resolve`, `residual-scan`,
 `component-loader-reconcile`, `component-loader-hmr`.
 
 `component-loader-reconcile`/`component-loader-hmr`
@@ -243,8 +243,8 @@ ignores it and stays project-only), `scan_deps`
 (supply-chain scan for the HiddenSpawn-class obfuscated-dropper pattern:
 size/line-ratio disproportion + dense `\uXXXX`-escape-run detection across
 git-tracked source and a bounded `node_modules` walk), `kv`/`kv_get`/
-`kv_put`/`kv_delete`, `exec`/`exec_js`, `fetch`, `env_get`, `recall`,
-`codesearch`, `codeinsight` (symbol, call, import, complexity and duplicate queries; `callers`/`callees`/`impact` are aliases), `memorize`/`memorize-prune`, `health`, `filter`, the full git
+`kv_put`/`kv_delete`, `exec`/`exec_js`, `fetch`, `env_get`,
+`codesearch`, `codeinsight` (symbol, call, import, complexity and duplicate queries; `callers`/`callees`/`impact` are aliases), `health`, `filter`, the full git
 verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git_remote`, `git_add`,
 `git_commit`, `git_amend`, `git_finalize`, `git_push`, `git_checkout`, `git_merge`, `git_cherry_pick`, `git_fetch`,
 `git_pull`, `git_stash`, `git_stash_pop`, `git_stash_drop`, `git_stash_list`, `git_init`,

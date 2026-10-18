@@ -65,7 +65,7 @@ Module-scoped rules for the sources in this directory. The [root AGENTS.md](../.
 - `shared_db::shared_exec_params` binds every parameter as text and writes return no row count; SQL NULL travels as `''`, unwrapped by `NULLIF(?6,'')`, and `invalidate` checks existence through `get` first.
 - Embedding generation markers are per table (`embed_marker::marker_rel_for_table`). `vector_table()` and `rssearch_vectors` must resolve configurable table names identically; the code namespace belongs to the tree-sitter indexer, so the sync pass skips it.
 - `keyword_scan` (`KEYWORD_SCAN_MAX_FILES` = 2000, sorted by name) needs neither embedder nor libsql; the flat-KV variant no-ops without a libsql slot.
-- A merely deferred sync stores its digest tagged `:partial=N`, or `has_stored_digest` stays false forever; never store a digest when `failed>0` or `rekeyed>0`. Orphan pruning requires full convergence. Explicit-key `memorize-prune` marks the index before removing the file; never read failed semantic retrieval as an empty namespace.
+- A merely deferred sync stores its digest tagged `:partial=N`, or `has_stored_digest` stays false forever; never store a digest when `failed>0` or `rekeyed>0`. Orphan pruning requires full convergence. Explicit-key prune marks the index before removing the file; never read failed semantic retrieval as an empty namespace.
 
 ## Dependency scanning (`scan_deps.rs`)
 
