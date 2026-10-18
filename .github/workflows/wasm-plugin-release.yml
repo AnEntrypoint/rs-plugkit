@@ -205,6 +205,8 @@ jobs:
               --repo "$REPO" \
               --title "$TITLE_PREFIX v$VER" \
               --notes "$NOTES"
+          else
+            gh release edit "v$VER" --repo "$REPO" --notes "$NOTES"
           fi
           gh release upload "v$VER" --repo "$REPO" --clobber release-assets/*
 
