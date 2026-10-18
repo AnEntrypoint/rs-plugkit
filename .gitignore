@@ -1,6 +1,5 @@
 /target
 /weights
-Cargo.lock
 .gm/exec-spool/
 .gm/gm.db
 .gm/gm.db.lock.owner
