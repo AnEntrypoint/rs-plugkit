@@ -407,7 +407,7 @@ fn evaluate_worlds(
             "policy_id": policy.id,
             "score": score,
             "cost": cost,
-            "attempt": policy.attempt,
+            "attempt": policy.attempt.unwrap_or(1).max(1),
             "group_size": policy.group_size,
             "stop": policy.stop.map(Stop::name),
             "replays": replays,
@@ -458,14 +458,7 @@ fn evaluate_worlds(
         })
         .cloned()
         .unwrap_or(baseline.clone());
-    let declared = |key: &str| {
-        let value = selected.get(key).cloned().unwrap_or(Value::Null);
-        if value.is_null() {
-            baseline.get(key).cloned().unwrap_or(Value::Null)
-        } else {
-            value
-        }
-    };
+    let declared = |key: &str| selected.get(key).cloned().unwrap_or(Value::Null);
     Ok(json!({
         "ok": true,
         "baseline_policy_id": baseline_id,
