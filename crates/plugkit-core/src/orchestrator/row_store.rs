@@ -530,12 +530,29 @@ pub fn remove_item(store: &Store, id: &str) -> bool {
     pkfs::remove_file(&item_path(store, id))
 }
 
+fn quarantine_torn_tail(log: &str, raw: &str, keep: usize) {
+    let sidecar = format!("{}.torn", log);
+    if !pkfs::append(&sidecar, &format!("{}\n", &raw[keep..])) {
+        return;
+    }
+    let _ = pkfs::cas_write(log, raw, &raw[..keep]);
+}
+
 pub fn log_entries(store: &Store) -> Vec<serde_json::Value> {
     let Some(raw) = pkfs::read_to_string(&store.log) else {
         return Vec::new();
     };
+    let mut body: &str = &raw;
+    if !raw.is_empty() && !raw.ends_with('\n') {
+        let keep = raw.rfind('\n').map_or(0, |i| i + 1);
+        let torn = raw[keep..].trim();
+        if !torn.is_empty() && serde_json::from_str::<serde_json::Value>(torn).is_err() {
+            quarantine_torn_tail(&store.log, &raw, keep);
+            body = &raw[..keep];
+        }
+    }
     let mut out = Vec::new();
-    for line in raw.lines() {
+    for line in body.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
