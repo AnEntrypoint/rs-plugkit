@@ -6862,12 +6862,22 @@ function bare(s) {
 function within(i, j, t) {
   return SJ[i] == j && t >= SS[i] && (SE[i] == "" || t <= SE[i])
 }
-function stepof(j, ts, m,    i, t, from, opens) {
+function byname(j, s, ts,    i, t) {
+  if (s == "" || s == "UNKNOWN STEP") return 0
+  t = substr(ts, 1, 19)
+  for (i = 1; i <= ns; i++) if (SN[i] == s && within(i, j, t)) return i
+  for (i = 1; i <= ns; i++) if (SJ[i] == j && SN[i] == s) return i
+  return 0
+}
+function stepof(j, ts, m,    i, n, t, from, opens) {
   t = substr(ts, 1, 19)
   from = (j in CUR) ? CUR[j] : 1
   opens = (index(m, "##[group]Run ") == 1 || index(m, "Post job cleanup.") == 1)
   for (i = from; i <= ns; i++) {
     if (!within(i, j, t)) continue
+    if (FO && !SF[i]) {
+      for (n = i + 1; n <= ns && within(n, j, t); n++) if (SF[n]) { i = n; break }
+    }
     if (opens && (i in HAS) && i + 1 <= ns && within(i + 1, j, t)) i++
     HAS[i] = 1
     CUR[j] = i
@@ -6895,7 +6905,8 @@ function emit(kind, k, j, s, ts, m) {
   if (sp > 0) { ts = substr(rest, 1, sp - 1); m = substr(rest, sp + 1) } else { ts = rest; m = "" }
   ts = bare(ts)
   gsub(ANSI, "", m)
-  k = stepof(j, ts, m)
+  k = byname(j, s, ts)
+  if (k == 0) k = stepof(j, ts, m)
   if (k > 0) s = SN[k]
   if (!keep(j, JOBP)) next
   if (!keep(s, STEPP)) next
@@ -6906,6 +6917,7 @@ function emit(kind, k, j, s, ts, m) {
     if ((PAT != "") ? keep(m, PAT) : iserr(m)) {
       total++
       errs[k]++
+      if (index(m, "##[error]Process completed with exit code") == 1) generic[k]++
       ctx[k] = AFTER
       if (printed < CAP && used <= BCAP) emit("E", k, j, s, ts, m)
     } else if (ctx[k] > 0) {
@@ -6921,7 +6933,7 @@ function emit(kind, k, j, s, ts, m) {
 END {
   if (FO && TAIL > 0) {
     for (k = 1; k <= ns; k++) {
-      if (seen[k] == 0 || errs[k] > 0) continue
+      if (seen[k] == 0 || errs[k] > generic[k] + 0) continue
       n = (seen[k] < TAIL) ? seen[k] : TAIL
       for (i = seen[k] - n + 1; i <= seen[k]; i++) {
         if (used > BCAP) break
