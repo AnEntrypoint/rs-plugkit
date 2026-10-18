@@ -162,8 +162,17 @@ fn backoff_ms(attempt: u32) -> u64 {
 
 #[cfg(target_arch = "wasm32")]
 fn pause_ms(ms: u64) {
-    let until = unsafe { host_now_ms() } + ms;
-    while unsafe { host_now_ms() } < until {}
+    let code = format!("await new Promise(resolve => setTimeout(resolve, {ms}));");
+    let opts = json!({ "timeoutMs": ms.saturating_add(5_000) }).to_string();
+    let packed = unsafe {
+        crate::wasm_dispatch::host_exec_js(
+            code.as_ptr(),
+            code.len() as u32,
+            opts.as_ptr(),
+            opts.len() as u32,
+        )
+    };
+    let _ = crate::wasm_dispatch::unpack_to_value_pub(packed);
 }
 
 #[cfg(target_arch = "wasm32")]
