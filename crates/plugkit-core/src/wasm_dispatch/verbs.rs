@@ -1384,7 +1384,12 @@ fn fs_readdir(body: &Value) -> u64 {
     }
     let entries = match v {
         Value::Array(entries) => entries,
-        other => return ok("fs_readdir", other),
+        other => {
+            if other.get("missing").and_then(Value::as_bool) == Some(true) || other.get("error").is_some() {
+                return fs_readdir_unlisted(path);
+            }
+            return ok("fs_readdir", other);
+        }
     };
     let limit = body
         .get("limit")
