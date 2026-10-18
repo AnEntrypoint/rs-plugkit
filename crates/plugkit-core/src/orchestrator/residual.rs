@@ -33,6 +33,19 @@ fn count_modified_untracked(porcelain: &str) -> (usize, usize) {
 }
 
 #[cfg(target_arch = "wasm32")]
+const RESIDUAL_UNTRACKED_PATH_CAP: usize = 50;
+
+#[cfg(target_arch = "wasm32")]
+fn untracked_paths(porcelain: &str) -> Vec<String> {
+    porcelain
+        .lines()
+        .filter_map(|line| line.strip_prefix("?? "))
+        .map(|path| path.trim_matches('"').to_string())
+        .take(RESIDUAL_UNTRACKED_PATH_CAP)
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
 fn status_is_open(s: Option<&str>) -> bool {
     match s {
         Some(v) => super::prd::status_is_open(v),
@@ -138,7 +151,8 @@ pub fn handle_scan(_content: &str) -> (String, String, i32) {
             "deviation_kind": "residual-dirty-tree",
             "deviation_severity": severity.as_str(),
             "modified": modified,
-            "untracked": untracked
+            "untracked": untracked,
+            "untracked_paths": untracked_paths(&porcelain)
         });
         return deviation_scan_result(payload, severity, &reason);
     }
