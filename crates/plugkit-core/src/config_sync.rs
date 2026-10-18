@@ -165,7 +165,7 @@ fn probe_decision(rec: &RemoteRecord, now: u64, forced: bool) -> ProbeDecision {
     if forced {
         return ProbeDecision::Due;
     }
-    if rec.remote_sha.is_empty() {
+    if rec.remote_sha.is_empty() || rec.last_probe_ms > now {
         return ProbeDecision::Due;
     }
     if rec.consecutive_failures > 0 {
