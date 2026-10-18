@@ -2963,6 +2963,12 @@ fn strip_reserved_body_keys(body: &mut Value) {
     }
 }
 
+fn take_lean_node(body: &mut Value) -> Option<String> {
+    body.as_object_mut()?
+        .remove("lean_node")
+        .and_then(|value| value.as_str().map(str::trim).filter(|node| !node.is_empty()).map(str::to_owned))
+}
+
 fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u32) -> u64 {
     let verb = read_str(verb_ptr as *const u8, verb_len);
     let raw_body_s = read_str(body_ptr as *const u8, body_len);
@@ -2995,6 +3001,8 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         }
     }
     strip_reserved_body_keys(&mut body);
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
+    let lean_node_stamp = take_lean_node(&mut body);
     let body_parse_failed = parse_failure.is_some();
     set_caller_budget(caller_timeout_ms);
     let dispatch_session_id = crate::validation::session_id_from_body(&body)
@@ -3063,11 +3071,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     if let (Some((dispatch_id, exit_code, gate_drift, failure)), Some(session_id)) =
         (recorded, dispatch_session_id.as_deref())
     {
-        let lean_node = body
-            .get("lean_node")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|node| !node.is_empty());
+        let lean_node = lean_node_stamp.as_deref();
         crate::orchestrator::dream_rsi::observe_dispatch(
             crate::orchestrator::dream_rsi::ObservedDispatch {
                 session_id,
