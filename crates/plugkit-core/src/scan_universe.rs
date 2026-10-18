@@ -432,13 +432,13 @@ fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec
             }
         }
     }
-    let (mut nested_dirs, _gitlink_failed) = gitlink_dirs(dir, &mut complete);
+    let (mut nested_dirs, gitlink_failed) = gitlink_dirs(dir, &mut complete);
     for found in nested_worktree_dirs(dir) {
         if !nested_dirs.iter().any(|d| *d == found) {
             nested_dirs.push(found);
         }
     }
-    nested_untracked_failed |= nested_dirs.len() >= MAX_NESTED_WORKTREES;
+    nested_untracked_failed |= gitlink_failed || nested_dirs.len() >= MAX_NESTED_WORKTREES;
     nested_worktrees += nested_dirs.len();
     for nested_dir in nested_dirs {
         let (nested_files, nested_complete) = nested_untracked(&nested_dir, nesting + 1, no_ignore);

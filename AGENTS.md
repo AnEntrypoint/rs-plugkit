@@ -119,7 +119,7 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 - `git_nested_worktrees` and `git_nested_untracked_failed` name the submodule checkouts that widen the corpus and whether their untracked listing failed; a failure is a blind spot.
 - `nested_worktree_dirs` finds nested checkouts by listing, not `git ls-files --stage`, since git's parent listing names a submodule's tracked files only; it stops at the first `.git`, at `NESTED_WORKTREE_SCAN_DEPTH` (2) and at `MAX_NESTED_WORKTREES` (64).
 - Nested discovery takes both `gitlink_dirs` and `nested_worktree_dirs`, since either can answer; untracked files inside each nested worktree join the corpus, so a new file is searchable without refresh.
-- `nested_untracked_failed` is set when discovery hits `MAX_NESTED_WORKTREES` or a nested untracked listing is incomplete; a failed gitlink listing alone is not a blind spot.
+- `nested_untracked_failed` is set when discovery hits `MAX_NESTED_WORKTREES` or a nested untracked listing is incomplete, or the gitlink listing (`git ls-files --stage`) failed, since the nested set is then unknown.
 - `scope_path_exists` tests a named scope under the root; `search.rs` answers a scope that resolves to nothing as an error, never an empty scan, because an unopened scope reads as a real zero.
 - `git_join` answers on the union of the walk and git's listing when git's tracked set is empty, so an untracked tree is scanned rather than reported as covered and empty.
 
