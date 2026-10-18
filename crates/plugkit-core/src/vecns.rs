@@ -6,6 +6,7 @@ use crate::ragconfig::{EmbedDimConfig, QueryBudgetConfig, ScoringConfig, VecTabl
 use crate::vecstore::{drop_if_dim_mismatch_at_cfg, vec_to_json_literal};
 use crate::wasm_dispatch::unpack_to_value_pub;
 
+#[cfg(not(feature = "wit-env"))]
 #[link(wasm_import_module = "env")]
 extern "C" {
     fn host_plugin_call(
@@ -17,6 +18,9 @@ extern "C" {
         body_len: u32,
     ) -> u64;
 }
+
+#[cfg(feature = "wit-env")]
+use crate::wasm_dispatch::host_abi::host_plugin_call;
 
 fn call_libsql_plugin(plugin: &str, verb: &str, body: &Value) -> Value {
     let body_s = body.to_string();
