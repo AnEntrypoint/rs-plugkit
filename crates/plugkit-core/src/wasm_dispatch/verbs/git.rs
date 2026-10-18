@@ -5425,6 +5425,13 @@ pub(super) fn git_log(body: &Value) -> u64 {
         let nflag = format!("-{}", count);
         let range = body_revision(body);
         let paths = body_pathspecs(body);
+        let (log_cwd, paths) = match paths.as_slice() {
+            [only] => match submodule_owning_path(cwd, only) {
+                Some((sub_dir, rel)) => (Some(sub_dir), vec![rel]),
+                None => (cwd.map(String::from), paths),
+            },
+            _ => (cwd.map(String::from), paths),
+        };
         let pretty = "--pretty=format:%h\u{1f}%H\u{1f}%an\u{1f}%ae\u{1f}%aI\u{1f}%s";
         let mut argv: Vec<&str> = vec!["log", &nflag, pretty, "--no-color"];
         if !range.is_empty() {
@@ -5436,7 +5443,7 @@ pub(super) fn git_log(body: &Value) -> u64 {
                 argv.push(p.as_str());
             }
         }
-        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+        let r = git_step_replayed_by_call_order(plan, &argv, log_cwd.as_deref())?;
         let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
         if code != 0 {
             let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
@@ -5471,6 +5478,24 @@ pub(super) fn git_log(body: &Value) -> u64 {
             .collect();
         Ok(ok("git_log", json!({ "commits": commits })))
     })
+}
+
+fn submodule_owning_path(cwd: Option<&str>, path: &str) -> Option<(String, String)> {
+    let normalized = path.replace('\\', "/").trim_start_matches("./").to_string();
+    let mut declared: Vec<String> = submodule_gitlink_paths(cwd).into_iter().collect();
+    declared.sort_by_key(|p| std::cmp::Reverse(p.len()));
+    let sub = declared.into_iter().find(|p| {
+        normalized
+            .strip_prefix(p.as_str())
+            .is_some_and(|rest| rest.starts_with('/'))
+    })?;
+    let rel = normalized[sub.len() + 1..].to_string();
+    let top = git_call_argv(&["rev-parse", "--show-toplevel"], cwd);
+    let root = top.get("stdout").and_then(|v| v.as_str())?.trim();
+    if root.is_empty() {
+        return None;
+    }
+    Some((format!("{}/{}", root.trim_end_matches(['/', '\\']), sub), rel))
 }
 
 fn git_diff_error(range: &str, r: &Value) -> u64 {
