@@ -1055,7 +1055,6 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
     let incumbent = incumbent_policy(owner);
     let candidates = dream_candidates(&incumbent);
     let mut defects: Vec<&str> = Vec::new();
-    let mut post_selected_ge_baseline = true;
     let incumbent_present = candidates.iter().any(|policy| policy.id == incumbent.id);
     if !incumbent_present {
         return Err("dream-replay-cycle precondition failed: incumbent absent from candidates".into());
@@ -1075,13 +1074,11 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
     let candidate_count = candidates.len();
     let replay = evaluate_worlds(incumbent.id.clone(), candidates.clone(), scan.worlds, beta1, beta2)?;
     let baseline_score = replay.get("baseline_score").and_then(Value::as_f64).ok_or("dream-replay-cycle baseline score missing")?;
-    let mut selected_id = replay.get("selected_policy_id").and_then(Value::as_str).unwrap_or(&incumbent.id).to_string();
-    let mut selected_score = replay.get("selected_score").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY);
-    if !(selected_score >= baseline_score) {
-        post_selected_ge_baseline = false;
+    let selected_id = replay.get("selected_policy_id").and_then(Value::as_str).unwrap_or(&incumbent.id).to_string();
+    let selected_score = replay.get("selected_score").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY);
+    let never_worse = selected_score >= baseline_score;
+    if !never_worse {
         defects.push("postcondition_selected_below_baseline");
-        selected_id = incumbent.id.clone();
-        selected_score = baseline_score;
     }
     let mut rankings: Vec<Value> = replay
         .get("rankings")
@@ -1103,9 +1100,7 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
         right.get("score").and_then(Value::as_f64).partial_cmp(&left.get("score").and_then(Value::as_f64)).unwrap_or(std::cmp::Ordering::Equal)
     });
     let improved = selected_id != incumbent.id && selected_score > baseline_score;
-    if !improved {
-        selected_id = incumbent.id.clone();
-    }
+    let selected_id = if improved { selected_id } else { incumbent.id.clone() };
     let selected_policy = candidates.iter().find(|policy| policy.id == selected_id).map(policy_json);
     Ok(HistoryRound {
         latest_dispatch_id,
@@ -1119,13 +1114,13 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
             "baseline_score": baseline_score,
             "selected_score": selected_score,
             "improved": improved,
-            "never_worse": selected_score >= baseline_score,
+            "never_worse": never_worse,
             "candidates": candidate_count,
             "rankings": rankings,
             "beta1": beta1,
             "beta2": beta2,
             "history": history,
-            "contract": { "pre_incumbent_in_candidates": incumbent_present, "post_selected_ge_baseline": post_selected_ge_baseline, "defects": defects },
+            "contract": { "pre_incumbent_in_candidates": incumbent_present, "post_selected_ge_baseline": never_worse, "defects": defects },
         }),
     })
 }
