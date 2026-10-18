@@ -435,7 +435,7 @@ fn session_store_path(name: &str) -> Result<String, String> {
 #[cfg(target_arch = "wasm32")]
 pub fn failure_is_gate_drift(result: &Value, exit_code: i64) -> bool {
     matches!(
-        failure_class(result, exit_code).error_code.as_deref(),
+        failure_class(result, exit_code).error_code(),
         Some(
             crate::wasm_dispatch::ERR_CODE_GATE_DENIED
                 | crate::wasm_dispatch::ERR_CODE_UNKNOWN_VERB
@@ -468,15 +468,41 @@ fn reply_layers(result: &Value) -> [Option<&Value>; 2] {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub struct FailureClass {
-    pub error_code: Option<String>,
-    pub no_match: bool,
+#[derive(Debug, Clone, PartialEq)]
+pub enum FailureClass {
+    Ok,
+    Coded(String),
+    NoMatch,
+    Unclassified,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl FailureClass {
+    pub fn error_code(&self) -> Option<&str> {
+        match self {
+            Self::Coded(code) => Some(code),
+            _ => None,
+        }
+    }
+
+    pub fn no_match(&self) -> bool {
+        matches!(self, Self::NoMatch)
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Coded(_) => "coded",
+            Self::NoMatch => "no_match",
+            Self::Unclassified => "unclassified",
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn failure_class(result: &Value, exit_code: i64) -> FailureClass {
     if exit_code == 0 {
-        return FailureClass { error_code: None, no_match: false };
+        return FailureClass::Ok;
     }
     let layers = reply_layers(result);
     let error_code = layers.iter().flatten().find_map(|layer| {
@@ -484,11 +510,17 @@ pub fn failure_class(result: &Value, exit_code: i64) -> FailureClass {
             layer.get(*key).and_then(Value::as_str).map(str::trim).filter(|text| token_like(text)).map(str::to_owned)
         })
     });
-    let no_match = error_code.is_none()
-        && layers.iter().flatten().any(|layer| {
-            MATCH_COUNT_KEYS.iter().any(|key| layer.get(*key).and_then(Value::as_u64) == Some(0))
-        });
-    FailureClass { error_code, no_match }
+    if let Some(code) = error_code {
+        return FailureClass::Coded(code);
+    }
+    let zero_matches = layers.iter().flatten().any(|layer| {
+        MATCH_COUNT_KEYS.iter().any(|key| layer.get(*key).and_then(Value::as_u64) == Some(0))
+    });
+    if zero_matches {
+        FailureClass::NoMatch
+    } else {
+        FailureClass::Unclassified
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -510,6 +542,8 @@ struct ObservationRecord {
     error_code: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     no_match: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure_class: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     run_end: bool,
 }
@@ -557,6 +591,7 @@ pub struct ObservedDispatch<'a> {
     pub verb: &'a str,
     pub fingerprint: &'a str,
     pub exit_code: i64,
+    pub output_bytes: Option<u64>,
     pub gate_drift: bool,
     pub reply: &'a str,
     pub lean_node: Option<&'a str>,
@@ -662,6 +697,7 @@ const SPOOL_OUT_DIR: &str = ".gm/exec-spool/out";
 #[derive(Default)]
 struct LedgerCheck {
     entries: std::collections::HashMap<String, Value>,
+    unreadable: Option<&'static str>,
     spool_out_names: Option<Vec<String>>,
     spool_out_ids_by_session: std::collections::HashMap<String, BTreeSet<String>>,
 }
@@ -686,9 +722,13 @@ fn reply_dispatch_ids(text: &str) -> impl Iterator<Item = String> + '_ {
 impl LedgerCheck {
     fn load() -> Self {
         let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
-        let raw = crate::pkfs::read_to_string(&crate::dispatch_ledger::ledger_path(&cwd)).unwrap_or_default();
-        let entries = serde_json::from_str::<Vec<Value>>(&raw)
-            .unwrap_or_default()
+        let Some(raw) = crate::pkfs::read_to_string(&crate::dispatch_ledger::ledger_path(&cwd)) else {
+            return LedgerCheck::default();
+        };
+        let Ok(parsed) = serde_json::from_str::<Vec<Value>>(&raw) else {
+            return LedgerCheck { unreadable: Some("ledger_unparsed"), ..Default::default() };
+        };
+        let entries = parsed
             .into_iter()
             .filter_map(|entry| Some((entry.get("dispatch_id")?.as_str()?.to_owned(), entry)))
             .collect();
@@ -718,7 +758,7 @@ impl LedgerCheck {
             return if self.spool_out_confirms(session_id, dispatch_id) {
                 Ok(Confirmation::SpoolOut)
             } else {
-                Err("unconfirmed_by_ledger_or_spool_out")
+                Err(self.unreadable.unwrap_or("unconfirmed_by_ledger_or_spool_out"))
             };
         };
         if entry.get("session_id").and_then(Value::as_str) != Some(session_id) {
@@ -967,6 +1007,52 @@ pub fn history_round(owner: &str, beta1: f64, beta2: f64) -> Result<HistoryRound
 }
 
 #[cfg(target_arch = "wasm32")]
+pub struct Outcome {
+    pub exit_code: i64,
+    pub output_bytes: u64,
+    gate_drift: bool,
+    failure: FailureClass,
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn outcome(result: &Value) -> Outcome {
+    let exit_code = if result.get("ok").and_then(Value::as_bool).unwrap_or(true) { 0 } else { 1 };
+    Outcome {
+        exit_code,
+        output_bytes: dispatch_output_bytes(result),
+        gate_drift: failure_is_gate_drift(result, exit_code),
+        failure: failure_class(result, exit_code),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+pub fn observe_recorded(
+    outcome: Outcome,
+    dispatch_id: &str,
+    session_id: &str,
+    verb: &str,
+    fingerprint: &str,
+    reply: &str,
+    lean_node: Option<&str>,
+    run_end: bool,
+) {
+    observe_dispatch(ObservedDispatch {
+        session_id,
+        dispatch_id,
+        verb,
+        fingerprint,
+        exit_code: outcome.exit_code,
+        output_bytes: Some(outcome.output_bytes),
+        gate_drift: outcome.gate_drift,
+        reply,
+        lean_node,
+        failure: outcome.failure,
+        run_end,
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
     let ObservedDispatch {
         session_id,
@@ -974,28 +1060,14 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
         verb,
         fingerprint,
         exit_code,
+        output_bytes,
         gate_drift,
         reply,
         lean_node,
         failure,
         run_end,
     } = observed;
-    if verb.starts_with("dream-")
-        || matches!(
-            verb,
-            "instruction"
-                | "phase-status"
-                | "transition"
-                | "transition-revert"
-                | "prd-list"
-                | "prd-defer"
-                | "mutable-add"
-                | "mutable-resolve"
-                | "mutable-list"
-                | "mutable-defer"
-                | "residual-scan"
-        )
-    {
+    if verb.starts_with("dream-") {
         return;
     }
     let path = format!(".gm/dream-rsi/{session_id}/observations.json");
@@ -1014,12 +1086,13 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
         gate_drift: Some(gate_drift),
         prd_open_count: Some(prd_open_count as u64),
         mutable_open_count: Some(mutable_open_count as u64),
-        quality: Some(outcome_score(exit_code, failure.no_match, None)),
+        quality: Some(outcome_score(exit_code, failure.no_match(), output_bytes)),
         ts: Some(ts),
         reply_sha256: Some(reply_sha256_hex(reply)),
         lean_node: lean_node.map(str::to_owned),
-        error_code: failure.error_code,
-        no_match: failure.no_match,
+        error_code: failure.error_code().map(str::to_owned),
+        no_match: failure.no_match(),
+        failure_class: Some(failure.name().to_owned()),
         run_end,
     };
     let Ok(line) = serde_json::to_string(&record) else {
@@ -1033,7 +1106,9 @@ pub fn active_strategy(session_id: Option<&str>) -> Value {
     let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
         return Value::Null;
     };
-    crate::pkfs::read_to_string(&format!(".gm/dream-rsi/{session_id}/active-strategy.json"))
+    crate::pkfs::read_to_string(&format!(
+        ".gm/dream-rsi/{session_id}/{ACTIVE_STRATEGY_FILE}.json"
+    ))
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or(Value::Null)
 }
@@ -1256,6 +1331,31 @@ pub fn register_policy(content: &str) -> Result<Value, String> {
         ));
     }
     if deployed {
+        let incumbent = policies
+            .iter()
+            .find(|entry| {
+                entry.get("owner_session_id").and_then(Value::as_str)
+                    == Some(owner_session_id.as_str())
+                    && entry.get("deployed").and_then(Value::as_bool) == Some(true)
+            })
+            .and_then(|entry| entry.get("id").and_then(Value::as_str).map(str::to_string));
+        if let Some(incumbent) = incumbent {
+            let replay_path = session_store_path(ReplayFile::Replay.name())?;
+            let proven = crate::pkfs::read_to_string(&replay_path)
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .is_some_and(|result| {
+                    result.get("selected_policy_id").and_then(Value::as_str) == Some(policy.id.as_str())
+                        && result.get("baseline_policy_id").and_then(Value::as_str) == Some(incumbent.as_str())
+                        && result.get("improved").and_then(Value::as_bool) == Some(true)
+                        && result.get("never_worse").and_then(Value::as_bool) == Some(true)
+                });
+            if !proven {
+                return Err(format!(
+                    "dream-policy-register deployed {} requires a replay-result that selects it over deployed baseline {incumbent}",
+                    policy.id
+                ));
+            }
+        }
         for entry in &mut policies {
             if entry.get("owner_session_id").and_then(Value::as_str)
                 == Some(owner_session_id.as_str())
@@ -2078,25 +2178,78 @@ pub fn handle_seal(content: &str) -> (String, String, i32) {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub const ACTIVE_STRATEGY_FILE: &str = "active-strategy";
+
+#[cfg(target_arch = "wasm32")]
 pub const REPLAY_RESULT_FILE: &str = "replay-result";
 
 #[cfg(target_arch = "wasm32")]
 pub const CYCLE_RESULT_FILE: &str = "cycle-result";
 
 #[cfg(target_arch = "wasm32")]
-pub fn persist_replay_result(file: &str, source: &str, fields: Value) -> Result<String, String> {
-    let owner = session_id()?;
-    let path = session_store_path(file)?;
-    let mut record = json!({
-        "kind": "replay-result",
-        "source": source,
-        "owner_session_id": owner,
-        "ts": super::state::now_ms() as i64,
+pub const INDEX_PATH: &str = ".gm/dream-rsi/index.json";
+
+#[cfg(target_arch = "wasm32")]
+pub const INDEX_SCHEMA_VERSION: u32 = 1;
+
+#[cfg(target_arch = "wasm32")]
+fn write_index() {
+    let index = json!({
+        "schema_version": INDEX_SCHEMA_VERSION,
+        "files": {
+            "observations": "observations.json",
+            "active_strategy": format!("{ACTIVE_STRATEGY_FILE}.json"),
+            "replay_result": format!("{REPLAY_RESULT_FILE}.json"),
+            "cycle_result": format!("{CYCLE_RESULT_FILE}.json"),
+        },
+        "record_kinds": {
+            "replay_result": "replay-result",
+            "cycle_result": "cycle-result",
+        },
+        "fields": ["kind", "source", "owner_session_id", "ts"],
     });
-    if let (Some(target), Value::Object(extra)) = (record.as_object_mut(), fields) {
-        target.extend(extra);
+    let _ = crate::pkfs::write(INDEX_PATH, &index.to_string());
+}
+
+#[cfg(target_arch = "wasm32")]
+pub enum ReplayFile {
+    Cycle,
+    Replay,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl ReplayFile {
+    fn name(&self) -> &'static str {
+        match self {
+            ReplayFile::Cycle => CYCLE_RESULT_FILE,
+            ReplayFile::Replay => REPLAY_RESULT_FILE,
+        }
     }
-    if crate::pkfs::write(&path, &record.to_string()) {
+}
+
+#[cfg(target_arch = "wasm32")]
+pub struct ReplaySource(pub &'static str);
+
+#[cfg(target_arch = "wasm32")]
+pub fn persist_replay_result(
+    file: ReplayFile,
+    source: ReplaySource,
+    fields: serde_json::Map<String, Value>,
+) -> Result<String, String> {
+    let owner = session_id()?;
+    let name = file.name();
+    let path = session_store_path(name)?;
+    let kind = match file {
+        ReplayFile::Cycle => "cycle-result",
+        ReplayFile::Replay => "replay-result",
+    };
+    let mut record = fields;
+    record.insert("kind".into(), json!(kind));
+    record.insert("source".into(), json!(source.0));
+    record.insert("owner_session_id".into(), json!(owner));
+    record.insert("ts".into(), json!(super::state::now_ms() as i64));
+    if crate::pkfs::write(&path, &Value::Object(record).to_string()) {
+        write_index();
         Ok(path)
     } else {
         Err(format!("could not write replay result to {path}"))
@@ -2104,7 +2257,7 @@ pub fn persist_replay_result(file: &str, source: &str, fields: Value) -> Result<
 }
 
 #[cfg(target_arch = "wasm32")]
-fn persist_sealed_replay(source: &str, replay: &mut Value) {
+fn persist_sealed_replay(source: &'static str, replay: &mut Value) {
     let baseline_score = replay.get("baseline_score").and_then(Value::as_f64);
     let selected_score = replay.get("selected_score").and_then(Value::as_f64);
     let rankings = replay
@@ -2132,7 +2285,12 @@ fn persist_sealed_replay(source: &str, replay: &mut Value) {
         "beta2": replay.get("beta2"),
         "rankings": rankings,
     });
-    let persisted = persist_replay_result(REPLAY_RESULT_FILE, source, summary).ok();
+    let persisted = persist_replay_result(
+        ReplayFile::Replay,
+        ReplaySource(source),
+        summary.as_object().cloned().unwrap_or_default(),
+    )
+    .ok();
     replay["replay_result_path"] = persisted.map(Value::String).unwrap_or(Value::Null);
 }
 
