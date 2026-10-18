@@ -2112,16 +2112,33 @@ fn non_blank_str(value: Option<&Value>) -> Option<String> {
         .map(String::from)
 }
 
-pub(super) fn commit_identity(body: &Value) -> (String, String) {
+pub(super) fn configured_commit_identity() -> (String, String) {
     let configured = crate::config::resolve().config.value;
     let git = configured.get("git");
-    let name = non_blank_str(body.get("author_name"))
-        .or_else(|| non_blank_str(git.and_then(|g| g.get("author_name"))))
+    let name = non_blank_str(git.and_then(|g| g.get("author_name")))
         .unwrap_or_else(|| DEFAULT_COMMIT_AUTHOR_NAME.to_string());
-    let email = non_blank_str(body.get("author_email"))
-        .or_else(|| non_blank_str(git.and_then(|g| g.get("author_email"))))
+    let email = non_blank_str(git.and_then(|g| g.get("author_email")))
         .unwrap_or_else(|| DEFAULT_COMMIT_AUTHOR_EMAIL.to_string());
     (name, email)
+}
+
+pub(super) fn commit_identity(body: &Value) -> (String, String) {
+    let (name, email) = configured_commit_identity();
+    (
+        non_blank_str(body.get("author_name")).unwrap_or(name),
+        non_blank_str(body.get("author_email")).unwrap_or(email),
+    )
+}
+
+pub(super) fn commit_author_override_refusal(body: &Value) -> Option<String> {
+    let configured = configured_commit_identity();
+    if commit_identity(body) == configured {
+        return None;
+    }
+    Some(format!(
+        "git_commit author_name/author_email must match the configured identity ({} <{}>); an author override is refused",
+        configured.0, configured.1
+    ))
 }
 
 pub(super) fn commit_session_id(body: &Value) -> String {
@@ -2981,6 +2998,9 @@ pub(super) fn git_commit_hunk_scoped(body: &Value) -> Option<u64> {
     if let Err(reason) = commit_message_shape(message) {
         return Some(err("git_commit", &reason));
     }
+    if let Some(reason) = commit_author_override_refusal(body) {
+        return Some(err("git_commit", &reason));
+    }
     let (patch_text, named_paths): (Option<String>, Vec<String>) = match (patch, hunks) {
         (Some(p), None) => match p.as_str().filter(|s| !s.trim().is_empty()) {
             Some(text) => {
@@ -3225,6 +3245,9 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             return Ok(err("git_commit", "message required"));
         }
         if let Err(reason) = commit_message_shape(message) {
+            return Ok(err("git_commit", &reason));
+        }
+        if let Some(reason) = commit_author_override_refusal(body) {
             return Ok(err("git_commit", &reason));
         }
         let allow_empty = body
@@ -5397,6 +5420,8 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
     )
 }
 
+/// Commit count precedence: the first present key wins in the order
+/// `limit`, `count`, `max_count`, `n` (default 10). Live-verified: `{limit:1, n:4}` returns one commit.
 pub(super) fn git_log(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_log",
@@ -6078,6 +6103,43 @@ pub(super) fn ci_status_resolve_repo_preferring_unambiguous_github_repo_field(
     }
 }
 
+fn ci_status_repo_is_explicit(body: &Value) -> bool {
+    ["github_repo", "repo"].iter().any(|field| {
+        body.get(*field)
+            .and_then(Value::as_str)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
+fn ci_status_commit_present(repo: Option<&str>, sha: &str) -> bool {
+    !exec_git_in(repo, &format!("rev-parse --verify --quiet {}^{{commit}}", sha))
+        .trim()
+        .is_empty()
+}
+
+fn ci_status_repo_for_sha(cwd: Option<&str>, sha: &str, default_repo: String) -> String {
+    if ci_status_commit_present(cwd, sha) {
+        return default_repo;
+    }
+    let root = cwd.unwrap_or(".");
+    for line in exec_git_in(cwd, "config --file .gitmodules --get-regexp path").lines() {
+        let Some(path) = line.split_whitespace().nth(1) else {
+            continue;
+        };
+        let sub = format!("{}/{}", root, path);
+        if !ci_status_commit_present(Some(&sub), sha) {
+            continue;
+        }
+        if let Ok(repo) =
+            ci_status_resolve_repo_preferring_unambiguous_github_repo_field(&json!({}), Some(&sub))
+        {
+            return repo;
+        }
+    }
+    default_repo
+}
+
 pub(super) struct CiStatusShaResolution {
     pub(super) sha: String,
     pub(super) field: &'static str,
@@ -6674,6 +6736,11 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
         .map_err(|packed| unpack_to_value(packed))?;
     let resolution = ci_status_resolve_sha(body, cwd).map_err(|packed| unpack_to_value(packed))?;
     let sha = resolution.sha.clone();
+    let repo = if ci_status_repo_is_explicit(body) {
+        repo
+    } else {
+        ci_status_repo_for_sha(cwd, &sha, repo)
+    };
     let runs_path = format!("repos/{}/actions/runs?head_sha={}&per_page=20", repo, sha);
     let tree_path = format!("repos/{}/git/trees/{}?recursive=1", repo, sha);
     let token = body
