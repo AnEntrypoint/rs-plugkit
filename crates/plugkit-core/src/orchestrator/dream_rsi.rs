@@ -579,7 +579,11 @@ fn failure_class(result: &Value, exit_code: i64) -> FailureClass {
         })
     });
     if let Some(code) = error_code {
-        return FailureClass::Coded(code);
+        return if code == "not_found" {
+            FailureClass::NoMatch
+        } else {
+            FailureClass::Coded(code)
+        };
     }
     let zero_matches = layers.iter().flatten().any(|layer| {
         MATCH_COUNT_KEYS.iter().any(|key| layer.get(*key).and_then(Value::as_u64) == Some(0))
