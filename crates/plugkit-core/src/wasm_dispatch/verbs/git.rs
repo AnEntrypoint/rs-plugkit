@@ -5,6 +5,8 @@ pub(super) const GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS: &str = "git_async";
 pub(super) const GIT_PENDING_RESULT_OUTBOX_NS: &str = "outbox";
 pub(super) const GIT_COMMIT_DEDUP_NS: &str = "git_commit_dedup";
 pub(super) const GIT_COMMIT_DEDUP_TTL_MS: u64 = 180_000;
+pub(super) const GIT_SESSION_COMMITS_NS: &str = "git_session_commits";
+pub(super) const GIT_SESSION_COMMITS_CAP: usize = 256;
 
 pub(super) const GIT_PATHSPEC_EXCLUDE_ARGV_BUDGET_CHARS: usize = 8000;
 
@@ -56,6 +58,34 @@ pub(super) fn git_commit_dedup_record(key: &str, sha_full: &str, sha: &str, summ
     let record =
         json!({ "ts": now, "sha_full": sha_full, "sha": sha, "summary": summary }).to_string();
     git_async_kv_put(GIT_COMMIT_DEDUP_NS, key, &record);
+}
+
+fn git_session_commits_key() -> String {
+    crate::wasm_dispatch::current_dispatch_session_id().unwrap_or_default()
+}
+
+pub(super) fn git_session_commit_shas() -> Vec<String> {
+    let key = git_session_commits_key();
+    if key.is_empty() {
+        return Vec::new();
+    }
+    super::host_abi::host_kv_read(GIT_SESSION_COMMITS_NS, &key)
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default()
+}
+
+pub(super) fn git_session_commit_record(sha_full: &str) {
+    let key = git_session_commits_key();
+    if key.is_empty() {
+        return;
+    }
+    let mut shas = git_session_commit_shas();
+    shas.push(sha_full.to_string());
+    if shas.len() > GIT_SESSION_COMMITS_CAP {
+        let excess = shas.len() - GIT_SESSION_COMMITS_CAP;
+        shas.drain(..excess);
+    }
+    git_async_kv_put(GIT_SESSION_COMMITS_NS, &key, &json!(shas).to_string());
 }
 
 pub(super) struct GitPendingTokenReplayPlan {
@@ -1553,6 +1583,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
     let unnamed_commits = if allow_foreign_commits {
         Vec::new()
     } else {
+        let own_shas = git_session_commit_shas();
         push_unnamed_commits(
             repo.as_deref(),
             remote_before.as_deref(),
@@ -1560,6 +1591,13 @@ pub(super) fn git_push(body: &Value) -> u64 {
             source_ref,
             &branch,
         )
+        .into_iter()
+        .filter(|c| {
+            c.get("sha")
+                .and_then(Value::as_str)
+                .map_or(true, |sha| !own_shas.iter().any(|own| own == sha))
+        })
+        .collect()
     };
     if !unnamed_commits.is_empty() {
         let shas = unnamed_commits
@@ -3401,6 +3439,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         let sha = head_after[..head_after.len().min(10)].to_string();
         let summary = message.lines().next().unwrap_or("").to_string();
         git_commit_dedup_record(&dedup_key, &head_after, &sha, &summary);
+        git_session_commit_record(&head_after);
         emit_event(
             "git_commit",
             json!({ "sub": "git", "sha_full": head_after, "sha": sha, "summary": summary }),
@@ -5422,7 +5461,7 @@ pub(super) fn git_show(body: &Value) -> u64 {
         "git_show",
         body,
         &[
-            "rev", "ref", "sha", "commit", "stat", "path", "paths", "files", "offset",
+            "rev", "ref", "sha", "commit", "stat", "path", "paths", "files", "offset", "full",
         ],
     ) {
         return refusal;
@@ -5503,7 +5542,9 @@ pub(super) fn git_show(body: &Value) -> u64 {
         .unwrap_or(false);
     let boundary_at_or_before = |i: usize| (0..=i.min(full.len())).rev().find(|&b| full.is_char_boundary(b)).unwrap_or(0);
     let start = boundary_at_or_before(offset);
-    let end = boundary_at_or_before(start + GIT_SHOW_PAGE_BYTES);
+    let whole_blob = body.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
+    let page = if whole_blob { full.len() } else { GIT_SHOW_PAGE_BYTES };
+    let end = boundary_at_or_before(start + page);
     let next_offset = (end < full.len()).then_some(end);
     ok(
         "git_show",
@@ -7889,6 +7930,45 @@ pub(super) fn git_submodule_add(body: &Value) -> u64 {
         Ok(ok(
             "git_submodule_add",
             json!({ "path": path, "url": url, "branch": branch, "staged": staged }),
+        ))
+    })
+}
+
+pub(super) fn git_submodule_update(body: &Value) -> u64 {
+    git_async_entry("git_submodule_update", body, |body, plan| {
+        let cwd = body_cwd(body);
+        let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if !valid_submodule_path(&path) {
+            return Ok(err(
+                "git_submodule_update",
+                "path must be relative to the repo root: no leading '/', no '.', '..' or '.git' segment, no whitespace",
+            ));
+        }
+        let blocked_paths = hard_excluded_pathspecs(std::slice::from_ref(&path));
+        if !blocked_paths.is_empty() {
+            return Ok(err_json(
+                "git_submodule_update",
+                protected_pathspec_refusal("git_submodule_update", &blocked_paths),
+            ));
+        }
+        let recursive = body.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut argv: Vec<&str> = vec!["submodule", "update", "--init"];
+        if recursive {
+            argv.push("--recursive");
+        }
+        argv.extend(["--", path.as_str()]);
+        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 {
+            let reason = r
+                .get("stderr")
+                .and_then(|x| x.as_str())
+                .unwrap_or("git submodule update failed");
+            return Ok(err("git_submodule_update", reason));
+        }
+        Ok(ok(
+            "git_submodule_update",
+            json!({ "path": path, "recursive": recursive }),
         ))
     })
 }

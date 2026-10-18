@@ -495,6 +495,14 @@ impl FailureClass {
             Self::Unclassified => "unclassified",
         }
     }
+
+    fn for_exit(self, exit_code: i64) -> Self {
+        match (exit_code == 0, self) {
+            (true, _) => Self::Ok,
+            (false, Self::Ok) => Self::Unclassified,
+            (false, other) => other,
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -548,8 +556,29 @@ struct ObservationRecord {
 
 #[cfg(target_arch = "wasm32")]
 impl ObservationRecord {
-    fn from_value(value: &Value) -> Self {
-        serde_json::from_value(value.clone()).unwrap_or_default()
+    fn from_value(value: &Value) -> Option<Self> {
+        let record: Self = serde_json::from_value(value.clone()).ok()?;
+        record.is_consistent().then_some(record)
+    }
+
+    fn is_consistent(&self) -> bool {
+        let coded = self.error_code.is_some();
+        let exit_ok = self.exit_code == Some(0);
+        let outcome_ok = if exit_ok {
+            !coded && !self.no_match
+        } else {
+            !(coded && self.no_match)
+        };
+        let expected_class = if coded {
+            "coded"
+        } else if self.no_match {
+            "no_match"
+        } else if exit_ok {
+            "ok"
+        } else {
+            "unclassified"
+        };
+        outcome_ok && self.failure_class.as_deref().is_none_or(|name| name == expected_class)
     }
 
     fn succeeded(&self) -> bool {
@@ -573,7 +602,7 @@ fn read_observation_values(raw: &str) -> Vec<Value> {
 
 #[cfg(target_arch = "wasm32")]
 fn read_observations(raw: &str) -> Vec<ObservationRecord> {
-    read_observation_values(raw).iter().map(ObservationRecord::from_value).collect()
+    read_observation_values(raw).iter().filter_map(ObservationRecord::from_value).collect()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1069,6 +1098,7 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
     if verb.starts_with("dream-") {
         return;
     }
+    let failure = failure.for_exit(exit_code);
     let path = format!(".gm/dream-rsi/{session_id}/observations.json");
     let ts = super::state::now_ms() as i64;
     rotate_observations_if_full(session_id, &path, ts);
@@ -2308,8 +2338,8 @@ pub fn handle(content: &str) -> (String, String, i32) {
             )
         }
     };
-    let observations = match observations_for_result() {
-        Ok(observations) => observations,
+    let (observations, rejected_count) = match observations_for_result() {
+        Ok(found) => found,
         Err(error) => {
             return (
                 json!({ "ok": false, "error": error }).to_string(),
@@ -2319,43 +2349,37 @@ pub fn handle(content: &str) -> (String, String, i32) {
         }
     };
     let mut reply = result_json(&produce_result(&observations, &replay));
+    reply["rejected_count"] = json!(rejected_count);
     reply["replay"] = replay;
     (reply.to_string(), String::new(), 0)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn observations_for_result() -> Result<Vec<Value>, String> {
+fn observations_for_result() -> Result<(Vec<ObservationRecord>, usize), String> {
     let session = session_id()?;
     let path = format!(".gm/dream-rsi/{session}/observations.json");
     let raw = crate::pkfs::read_to_string(&path).unwrap_or_default();
-    Ok(read_observation_values(&raw))
+    let values = read_observation_values(&raw);
+    let total = values.len();
+    let valid: Vec<ObservationRecord> = values
+        .iter()
+        .filter_map(ObservationRecord::from_value)
+        .collect();
+    let rejected = total - valid.len();
+    Ok((valid, rejected))
 }
 
 #[cfg(target_arch = "wasm32")]
-fn record_succeeded(record: &Value) -> bool {
-    record.get("exit_code").and_then(Value::as_i64) == Some(0)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn record_gate_drift_failure(record: &Value) -> bool {
-    !record_succeeded(record) && record.get("gate_drift").and_then(Value::as_bool).unwrap_or(true)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn per_verb_stats(observations: &[Value]) -> Vec<VerbStat> {
+fn per_verb_stats(observations: &[ObservationRecord]) -> Vec<VerbStat> {
     let mut tallies: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
     for record in observations {
-        let verb = record
-            .get("verb")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_owned();
+        let verb = record.verb.clone().unwrap_or_else(|| "unknown".to_owned());
         let tally = tallies.entry(verb).or_insert((0, 0, 0));
         tally.0 += 1;
-        if !record_succeeded(record) && record.get("no_match").and_then(Value::as_bool) != Some(true) {
+        if !record.succeeded() && !record.no_match {
             tally.1 += 1;
         }
-        if record_gate_drift_failure(record) {
+        if record.is_gate_drift_failure() {
             tally.2 += 1;
         }
     }
@@ -2404,16 +2428,16 @@ fn replay_proposals(replay: &Value) -> Vec<VerbProposal> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn derive_part_b(observations: &[Value]) -> PartB {
+fn derive_part_b(observations: &[ObservationRecord]) -> PartB {
     let mut walks: BTreeMap<String, (bool, Vec<String>)> = BTreeMap::new();
     for record in observations {
-        let Some(node) = record.get("lean_node").and_then(Value::as_str) else {
+        let Some(node) = record.lean_node.as_deref() else {
             continue;
         };
         let walk = walks.entry(node.to_owned()).or_insert((false, Vec::new()));
-        if record_succeeded(record) {
+        if record.succeeded() {
             walk.0 = true;
-        } else if let Some(dispatch_id) = record.get("dispatch_id").and_then(Value::as_str) {
+        } else if let Some(dispatch_id) = record.dispatch_id.as_deref() {
             walk.1.push(dispatch_id.to_owned());
         }
     }
@@ -2443,7 +2467,7 @@ fn derive_part_b(observations: &[Value]) -> PartB {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn produce_result(observations: &[Value], replay: &Value) -> DreamRsiResult {
+fn produce_result(observations: &[ObservationRecord], replay: &Value) -> DreamRsiResult {
     let records = observations.len() as u64;
     let part_a = if records < INSUFFICIENT_RECORD_THRESHOLD {
         PartA::Insufficient { records }

@@ -52,6 +52,7 @@ pub const GIT_VERBS: &[&str] = &[
     "git_branch",
     "git_remote",
     "git_submodule_add",
+    "git_submodule_update",
     "git_checkout",
     "git_merge",
     "git_merge_abort",

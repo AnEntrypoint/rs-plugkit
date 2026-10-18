@@ -698,7 +698,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
     };
     let named_scope = rel.is_some();
     let target = rel.as_deref().map(|r| join_under(root, r)).unwrap_or_else(|| root.to_string());
-    let universe = |files, source, listing_complete, excluded, walk_reason, tracked, untracked, nested, nested_failed| ScanUniverse {
+    let universe = |files: Vec<String>, source: FileSource, listing_complete: bool, excluded: Vec<RuleExclusion>, walk_reason: Option<String>, tracked: usize, untracked: usize, nested: usize, nested_failed: bool| ScanUniverse {
         files,
         source,
         listing_complete: listing_complete && !nested_failed,

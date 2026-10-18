@@ -3040,64 +3040,47 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
     let mut result_value = super::host_abi::unpack_to_value(result_packed);
     #[cfg(target_arch = "wasm32")]
-    let recorded: Option<(String, i64, bool, crate::orchestrator::dream_rsi::FailureClass)> = {
+    let recorded = {
         let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-        let exit_code = if result_value
-            .get("ok")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true)
-        {
-            0
-        } else {
-            1
-        };
         if !root_resolved {
             None
         } else {
+            let outcome = crate::orchestrator::dream_rsi::outcome(&result_value);
             let dispatch_id = crate::dispatch_ledger::record(
                 cwd,
                 &verb,
                 &fingerprint,
-                exit_code,
+                outcome.exit_code,
                 dispatch_session_id.as_deref(),
-                Some(crate::orchestrator::dream_rsi::dispatch_output_bytes(&result_value)),
+                Some(outcome.output_bytes),
             );
             if let Some(path) = persist_exec_js_witness(&verb, &body_s, &dispatch_id) {
                 if let Some(map) = result_value.as_object_mut() {
                     map.insert("witness_path".to_string(), json!(path));
                 }
             }
-            let gate_drift = crate::orchestrator::dream_rsi::failure_is_gate_drift(&result_value, exit_code);
-            let failure = crate::orchestrator::dream_rsi::failure_class(&result_value, exit_code);
-            Some((dispatch_id, exit_code, gate_drift, failure))
+            Some((dispatch_id, outcome))
         }
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let recorded: Option<(String, i64, bool, ())> = None;
+    let recorded: Option<(String, ())> = None;
     let reply = stamp_request_identity(
         result_value,
         &fingerprint,
         body_parse_failed,
-        recorded.as_ref().map(|(dispatch_id, _, _, _)| dispatch_id.as_str()),
+        recorded.as_ref().map(|(dispatch_id, _)| dispatch_id.as_str()),
     );
     #[cfg(target_arch = "wasm32")]
-    if let (Some((dispatch_id, exit_code, gate_drift, failure)), Some(session_id)) =
-        (recorded, dispatch_session_id.as_deref())
-    {
-        let lean_node = lean_node_stamp.as_deref();
-        crate::orchestrator::dream_rsi::observe_dispatch(
-            crate::orchestrator::dream_rsi::ObservedDispatch {
-                session_id,
-                dispatch_id: &dispatch_id,
-                verb: &verb,
-                fingerprint: &fingerprint,
-                exit_code,
-                gate_drift,
-                reply: &reply,
-                lean_node,
-                failure,
-                run_end: run_end_marker,
-            },
+    if let (Some((dispatch_id, outcome)), Some(session_id)) = (recorded, dispatch_session_id.as_deref()) {
+        crate::orchestrator::dream_rsi::observe_recorded(
+            outcome,
+            &dispatch_id,
+            session_id,
+            &verb,
+            &fingerprint,
+            &reply,
+            lean_node_stamp.as_deref(),
+            run_end_marker,
         );
     }
     pack(reply)
@@ -3297,6 +3280,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
             "git_branch" => git_branch(&body),
             "git_remote" => git_remote(&body),
             "git_submodule_add" => git_submodule_add(&body),
+            "git_submodule_update" => git_submodule_update(&body),
             "git_worktree" => git_worktree(&body),
             "git_checkout" => git_checkout(&body),
         "git_merge" => git_merge(&body),

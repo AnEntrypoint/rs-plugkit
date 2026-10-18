@@ -295,7 +295,7 @@ pub fn project_root_unresolvable_reason() -> String {
     match try_resolve_project_root() {
         Ok(_) => "project root is resolvable".to_string(),
         Err(attempts) => format!(
-            "gm_dir: project root resolution failed after {attempts} attempts via `git rev-parse --show-toplevel` -- refusing to silently fall back to CLAUDE_PROJECT_DIR/HOME, which would mis-root every stateful verb onto the wrong tree. Check for git subprocess/lock contention or a missing .git directory. {PROJECT_ROOT_UNRESOLVABLE_WORKAROUND}"
+            "gm_dir: project root resolution failed after {attempts} attempts via `git rev-parse --show-toplevel` -- refusing to silently fall back to the home directory, which would mis-root every stateful verb onto the wrong tree. Check for git subprocess/lock contention or a missing .git directory. {PROJECT_ROOT_UNRESOLVABLE_WORKAROUND}"
         ),
     }
 }
@@ -318,7 +318,7 @@ fn resolve_project_root_with_retry() -> PathBuf {
     match try_resolve_project_root() {
         Ok(root) => root,
         Err(attempts) => panic!(
-            "gm_dir: project root resolution failed after {} attempts via `git rev-parse --show-toplevel` -- refusing to silently fall back to CLAUDE_PROJECT_DIR/HOME, which would mis-root every stateful verb onto the wrong tree. Check for git subprocess/lock contention or a missing .git directory. {}",
+            "gm_dir: project root resolution failed after {} attempts via `git rev-parse --show-toplevel` -- refusing to silently fall back to the home directory, which would mis-root every stateful verb onto the wrong tree. Check for git subprocess/lock contention or a missing .git directory. {}",
             attempts, PROJECT_ROOT_UNRESOLVABLE_WORKAROUND
         ),
     }
