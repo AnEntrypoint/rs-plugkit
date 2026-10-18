@@ -188,20 +188,6 @@ for that path rather than a runtime check a caller could skip.
 `discipline-audit`'s ordering check now obtains this same proof object
 rather than a parallel hand-rolled equivalent.
 
-`orchestrator/memory_component.rs` is a THIRD component kind
-instantiated using `fiber_lifecycle`'s existing public API
-(`read_fiber_state`/`advance_fiber`/`ActiveFiberSet`) with zero new
-infrastructure added to `fiber_lifecycle.rs` -- gm's memory-namespace
-subsystem (`.gm/memories/`, `memory_md.rs`) read as a Cordis component,
-independently of disciplines and sibling wasm plugins. A namespace's
-coeffect specification is an optional `.gm/memories-manifest/<ns>.json`'s
-`depends_on` array (other namespaces whose content it assumes exists);
-its provision is always its own name. `memory-namespace-audit` advances
-every known namespace's fiber and reports which reached `Active`,
-exercising the same machinery `discipline-audit` exercises for
-disciplines, proving the module serves a caller nobody anticipated when
-it was written.
-
 `orchestrator/codeinsight_component.rs` is a FOURTH component kind,
 chosen adversarially rather than to confirm the pattern already worked:
 its substance (`code_index.rs`'s codeinsight/manifest/vec namespaces)
