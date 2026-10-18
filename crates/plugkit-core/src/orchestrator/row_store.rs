@@ -538,30 +538,55 @@ fn quarantine_torn_tail(log: &str, raw: &str, keep: usize) {
     let _ = pkfs::cas_write(log, raw, &raw[..keep]);
 }
 
-pub fn log_entries(store: &Store) -> Vec<serde_json::Value> {
+pub struct LogRead {
+    pub entries: Vec<serde_json::Value>,
+    pub dropped_torn_lines: usize,
+}
+
+pub fn read_log(store: &Store) -> Result<LogRead, String> {
     let Some(raw) = pkfs::read_to_string(&store.log) else {
-        return Vec::new();
+        return Ok(LogRead {
+            entries: Vec::new(),
+            dropped_torn_lines: 0,
+        });
     };
     let mut body: &str = &raw;
+    let mut dropped_torn_lines = 0;
     if !raw.is_empty() && !raw.ends_with('\n') {
         let keep = raw.rfind('\n').map_or(0, |i| i + 1);
         let torn = raw[keep..].trim();
         if !torn.is_empty() && serde_json::from_str::<serde_json::Value>(torn).is_err() {
             quarantine_torn_tail(&store.log, &raw, keep);
             body = &raw[..keep];
+            dropped_torn_lines = 1;
         }
     }
-    let mut out = Vec::new();
-    for line in body.lines() {
+    let mut entries = Vec::new();
+    for (index, line) in body.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) {
-            out.push(entry);
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(entry) => entries.push(entry),
+            Err(err) => {
+                return Err(format!(
+                    "prd_log_midfile_parse_error: {} line {} is not JSON ({}); repair or remove that line before reading the log",
+                    store.log,
+                    index + 1,
+                    err
+                ))
+            }
         }
     }
-    out
+    Ok(LogRead {
+        entries,
+        dropped_torn_lines,
+    })
+}
+
+pub fn log_entries(store: &Store) -> Vec<serde_json::Value> {
+    read_log(store).map(|log| log.entries).unwrap_or_default()
 }
 
 fn resolved_stems(store: &Store) -> BTreeSet<String> {

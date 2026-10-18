@@ -603,6 +603,10 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         })
         .collect();
     let store = row_store::Store::prd();
+    let log = match row_store::read_log(&store) {
+        Ok(log) => log,
+        Err(message) => return (String::new(), message, 1),
+    };
     let mut selected = selected;
     if !wanted_ids.is_empty() {
         for want in &wanted_ids {
@@ -660,7 +664,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
     } else {
         window.iter().map(brief_row).collect()
     };
-    let reply = serde_json::json!({
+    let mut reply = serde_json::json!({
         "items": items,
         "count": items.len(),
         "total": matched,
@@ -673,6 +677,10 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         "full": want_full,
         "hint": "pass {\"id\":\"<row id>\"} for one full row (repeated blocks of an id fold to the last one), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), {\"status\":\"all\",\"limit\":<n>,\"offset\":<n>} to page every status (next_offset names the next page, null when done), or {\"full\":true} for every full body. .gm/prd/ holds OPEN work only: a resolved row is moved to .gm/prd-log.jsonl, and an id or a closed status asked for here is answered from that log.",
     });
+    if log.dropped_torn_lines > 0 {
+        reply["dropped_torn_lines"] = serde_json::json!(log.dropped_torn_lines);
+        reply["dropped_torn_lines_sidecar"] = serde_json::json!(".gm/prd-log.jsonl.torn");
+    }
     (reply.to_string(), String::new(), 0)
 }
 
