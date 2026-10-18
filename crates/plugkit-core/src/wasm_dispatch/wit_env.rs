@@ -7,6 +7,26 @@ mod bindings {
     });
 }
 
+struct Component;
+
+impl bindings::exports::gm::plugkit::guest::Guest for Component {
+    fn dispatch_verb(verb: String, body: String) -> String {
+        let packed = super::dispatch_verb(
+            verb.as_ptr() as u32,
+            verb.len() as u32,
+            body.as_ptr() as u32,
+            body.len() as u32,
+        );
+        super::host_abi::unpack_to_string_pub(packed).unwrap_or_default()
+    }
+
+    fn plugkit_version() -> String {
+        env!("CARGO_PKG_VERSION").to_string()
+    }
+}
+
+bindings::export!(Component with_types_in bindings);
+
 use super::host_abi::{pack, read_str};
 use bindings::gm::plugkit::env as wit;
 
