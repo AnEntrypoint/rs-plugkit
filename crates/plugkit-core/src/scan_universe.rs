@@ -701,7 +701,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
     let universe = |files, source, listing_complete, excluded, walk_reason, tracked, untracked, nested, nested_failed| ScanUniverse {
         files,
         source,
-        listing_complete,
+        listing_complete: listing_complete && !nested_failed,
         excluded,
         walk_reason,
         git_tracked_files: tracked,
