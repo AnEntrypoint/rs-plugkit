@@ -4296,7 +4296,13 @@ pub(super) fn remote_moved_recovery_refusal(
             if push_body_requests_force(body) {
                 return Some("a forced push is never recovered automatically; pass recover_remote_moved:true if pulling onto it is genuinely intended.");
             }
-            if resolve_ref(repo, "HEAD").as_deref() != Some(local_sha) {
+            let head_contains_pushed_ref = git_call_argv(&["merge-base", local_sha, "HEAD"], repo)
+                .get("stdout")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                == local_sha;
+            if !head_contains_pushed_ref {
                 return Some("the pushed ref is not this checkout's HEAD, so it was named with intent; automatic recovery is limited to publishing the checkout itself. Pass recover_remote_moved:true to recover this ref.");
             }
             if !remote_moved_is_same_branch_advance(repo, branch, local_sha) {
