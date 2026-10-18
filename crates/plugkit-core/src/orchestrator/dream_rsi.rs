@@ -68,6 +68,7 @@ pub enum PartA {
 pub struct RejectedWalk {
     pub node: String,
     pub missing_dispatch_ids: Vec<String>,
+    pub reason: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -582,7 +583,7 @@ struct ObservationRecord {
 impl ObservationRecord {
     fn from_value(value: &Value) -> Option<Self> {
         let record: Self = serde_json::from_value(value.clone()).ok()?;
-        record.is_consistent().then_some(record)
+        (record.exit_code.is_some() && record.is_consistent()).then_some(record)
     }
 
     fn is_consistent(&self) -> bool {
@@ -1431,8 +1432,13 @@ fn register_policy(content: &str) -> Result<Value, String> {
                     == Some(owner_session_id.as_str())
                     && entry.get("deployed").and_then(Value::as_bool) == Some(true)
             })
-            .and_then(|entry| entry.get("id").and_then(Value::as_str).map(str::to_string));
-        if let Some(incumbent) = incumbent {
+            .map(|entry| {
+                (
+                    entry.get("id").and_then(Value::as_str).map(str::to_string),
+                    entry.get("deployed_at").and_then(Value::as_i64),
+                )
+            });
+        if let Some((Some(incumbent), deployed_at)) = incumbent {
             let replay_path = session_store_path(ReplayFile::Replay.name())?;
             let proven = crate::pkfs::read_to_string(&replay_path)
                 .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
@@ -1441,6 +1447,9 @@ fn register_policy(content: &str) -> Result<Value, String> {
                         && result.get("baseline_policy_id").and_then(Value::as_str) == Some(incumbent.as_str())
                         && result.get("improved").and_then(Value::as_bool) == Some(true)
                         && result.get("never_worse").and_then(Value::as_bool) == Some(true)
+                        && deployed_at.is_some_and(|since| {
+                            result.get("ts").and_then(Value::as_i64).is_some_and(|ts| ts >= since)
+                        })
                 });
             if !proven {
                 return Err(format!(
@@ -1457,7 +1466,8 @@ fn register_policy(content: &str) -> Result<Value, String> {
             }
         }
     }
-    let new_policy = json!({ "id": policy.id, "owner_session_id": owner_session_id, "roots": policy.roots, "max_nodes": policy.max_nodes, "deployed": deployed, "max_online_rounds": max_online_rounds, "online_rounds": Vec::<u64>::new() });
+    let deployed_at = deployed.then(|| super::state::now_ms() as i64);
+    let new_policy = json!({ "id": policy.id, "owner_session_id": owner_session_id, "roots": policy.roots, "max_nodes": policy.max_nodes, "deployed": deployed, "deployed_at": deployed_at, "max_online_rounds": max_online_rounds, "online_rounds": Vec::<u64>::new() });
     policies.push(new_policy);
     let signed = policies
         .into_iter()
@@ -2412,7 +2422,18 @@ pub(super) fn handle(content: &str) -> (String, String, i32) {
             )
         }
     };
-    let mut reply = result_json(&produce_result(&observations, &replay));
+    let scorer = match session_id() {
+        Ok(scorer) => scorer,
+        Err(error) => {
+            return (
+                json!({ "ok": false, "error": error }).to_string(),
+                String::new(),
+                1,
+            )
+        }
+    };
+    let walk_files = lean_walk_files();
+    let mut reply = result_json(&produce_result(&observations, &replay, &scorer, &walk_files));
     reply["rejected_count"] = json!(rejected_count);
     reply["replay"] = replay;
     (reply.to_string(), String::new(), 0)
@@ -2485,7 +2506,47 @@ fn replay_proposals(replay: &Value) -> Vec<VerbProposal> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn derive_part_b(observations: &[ObservationRecord]) -> PartB {
+struct LeanWalkFile {
+    node: String,
+    session: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn lean_walk_files() -> Vec<LeanWalkFile> {
+    dir_entry_names(".gm/lean-walk")
+        .into_iter()
+        .filter_map(|name| {
+            let stem = name.strip_suffix(".json")?;
+            let (file_node, file_session) = stem.split_once('.')?;
+            let record = crate::pkfs::read_to_string(&format!(".gm/lean-walk/{name}"))
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+            let field = |key: &str| {
+                record
+                    .as_ref()
+                    .and_then(|value| value.get(key))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_owned)
+            };
+            Some(LeanWalkFile {
+                node: field("node").unwrap_or_else(|| file_node.to_owned()),
+                session: field("session").unwrap_or_else(|| file_session.to_owned()),
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn derive_part_b(
+    observations: &[ObservationRecord],
+    scorer: &str,
+    walk_files: &[LeanWalkFile],
+) -> PartB {
+    let self_scored: BTreeSet<&str> = walk_files
+        .iter()
+        .filter(|walk| walk.session == scorer)
+        .map(|walk| walk.node.as_str())
+        .collect();
     let mut walks: BTreeMap<String, (bool, Vec<String>)> = BTreeMap::new();
     for record in observations {
         let Some(node) = record.lean_node.as_deref() else {
@@ -2499,15 +2560,33 @@ fn derive_part_b(observations: &[ObservationRecord]) -> PartB {
         }
     }
     let traversable_nodes = walks.len() as u64;
-    let nodes_verified = walks.values().filter(|(verified, _)| *verified).count() as u64;
-    let rejected_walks = walks
+    let nodes_verified = walks
         .iter()
-        .filter(|(_, (verified, _))| !*verified)
-        .map(|(node, (_, missing))| RejectedWalk {
-            node: node.clone(),
-            missing_dispatch_ids: missing.clone(),
+        .filter(|(node, (verified, _))| *verified && !self_scored.contains(node.as_str()))
+        .count() as u64;
+    let mut rejected: BTreeMap<String, RejectedWalk> = walks
+        .iter()
+        .filter(|(node, (verified, _))| !*verified || self_scored.contains(node.as_str()))
+        .map(|(node, (_, missing))| {
+            let reason = self_scored.contains(node.as_str()).then_some("self_scored");
+            (
+                node.clone(),
+                RejectedWalk {
+                    node: node.clone(),
+                    missing_dispatch_ids: missing.clone(),
+                    reason,
+                },
+            )
         })
         .collect();
+    for node in &self_scored {
+        rejected.entry((*node).to_owned()).or_insert_with(|| RejectedWalk {
+            node: (*node).to_owned(),
+            missing_dispatch_ids: Vec::new(),
+            reason: Some("self_scored"),
+        });
+    }
+    let rejected_walks = rejected.into_values().collect();
     PartB {
         traversable_nodes,
         nodes_verified,
@@ -2524,7 +2603,12 @@ fn derive_part_b(observations: &[ObservationRecord]) -> PartB {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn produce_result(observations: &[ObservationRecord], replay: &Value) -> DreamRsiResult {
+fn produce_result(
+    observations: &[ObservationRecord],
+    replay: &Value,
+    scorer: &str,
+    walk_files: &[LeanWalkFile],
+) -> DreamRsiResult {
     let records = observations.len() as u64;
     let part_a = if records < INSUFFICIENT_RECORD_THRESHOLD {
         PartA::Insufficient { records }
@@ -2538,7 +2622,7 @@ fn produce_result(observations: &[ObservationRecord], replay: &Value) -> DreamRs
     DreamRsiResult {
         status: DreamRsiStatus::Proposed,
         part_a,
-        part_b: derive_part_b(observations),
+        part_b: derive_part_b(observations, scorer, walk_files),
     }
 }
 
@@ -2589,6 +2673,7 @@ fn result_json(result: &DreamRsiResult) -> Value {
                 .map(|walk| json!({
                     "node": walk.node,
                     "missing_dispatch_ids": walk.missing_dispatch_ids,
+                    "reason": walk.reason,
                 }))
                 .collect::<Vec<_>>(),
             "proposals": part_b
