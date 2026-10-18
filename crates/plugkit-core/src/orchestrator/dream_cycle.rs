@@ -58,17 +58,23 @@ fn evaluate(content: &str) -> Result<Value, String> {
     let mut fields = round.summary;
     fields["cycle_id"] = json!(cycle_id);
     fields["last_dispatch_id"] = json!(latest);
-    let replay_result_path = super::dream_rsi::persist_replay_result(
+    match super::dream_rsi::persist_replay_result(
         super::dream_rsi::CYCLE_RESULT_FILE,
         "dream-replay-cycle",
         fields.clone(),
-    );
-    Ok(json!({
-        "ok": true, "kind": "observations", "status": "replayed",
-        "owner_session_id": owner, "cycle_id": cycle_id,
-        "last_dispatch_id": latest, "cycle": fields,
-        "replay_result_path": replay_result_path
-    }))
+    ) {
+        Ok(replay_result_path) => Ok(json!({
+            "ok": true, "kind": "observations", "status": "replayed",
+            "owner_session_id": owner, "cycle_id": cycle_id,
+            "last_dispatch_id": latest, "cycle": fields,
+            "replay_result_path": replay_result_path
+        })),
+        Err(error) => Ok(json!({
+            "ok": false, "error_code": "persist_failed", "kind": "observations",
+            "status": "persist_failed", "owner_session_id": owner, "cycle_id": cycle_id,
+            "last_dispatch_id": latest, "error": error
+        })),
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
