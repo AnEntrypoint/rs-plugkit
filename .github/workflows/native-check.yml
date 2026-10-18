@@ -46,6 +46,6 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7
         with:
-          key: native-check-slim
+          key: native-check-default
       - name: cargo check native host target, slim feature set that the wasm release ships
         run: cargo check -p rs-plugkit --features slim
