@@ -2124,18 +2124,6 @@ pub(super) fn commit_identity(body: &Value) -> (String, String) {
     (name, email)
 }
 
-pub(super) fn commit_author_override_refusal(body: &Value) -> Option<String> {
-    let configured = commit_identity(&json!({}));
-    let requested = commit_identity(body);
-    if requested == configured {
-        return None;
-    }
-    Some(format!(
-        "git_commit author {} <{}> differs from the configured identity {} <{}>; only the configured identity may author commits. Drop author_name and author_email, or set git.author_name and git.author_email in the gm config.",
-        requested.0, requested.1, configured.0, configured.1
-    ))
-}
-
 pub(super) fn commit_session_id(body: &Value) -> String {
     ["SESSION_ID", "session_id", "sessionId"]
         .iter()
@@ -3237,9 +3225,6 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             return Ok(err("git_commit", "message required"));
         }
         if let Err(reason) = commit_message_shape(message) {
-            return Ok(err("git_commit", &reason));
-        }
-        if let Some(reason) = commit_author_override_refusal(body) {
             return Ok(err("git_commit", &reason));
         }
         let allow_empty = body
