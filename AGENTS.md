@@ -83,7 +83,7 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 
 ## Lean graph and compiled prose
 
-- `orchestrator/lean_graph.json` and `orchestrator/instructions/prose/*.md` are vendored copies of `gm-config/fsm/graph.json` and `gm-config/prose/*.md`; `fsm::default_graph()` parses the lean graph and `instructions/lean_prose.rs` maps each key to its file.
+- `orchestrator/lean_graph.json` and `orchestrator/instructions/prose/*.md` are vendored copies of `gm-config/fsm/graph.json` and `gm-config/prose/*.md`; `fsm::default_graph()` parses the lean graph and `orchestrator/instructions/lean_prose.rs` maps each key to its file.
 - Re-sync: copy both sources from the gm-config commit named by `DEFAULT_REPO_PINNED_SHA`, regenerate `lean_prose.rs` from every `prose/*.md` except `entry` and `entry-extended`, delete prose files gm-config no longer has, keep the pin on that commit.
 - A state with `"entry": true` is a graph root and skips the unreachable-state check; a configured graph that fails validation makes `instruction` and `transition` return the error. A gate with `"advisory": true` never blocks; its message appears in the `advisory` array of the `transition` reply.
 
