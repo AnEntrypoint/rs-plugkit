@@ -7620,7 +7620,7 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
                 .collect()
         })
         .unwrap_or_default();
-    let run_with_failed_job = failing_run_ids.iter().copied().find(|id| {
+    let run_has_failed_job = |id: u64| {
         ci_status_gh_api_json(&format!("repos/{}/actions/runs/{}/jobs?per_page=100", repo, id))
             .ok()
             .and_then(|jobs| {
@@ -7630,7 +7630,20 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
                 })
             })
             .unwrap_or(false)
-    });
+    };
+    let run_with_failed_job = failing_run_ids
+        .iter()
+        .copied()
+        .find(|id| run_has_failed_job(*id))
+        .or_else(|| {
+            if failing_run_ids.is_empty() {
+                return None;
+            }
+            runs?
+                .iter()
+                .filter_map(newest_id)
+                .find(|id| !failing_run_ids.contains(id) && run_has_failed_job(*id))
+        });
     match run_with_failed_job
         .or_else(|| failing_run_ids.first().copied())
         .or_else(|| runs.and_then(|runs| runs.first()).and_then(newest_id))
