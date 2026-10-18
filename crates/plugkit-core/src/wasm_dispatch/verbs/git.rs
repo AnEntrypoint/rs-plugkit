@@ -1,4 +1,5 @@
 use super::*;
+use super::lane_claims::{lane_claim_conflicts, lane_claim_record, lane_claim_refusal, lane_claim_release};
 
 pub(super) const GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS: &str = "git_async";
 pub(super) const GIT_PENDING_RESULT_OUTBOX_NS: &str = "outbox";
@@ -2790,6 +2791,21 @@ pub(super) fn commit_message_shape(message: &str) -> Result<(), String> {
 pub(super) fn git_commit(body: &Value) -> u64 {
     git_async_entry("git_commit", body, |body, plan| {
         let cwd = body_cwd(body);
+        if body.get("claim_only").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let claim_paths = body_pathspecs(body);
+            let session = commit_session_id(body);
+            if session.is_empty() || claim_paths.is_empty() {
+                return Ok(err("git_commit", "claim_only needs SESSION_ID and a non-empty paths array"));
+            }
+            let conflicts = lane_claim_conflicts(&claim_paths, &session, cwd);
+            if !conflicts.is_empty() {
+                return Ok(err_json("git_commit", lane_claim_refusal("git_commit", &conflicts)));
+            }
+            if !lane_claim_record(&claim_paths, &session, cwd) {
+                return Ok(err("git_commit", "lane claim could not be written to .gm/lane-claims.json"));
+            }
+            return Ok(json!({ "ok": true, "verb": "git_commit", "claimed": true, "session_id": session, "paths": claim_paths }));
+        }
         let message = body
             .get("message")
             .and_then(|v| v.as_str())
@@ -2893,6 +2909,12 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             .get("allow_whole_index")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let lane_session = commit_session_id(body);
+        let lane_conflicts = lane_claim_conflicts(&paths, &lane_session, cwd);
+        if !lane_conflicts.is_empty() {
+            return Ok(err_json("git_commit", lane_claim_refusal("git_commit", &lane_conflicts)));
+        }
+        lane_claim_release(&lane_session, cwd);
         let foreign_prd_rows = prd_foreign_rows_for_commit(&paths, body, cwd);
         let allow_foreign_prd_rows = body_allow_foreign_prd_rows(body);
         let mut own_rows_filter = prd_own_rows_filter(&paths, body, cwd);
@@ -4366,6 +4388,12 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             );
         }
         dangling_waived = scan.waived;
+        let lane_session = commit_session_id(body);
+        let lane_conflicts = lane_claim_conflicts(&paths, &lane_session, cwd_ref);
+        if !lane_conflicts.is_empty() {
+            return err_json("git_finalize", lane_claim_refusal("git_finalize", &lane_conflicts));
+        }
+        lane_claim_release(&lane_session, cwd_ref);
         let foreign_prd_rows = prd_foreign_rows_for_commit(&paths, body, cwd_ref);
         let allow_foreign_prd_rows = body_allow_foreign_prd_rows(body);
         let mut own_rows_filter = prd_own_rows_filter(&paths, body, cwd_ref);
