@@ -2623,7 +2623,11 @@ fn derive_part_b(
     let self_scored: BTreeSet<&str> = walk_files
         .iter()
         .filter(|walk| {
-            walk.session == scorer || walk.verified_by.as_deref() == Some(walk.session.as_str())
+            walk.session == scorer
+                || walk
+                    .verified_by
+                    .as_deref()
+                    .map_or(true, |verifier| verifier == walk.session.as_str())
         })
         .map(|walk| walk.node.as_str())
         .collect();
