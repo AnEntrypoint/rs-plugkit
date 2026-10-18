@@ -2757,6 +2757,7 @@ fn stamp_request_identity(
 ) -> String {
     if let Some(obj) = value.as_object_mut() {
         obj.insert("request_fingerprint".to_string(), json!(fingerprint));
+        obj.insert("gm_session_header_version".to_string(), json!(1));
         if body_parse_failed {
             obj.insert("body_parse_error".to_string(), json!(true));
         }
@@ -2797,6 +2798,17 @@ fn body_parse_failure_response(verb: &str, body_s: &str, err: &serde_json::Error
         "re_dispatch_safe": true,
         "next_dispatch_hint": "instruction",
     }).to_string())
+}
+
+fn strip_gm_session_header(body_s: &str) -> (Option<String>, &str) {
+    if let Some(rest) = body_s.strip_prefix("gm_session_id=") {
+        let (value_line, remainder) = rest.split_once('\n').unwrap_or((rest, ""));
+        let id = value_line.trim();
+        if !id.is_empty() {
+            return (Some(id.to_string()), remainder);
+        }
+    }
+    (None, body_s)
 }
 
 fn extract_session_id_from_plain_text_body(body_s: &str) -> Option<String> {
@@ -2863,6 +2875,12 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     let verb = read_str(verb_ptr as *const u8, verb_len);
     let raw_body_s = read_str(body_ptr as *const u8, body_len);
     let body_is_json = verb_body_must_be_json(&verb);
+    let (header_session_id, raw_body_s) = if body_is_json {
+        (None, raw_body_s)
+    } else {
+        let (sid, rest) = strip_gm_session_header(&raw_body_s);
+        (sid, rest.to_string())
+    };
     let (caller_timeout_ms, body_s) = if body_is_json {
         let (n, rest) = strip_timeout_ms_prefix_directive(&raw_body_s);
         (n, rest.to_string())
@@ -2888,6 +2906,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     let body_parse_failed = parse_failure.is_some();
     set_caller_budget(caller_timeout_ms);
     let dispatch_session_id = crate::validation::session_id_from_body(&body)
+        .or(header_session_id)
         .or_else(|| extract_session_id_from_plain_text_body(&raw_body_s));
     super::events::set_dispatch_session_id(dispatch_session_id.clone());
     if let Some(root_override) = body.get("git_root_override").and_then(|v| v.as_str()) {
