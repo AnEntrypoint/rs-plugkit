@@ -60,9 +60,18 @@ fn sweep_stale_spool_tmp(cwd: &str, now: u64) {
     }
 }
 
+const LEDGER_BODY_MAX_CHARS: usize = 8192;
+
+fn bounded_request_body(body: &str) -> (String, bool) {
+    let text: String = body.chars().take(LEDGER_BODY_MAX_CHARS).collect();
+    let truncated = text.len() < body.len();
+    (text, truncated)
+}
+
 pub fn record(
     cwd: &str,
     verb: &str,
+    request_body: &str,
     fingerprint: &str,
     exit_code: i64,
     session_id: Option<&str>,
@@ -70,6 +79,7 @@ pub fn record(
 ) -> Result<String, String> {
     let path = ledger_path(cwd);
     sweep_stale_spool_tmp(cwd, now_ms());
+    let (body_text, body_truncated) = bounded_request_body(request_body);
     let mut attempt = 0;
     loop {
         attempt += 1;
@@ -96,6 +106,9 @@ pub fn record(
             "exit_code": exit_code,
             "output_bytes": output_bytes,
             "session_id": session_id,
+            "cwd": cwd,
+            "request_body": body_text,
+            "request_body_truncated": body_truncated,
         }));
         list.retain(|e| {
             e.get("ts")
