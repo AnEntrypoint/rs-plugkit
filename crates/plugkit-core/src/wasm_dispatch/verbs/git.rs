@@ -7596,12 +7596,12 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
             "repo": repo, "sha": sha,
         })
     })?;
-    match parsed
-        .get("workflow_runs")
-        .and_then(Value::as_array)
-        .and_then(|runs| runs.first())
-        .and_then(|run| run.get("id"))
-        .and_then(Value::as_u64)
+    let runs = parsed.get("workflow_runs").and_then(Value::as_array);
+    let newest_id = |run: &Value| run.get("id").and_then(Value::as_u64);
+    match runs
+        .and_then(|runs| runs.iter().find(|run| run.get("conclusion").and_then(Value::as_str) == Some("failure")))
+        .or_else(|| runs.and_then(|runs| runs.first()))
+        .and_then(newest_id)
     {
         Some(run_id) => Ok(run_id),
         None => Err(json!({
