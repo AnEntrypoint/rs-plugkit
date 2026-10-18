@@ -34,3 +34,4 @@ crates/**/.gm/
 .gm/pool/
 .gm/codeinsight-fiber-state/
 .gm/claim-audit-fired
+.gm/lane-claims.json
