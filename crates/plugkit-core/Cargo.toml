@@ -23,7 +23,7 @@ sha2 = "0.10"
 gemm = { version = "0.17", default-features = false }
 tokenizers = { version = "0.23", default-features = false, features = ["unstable_wasm"] }
 getrandom = { version = "0.2", features = ["custom"] }
-rs-search = { git = "https://github.com/AnEntrypoint/rs-search.git", package = "rs-search", default-features = false }
+rs-search = { git = "https://github.com/AnEntrypoint/rs-search.git", rev = "1bbeaf68c953e665979c2f8c9b69550599c0827e", package = "rs-search", default-features = false }
 ignore = "0.4.30"
 regex = "1"
 globset = "0.4"
