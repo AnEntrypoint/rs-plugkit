@@ -902,6 +902,16 @@ pub(super) fn codesearch_result_limit(
     mode: &str,
 ) -> Result<(u32, bool), String> {
     let zero_is_unlimited = matches!(mode, "literal" | "regex" | "filename");
+    if !zero_is_unlimited {
+        if let Some(field) = CODESEARCH_LIMIT_FIELDS
+            .iter()
+            .find(|f| body.get(**f).and_then(Value::as_u64) == Some(0))
+        {
+            return Err(format!(
+                "body field \"{field}\" must be a positive integer result limit, got 0 -- k 0 means unlimited only for literal, regex and filename, so mode \"{mode}\" needs a positive k"
+            ));
+        }
+    }
     scan_result_limit(body, CODESEARCH_LIMIT_FIELDS, cfg.budget.default_k as u32, zero_is_unlimited)
 }
 
