@@ -1515,7 +1515,7 @@ fn crawl_reply(reply: Value) -> u64 {
     }
 }
 
-const ENV_GET_ALLOWED_EXACT: &[&str] = &["CLAUDE_PROJECT_DIR", "GITHUB_TOKEN", "GH_TOKEN"];
+const ENV_GET_ALLOWED_EXACT: &[&str] = &["GITHUB_TOKEN", "GH_TOKEN"];
 const ENV_GET_ALLOWED_PREFIXES: &[&str] = &["PLUGKIT_", "GM_"];
 
 fn env_get_allowed(key: &str) -> bool {
@@ -3005,6 +3005,12 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     }
     strip_reserved_body_keys(&mut body);
     #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
+    let run_end_marker = body
+        .as_object_mut()
+        .and_then(|map| map.remove("run_end"))
+        .and_then(|value| value.as_bool())
+        == Some(true);
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
     let lean_node_stamp = take_lean_node(&mut body);
     let body_parse_failed = parse_failure.is_some();
     set_caller_budget(caller_timeout_ms);
@@ -3085,6 +3091,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
                 reply: &reply,
                 lean_node,
                 failure,
+                run_end: run_end_marker,
             },
         );
     }

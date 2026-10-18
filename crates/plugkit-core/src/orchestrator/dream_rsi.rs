@@ -510,6 +510,8 @@ struct ObservationRecord {
     error_code: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     no_match: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    run_end: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -559,6 +561,7 @@ pub struct ObservedDispatch<'a> {
     pub reply: &'a str,
     pub lean_node: Option<&'a str>,
     pub failure: FailureClass,
+    pub run_end: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -933,6 +936,9 @@ pub fn history_round(owner: &str, beta1: f64, beta2: f64) -> Result<HistoryRound
     if rankings.len() != candidate_count {
         defects.push("postcondition_rankings_incomplete");
     }
+    if !defects.is_empty() {
+        return Err(format!("dream-replay-cycle postcondition failed: {}", defects.join(", ")));
+    }
     rankings.sort_by(|left, right| {
         right.get("score").and_then(Value::as_f64).partial_cmp(&left.get("score").and_then(Value::as_f64)).unwrap_or(std::cmp::Ordering::Equal)
     });
@@ -972,6 +978,7 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
         reply,
         lean_node,
         failure,
+        run_end,
     } = observed;
     if verb.starts_with("dream-")
         || matches!(
@@ -1013,6 +1020,7 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
         lean_node: lean_node.map(str::to_owned),
         error_code: failure.error_code,
         no_match: failure.no_match,
+        run_end,
     };
     let Ok(line) = serde_json::to_string(&record) else {
         return;
