@@ -4,7 +4,7 @@ use crate::ragconfig::IndexConfig;
 
 const CODE_EXTS: &[&str] = &["js", "mjs", "cjs"];
 const SIZE_RATIO_THRESHOLD: u64 = 300;
-const MAX_SCAN_BYTES: u64 = 500 * 1024;
+const MAX_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_NODE_MODULES_FILES: usize = 20_000;
 
 const NOISE_SKIP_DIRS: &[&str] = &[
