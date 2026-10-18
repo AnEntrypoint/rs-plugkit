@@ -433,14 +433,12 @@ fn session_store_path(name: &str) -> Result<String, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn failure_is_gate_drift(result: &Value, exit_code: i64) -> bool {
+fn is_gate_drift_code(code: &str) -> bool {
     matches!(
-        failure_class(result, exit_code).error_code(),
-        Some(
-            crate::wasm_dispatch::ERR_CODE_GATE_DENIED
-                | crate::wasm_dispatch::ERR_CODE_UNKNOWN_VERB
-                | crate::wasm_dispatch::ERR_CODE_RETIRED_VERB
-        )
+        code,
+        crate::wasm_dispatch::ERR_CODE_GATE_DENIED
+            | crate::wasm_dispatch::ERR_CODE_UNKNOWN_VERB
+            | crate::wasm_dispatch::ERR_CODE_RETIRED_VERB
     )
 }
 
@@ -1017,11 +1015,12 @@ pub struct Outcome {
 #[cfg(target_arch = "wasm32")]
 pub fn outcome(result: &Value) -> Outcome {
     let exit_code = if result.get("ok").and_then(Value::as_bool).unwrap_or(true) { 0 } else { 1 };
+    let failure = failure_class(result, exit_code);
     Outcome {
         exit_code,
         output_bytes: dispatch_output_bytes(result),
-        gate_drift: failure_is_gate_drift(result, exit_code),
-        failure: failure_class(result, exit_code),
+        gate_drift: failure.error_code().is_some_and(is_gate_drift_code),
+        failure,
     }
 }
 
