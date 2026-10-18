@@ -30,7 +30,7 @@ pub fn record(
     exit_code: i64,
     session_id: Option<&str>,
     output_bytes: Option<u64>,
-) -> String {
+) -> Result<String, String> {
     let path = ledger_path(cwd);
     let mut attempt = 0;
     loop {
@@ -46,7 +46,7 @@ pub fn record(
         };
         let ts = now_ms();
         let Some(mut list) = parsed else {
-            return new_dispatch_id(verb, fingerprint, ts, 0);
+            return Err(ledger_unavailable(&path));
         };
         let seq = list.len() as u64;
         let dispatch_id = new_dispatch_id(verb, fingerprint, ts, seq);
@@ -70,11 +70,17 @@ pub fn record(
         }
         let serialized = Value::Array(list).to_string();
         match host_cas_write(&path, &existing, &serialized) {
-            CAS_SWAPPED => return dispatch_id,
+            CAS_SWAPPED => return Ok(dispatch_id),
             CAS_MISMATCH if attempt < CAS_MAX_ATTEMPTS => continue,
-            _ => return dispatch_id,
+            _ => return Err(ledger_unavailable(&path)),
         }
     }
+}
+
+fn ledger_unavailable(path: &str) -> String {
+    format!(
+        "dispatch ledger {path} could not be read or written as a JSON array; dispatch not recorded and the file left unchanged"
+    )
 }
 
 fn new_dispatch_id(verb: &str, fingerprint: &str, ts: u64, seq: u64) -> String {

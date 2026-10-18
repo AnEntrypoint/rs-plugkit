@@ -1841,7 +1841,7 @@ fn rerun_bound_witness(script: &str) -> Result<serde_json::Value, String> {
             status.unwrap_or(-1),
             None,
             Some(witness_stdout.len() as u64),
-        );
+        )?;
         Ok(serde_json::json!({
             "dispatch_id": dispatch_id,
             "passed": passed,

@@ -3051,20 +3051,31 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
             None
         } else {
             let outcome = crate::orchestrator::dream_rsi::outcome(&result_value);
-            let dispatch_id = crate::dispatch_ledger::record(
+            match crate::dispatch_ledger::record(
                 cwd,
                 &verb,
                 &fingerprint,
                 outcome.exit_code,
                 dispatch_session_id.as_deref(),
                 Some(outcome.output_bytes),
-            );
-            if let Some(path) = persist_exec_js_witness(&verb, &body_s, &dispatch_id) {
-                if let Some(map) = result_value.as_object_mut() {
-                    map.insert("witness_path".to_string(), json!(path));
+            ) {
+                Ok(dispatch_id) => {
+                    if let Some(path) = persist_exec_js_witness(&verb, &body_s, &dispatch_id) {
+                        if let Some(map) = result_value.as_object_mut() {
+                            map.insert("witness_path".to_string(), json!(path));
+                        }
+                    }
+                    Some((dispatch_id, outcome))
+                }
+                Err(reason) => {
+                    result_value = super::host_abi::unpack_to_value(err_coded(
+                        &verb,
+                        "dispatch_ledger_unavailable",
+                        &reason,
+                    ));
+                    None
                 }
             }
-            Some((dispatch_id, outcome))
         }
     };
     #[cfg(not(target_arch = "wasm32"))]
