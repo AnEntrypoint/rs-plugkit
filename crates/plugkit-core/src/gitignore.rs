@@ -65,6 +65,7 @@ pub const MUST_STAY_TRACKED: &[&str] = &[
     ".gm/mutables/",
     ".gm/prd-log.jsonl",
     ".gm/mutables-log.jsonl",
+    ".gm/expansion-audit.jsonl",
     ".gm/gm.config.json",
     ".gm/config.source.json",
     "gm-data/code-search/",
