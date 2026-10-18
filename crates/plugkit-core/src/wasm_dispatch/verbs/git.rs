@@ -2804,7 +2804,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             if !lane_claim_record(&claim_paths, &session, cwd) {
                 return Ok(err("git_commit", "lane claim could not be written to .gm/lane-claims.json"));
             }
-            return Ok(json!({ "ok": true, "verb": "git_commit", "claimed": true, "session_id": session, "paths": claim_paths }));
+            return Ok(ok("git_commit", json!({ "claimed": true, "session_id": session, "paths": claim_paths })));
         }
         let message = body
             .get("message")
