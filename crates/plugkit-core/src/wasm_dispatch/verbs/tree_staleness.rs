@@ -93,6 +93,17 @@ pub(super) fn stamp_tree_staleness_packed(body: &Value, packed: u64) -> u64 {
     let Some(map) = v.as_object_mut() else {
         return packed;
     };
+    for key in ["complete", "exhaustive"] {
+        if map.contains_key(key) {
+            map.insert(key.to_string(), json!(false));
+        }
+    }
+    if map.contains_key("complete") {
+        map.insert(
+            "complete_reason".to_string(),
+            json!("stale_tree: checkout behind upstream or fetch older than 24 h, results may miss remote symbols"),
+        );
+    }
     map.insert("stale_tree".to_string(), stale);
     pack(v.to_string())
 }
