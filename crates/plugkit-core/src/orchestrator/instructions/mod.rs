@@ -998,7 +998,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     let update_available = read_spool_json(".update-available.json");
     let supply_chain_scan = automatic_supply_chain_scan();
     let dream_rsi_strategy = super::dream_rsi::active_strategy(notify_session.as_deref());
-    let dream_rsi_replay = super::dream_rsi::automatic_replay(notify_session.as_deref());
+    let dream_rsi_replay = super::dream_rsi::persisted_cycle_result(notify_session.as_deref());
     let config_changed = super::config_notify::drain_for_session(notify_session.as_deref());
     let running_tasks = super::task::live_running_tasks();
     let stuck_spool = super::task::stuck_spool();
