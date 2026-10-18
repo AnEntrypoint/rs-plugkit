@@ -3018,7 +3018,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         Some(rejection) => rejection,
         None => match parse_failure.as_ref() {
             Some(err) => body_parse_failure_response(&verb, &body_s, err),
-            None => dispatch_gated_verb(&verb, &body, &body_s),
+            None => dispatch_verb_unranked(&verb, &body, &body_s),
         },
     };
     set_caller_budget(None);
@@ -3053,8 +3053,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
                     map.insert("witness_path".to_string(), json!(path));
                 }
             }
-            let gate_drift = exit_code != 0
-                && crate::orchestrator::dream_rsi::failure_is_gate_drift(&result_value);
+            let gate_drift = crate::orchestrator::dream_rsi::failure_is_gate_drift(&result_value, exit_code);
             let failure = crate::orchestrator::dream_rsi::failure_class(&result_value, exit_code);
             Some((dispatch_id, exit_code, gate_drift, failure))
         }
@@ -3160,40 +3159,6 @@ fn restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb: &str) {
     }
 }
 
-fn attach_dream_rsi_advisory(
-    packed: u64,
-    verb: &str,
-    reason: &str,
-    next_dispatch_hint: &str,
-) -> u64 {
-    let mut value = super::host_abi::unpack_to_value(packed);
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "dream_rsi_advisory".to_string(),
-            json!({
-                "strategy": "replay-recorded-successes-first",
-                "verb": verb,
-                "next_dispatch_hint": next_dispatch_hint,
-                "admitted_anyway": true,
-                "reason": reason,
-            }),
-        );
-    }
-    pack(value.to_string())
-}
-
-fn dispatch_gated_verb(verb: &str, body: &Value, body_s: &str) -> u64 {
-    let admission_read_before_dispatch = crate::orchestrator::dream_rsi::admit_dispatch(verb);
-    let packed = dispatch_verb_unranked(verb, body, body_s);
-    match admission_read_before_dispatch {
-        crate::orchestrator::dream_rsi::Admission::Allow => packed,
-        crate::orchestrator::dream_rsi::Admission::Advisory {
-            reason,
-            next_dispatch_hint,
-        } => attach_dream_rsi_advisory(packed, verb, &reason, next_dispatch_hint),
-    }
-}
-
 fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
     #[cfg(target_arch = "wasm32")]
     let dispatch_start_ms = unsafe { host_now_ms() };
@@ -3217,9 +3182,6 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
                 "dispatch.end",
                 serde_json::json!({ "verb": verb, "ms": ms }),
             );
-            if verb == "instruction" && code == 0 {
-                crate::orchestrator::dream_rsi::stamp_reorientation();
-            }
             if !crate::gates::dispatch_serves_no_phase_prose(verb, body) {
                 restamp_long_gap_marker_to_dispatch_completion_if_refresh_verb(verb);
                 crate::gates::restamp_last_dispatch_to_completion(verb);
