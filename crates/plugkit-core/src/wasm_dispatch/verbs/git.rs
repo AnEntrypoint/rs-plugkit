@@ -1309,7 +1309,7 @@ fn bin_drift_commit_refusal(repo: Option<&str>, paths: &[String], add_all: bool)
         if in_commit {
             touches_gate = true;
         }
-        if !in_commit || (index_only && unstaged) {
+        if index_only && staged && unstaged {
             outside.push(path.to_string());
         }
     }
@@ -1536,7 +1536,8 @@ pub(super) fn git_push(body: &Value) -> u64 {
     }
     let gate_inputs_dirty = porcelain.lines().any(|line| {
         let path = line.get(3..).unwrap_or("").trim().trim_matches('"');
-        bin_drift_gate_input(path)
+        let staged = line.as_bytes().first().map_or(false, |&x| x != b' ' && x != b'?');
+        staged && bin_drift_gate_input(path)
     });
     if let Some(reason) =
         bin_drift_refusal(repo.as_deref(), &local_source_before, gate_inputs_dirty)
