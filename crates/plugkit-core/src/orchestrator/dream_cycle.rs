@@ -40,9 +40,9 @@ fn evaluate(content: &str) -> Result<Value, String> {
     let after = optional_id(&body, "after_dispatch_id", 512)?;
     let beta1 = optional_beta(&body, "beta1", super::dream_rsi::DEFAULT_CYCLE_BETA1)?;
     let beta2 = optional_beta(&body, "beta2", super::dream_rsi::DEFAULT_CYCLE_BETA2)?;
-    let round = super::dream_rsi::history_round(owner, beta1, beta2)?;
-    let latest = round.latest_dispatch_id.as_deref();
     let stored = stored_cursor(owner);
+    let round = super::dream_rsi::history_round(owner, after.or(stored.as_deref()), beta1, beta2)?;
+    let latest = round.latest_dispatch_id.as_deref();
     let reason = match latest {
         None => Some("no-verified-observations"),
         Some(latest) if Some(latest) == after || Some(latest) == stored.as_deref() => {
@@ -58,7 +58,10 @@ fn evaluate(content: &str) -> Result<Value, String> {
             "history": round.summary.get("history"),
         }));
     }
+    let lost_cursor = round.lost_cursor;
     let mut fields = round.summary;
+    fields["partial_window"] = json!(lost_cursor.is_some());
+    fields["lost_cursor"] = json!(lost_cursor);
     fields["cycle_id"] = json!(cycle_id);
     fields["last_dispatch_id"] = json!(latest);
     match super::dream_rsi::persist_replay_result(
