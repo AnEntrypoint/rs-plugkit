@@ -1952,6 +1952,18 @@ pub(super) fn git_add(body: &Value) -> u64 {
         };
         staged.sort();
         staged.dedup();
+        if !staged.is_empty() {
+            let session = commit_session_id(body);
+            let index_now = staged_paths_now(cwd);
+            let mut owned: Vec<String> = git_add_staged_recorded(cwd, &session)
+                .into_iter()
+                .filter(|p| index_now.contains(p))
+                .chain(staged.iter().cloned())
+                .collect();
+            owned.sort();
+            owned.dedup();
+            git_add_staged_record(cwd, &session, &owned);
+        }
         let unmatched = pathspecs_matching_nothing(cwd, &paths);
         if !paths.is_empty()
             && staged.is_empty()
@@ -2820,7 +2832,197 @@ pub(super) fn commit_message_shape(message: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) const GIT_PATCH_COMMIT_TIMEOUT_MS: u64 = 60_000;
+
+pub(super) const GIT_PATCH_COMMIT_JS: &str = r#"const {spawnSync}=require('child_process');const fs=require('fs');const P=require('path');
+const I=__INPUT__;const out=(o)=>process.stdout.write(JSON.stringify(o));
+const git=(args,env,input)=>{const r=spawnSync('git',args,{cwd:I.cwd,env:Object.assign({},process.env,env||{}),input:input==null?undefined:input,encoding:'utf8',windowsHide:true,maxBuffer:1<<28});return {code:r.status==null?-1:r.status,stdout:r.stdout||'',stderr:(r.stderr||'')+(r.error?String(r.error):'')};};
+const must=(stage,r)=>{if(r.code!==0){throw {stage,stderr:r.stderr.trim()};}return r.stdout;};
+let idx=null;
+try{
+const gitdir=must('git_dir',git(['rev-parse','--absolute-git-dir'])).trim();
+const head=must('head',git(['rev-parse','--verify','HEAD'])).trim();
+let patch=I.patch;const selected=[];
+if(patch==null){patch='';for(const [file,wanted] of Object.entries(I.hunks)){const d=must('diff',git(['diff','--no-color','--no-ext-diff','-U3','HEAD','--',file]));const lines=d.split('\n');const at=lines.findIndex(l=>l.startsWith('@@'));if(at<0)throw {stage:'hunks',stderr:'no diff against HEAD for '+file};const header=lines.slice(0,at);const hunks=[];let cur=null;for(const l of lines.slice(at)){if(l.startsWith('@@')){cur=[l];hunks.push(cur);}else if(cur){cur.push(l);}}
+while(hunks.length&&hunks[hunks.length-1].length&&hunks[hunks.length-1][hunks[hunks.length-1].length-1]==='')hunks[hunks.length-1].pop();
+const bad=wanted.filter(n=>!Number.isInteger(n)||n<1||n>hunks.length);if(bad.length)throw {stage:'hunks',stderr:file+' has '+hunks.length+' hunk(s) against HEAD; refused hunk number(s) '+bad.join(','),hunk_headers:hunks.map(h=>h[0])};
+patch+=header.join('\n')+'\n'+wanted.map(n=>hunks[n-1].join('\n')).join('\n')+'\n';for(const n of wanted)selected.push({path:file,hunk:n,header:hunks[n-1][0]});}}
+idx=P.join(gitdir,'gm-patch-index-'+process.pid+'-'+Date.now());const E={GIT_INDEX_FILE:idx};
+must('read_tree',git(['read-tree',head],E));
+must('apply',git(['apply','--cached','--whitespace=nowarn','-'],E,patch));
+const tree=must('write_tree',git(['write-tree'],E)).trim();
+const headTree=must('head_tree',git(['rev-parse',head+'^{tree}'])).trim();
+if(tree===headTree)throw {stage:'apply',stderr:'the patch changes nothing against HEAD'};
+const commit=must('commit_tree',git(I.identity.concat(['commit-tree',tree,'-p',head,'-F','-']),{},I.message)).trim();
+must('update_ref',git(['update-ref','-m','gm git_commit patch','HEAD',commit,head]));
+const paths=must('paths',git(['diff-tree','--no-commit-id','--name-only','-r','-z',head,commit])).split('\0').filter(Boolean);
+const synced=[];const leftStaged=[];
+for(const p of paths){const entry=git(['ls-files','-s','-z','--',p]).stdout.split('\0')[0]||'';const m=/^(\d+) ([0-9a-f]+) 0\t/.exec(entry);const oldBlob=git(['rev-parse','--verify','--quiet',head+':'+p]).stdout.trim();const newBlob=git(['rev-parse','--verify','--quiet',commit+':'+p]).stdout.trim();
+const clean=m?m[2]===oldBlob:oldBlob==='';if(!clean){leftStaged.push(p);continue;}
+if(newBlob){const mode=git(['ls-tree',commit,'--',p]).stdout.split(' ')[0]||'100644';must('index_sync',git(['update-index','--add','--cacheinfo',mode+','+newBlob+','+p]));}else{must('index_sync',git(['update-index','--force-remove','--',p]));}synced.push(p);}
+out({ok:true,sha_full:commit,head_before:head,paths,index_synced:synced,index_left_staged:leftStaged,selected_hunks:selected});
+}catch(e){out(Object.assign({ok:false},e&&e.stage?e:{stage:'internal',stderr:String(e)}));}
+finally{if(idx){try{fs.unlinkSync(idx);}catch(_){}try{fs.unlinkSync(idx+'.lock');}catch(_){}}}"#;
+
+pub(super) fn patch_commit_paths(patch: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for line in patch.lines() {
+        let Some(rest) = line.strip_prefix("+++ ").or_else(|| line.strip_prefix("--- ")) else {
+            continue;
+        };
+        let path = rest.trim();
+        if path == "/dev/null" {
+            continue;
+        }
+        let path = path.strip_prefix("a/").or_else(|| path.strip_prefix("b/")).unwrap_or(path).to_string();
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+pub(super) fn git_commit_hunk_scoped(body: &Value) -> Option<u64> {
+    let patch = body.get("patch");
+    let hunks = body.get("hunks");
+    if patch.is_none() && hunks.is_none() {
+        return None;
+    }
+    let refuse = |msg: &str| Some(err_json("git_commit", json!({ "error": msg, "error_code": ERR_CODE_INVALID_ARGS })));
+    if patch.is_some() && hunks.is_some() {
+        return refuse("pass either patch (a unified diff against HEAD) or hunks ({path: [hunk numbers]}), not both");
+    }
+    if ["paths", "files", "add_all", "amend", "allow_empty"].iter().any(|k| body.get(*k).is_some()) {
+        return refuse("a hunk-scoped commit (patch or hunks) names its content itself; paths, files, add_all, amend and allow_empty do not combine with it");
+    }
+    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if message.is_empty() {
+        return Some(err("git_commit", "message required"));
+    }
+    if let Err(reason) = commit_message_shape(message) {
+        return Some(err("git_commit", &reason));
+    }
+    let (patch_text, named_paths): (Option<String>, Vec<String>) = match (patch, hunks) {
+        (Some(p), None) => match p.as_str().filter(|s| !s.trim().is_empty()) {
+            Some(text) => {
+                let text = if text.ends_with('\n') { text.to_string() } else { format!("{text}\n") };
+                let paths = patch_commit_paths(&text);
+                (Some(text), paths)
+            }
+            None => return refuse("patch must be a non-empty unified diff string"),
+        },
+        (None, Some(h)) => {
+            let Some(map) = h.as_object().filter(|m| !m.is_empty()) else {
+                return refuse("hunks must be a non-empty object mapping a path to an array of 1-based hunk numbers from git diff HEAD -- <path>");
+            };
+            if map.values().any(|v| v.as_array().is_none_or(|a| a.is_empty() || a.iter().any(|n| n.as_u64().is_none()))) {
+                return refuse("each hunks entry must be a non-empty array of 1-based hunk numbers");
+            }
+            (None, map.keys().cloned().collect())
+        }
+        _ => return None,
+    };
+    if named_paths.is_empty() {
+        return refuse("the patch names no file (expected ---/+++ headers)");
+    }
+    let blocked = hard_excluded_pathspecs(&named_paths);
+    if !blocked.is_empty() {
+        return Some(err_json("git_commit", protected_pathspec_refusal("git_commit", &blocked)));
+    }
+    let cwd = body_cwd(body).map(|c| if crate::pkfs::is_absolute(c) { c.to_string() } else { crate::pkfs::anchor(c) });
+    let input = json!({
+        "cwd": cwd,
+        "patch": patch_text,
+        "hunks": hunks,
+        "message": message,
+        "identity": identity_config_argv(&commit_identity(body)),
+    });
+    let code = GIT_PATCH_COMMIT_JS.replace("__INPUT__", &input.to_string());
+    let options = json!({ "timeoutMs": GIT_PATCH_COMMIT_TIMEOUT_MS }).to_string();
+    let packed = unsafe {
+        super::host_abi::host_exec_js(code.as_ptr(), code.len() as u32, options.as_ptr(), options.len() as u32)
+    };
+    let envelope = unpack_to_string(packed).and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let result = envelope
+        .as_ref()
+        .and_then(|e| e.get("stdout").and_then(Value::as_str))
+        .and_then(|s| serde_json::from_str::<Value>(s).ok());
+    let Some(result) = result else {
+        return Some(err_json("git_commit", json!({
+            "error": "the hunk-scoped commit helper returned no result",
+            "host_reply": envelope,
+        })));
+    };
+    if result.get("ok").and_then(Value::as_bool) != Some(true) {
+        let stage = result.get("stage").and_then(Value::as_str).unwrap_or("internal");
+        let hint = match stage {
+            "update_ref" => "HEAD moved while the commit was built; nothing was published and the work tree and index are untouched. Retry.",
+            "apply" => "the patch does not apply to HEAD; build it with git diff HEAD so its context matches the committed file.",
+            _ => "nothing was committed; the work tree and the shared index are untouched.",
+        };
+        let mut detail = result.clone();
+        detail["error"] = json!(format!("hunk-scoped commit failed at {stage}: {}", result.get("stderr").and_then(Value::as_str).unwrap_or("")));
+        detail["hint"] = json!(hint);
+        return Some(err_json("git_commit", detail));
+    }
+    let sha_full = result.get("sha_full").and_then(Value::as_str).unwrap_or("").to_string();
+    let mut payload = result.clone();
+    payload["committed"] = json!(true);
+    payload["sha"] = json!(sha_full.chars().take(10).collect::<String>());
+    payload["summary"] = json!(message.lines().next().unwrap_or(""));
+    payload["hunk_scoped"] = json!(true);
+    payload["work_tree_touched"] = json!(false);
+    if let Some(map) = payload.as_object_mut() {
+        map.remove("ok");
+    }
+    Some(ok("git_commit", payload))
+}
+
+pub(super) const GIT_ADD_STAGED_NS: &str = "git_add_staged";
+pub(super) const GIT_ADD_STAGED_TTL_MS: u64 = 3_600_000;
+
+pub(super) fn git_add_staged_key(cwd: Option<&str>, session: &str) -> String {
+    format!("{}\u{1f}{}", cwd.unwrap_or(""), session)
+}
+
+pub(super) fn git_add_staged_record(cwd: Option<&str>, session: &str, staged: &[String]) {
+    let now = unsafe { host_now_ms() };
+    let record = json!({ "ts": now, "staged": staged }).to_string();
+    git_async_kv_put(GIT_ADD_STAGED_NS, &git_add_staged_key(cwd, session), &record);
+}
+
+pub(super) fn git_add_staged_recorded(cwd: Option<&str>, session: &str) -> Vec<String> {
+    let Some(record) = super::host_abi::host_kv_read(GIT_ADD_STAGED_NS, &git_add_staged_key(cwd, session))
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    else {
+        return Vec::new();
+    };
+    let ts = record.get("ts").and_then(Value::as_u64).unwrap_or(0);
+    if unsafe { host_now_ms() }.saturating_sub(ts) > GIT_ADD_STAGED_TTL_MS {
+        return Vec::new();
+    }
+    record
+        .get("staged")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+pub(super) fn index_equals_session_staging(cwd: Option<&str>, session: &str, index: &[String]) -> bool {
+    if index.is_empty() {
+        return false;
+    }
+    let mut recorded = git_add_staged_recorded(cwd, session);
+    recorded.sort();
+    let mut now_staged = index.to_vec();
+    now_staged.sort();
+    recorded == now_staged
+}
+
 pub(super) fn git_commit(body: &Value) -> u64 {
+    if let Some(reply) = git_commit_hunk_scoped(body) {
+        return reply;
+    }
     git_async_entry("git_commit", body, |body, plan| {
         let cwd = body_cwd(body);
         if body.get("claim_only").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -2979,7 +3181,10 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 .map(String::from)
                 .collect()
         };
-        if !add_all && paths.is_empty() && !allow_whole_index && !merge_pending {
+        let commits_session_staging = !add_all
+            && paths.is_empty()
+            && index_equals_session_staging(cwd, &lane_session, &staged_before);
+        if !add_all && paths.is_empty() && !allow_whole_index && !merge_pending && !commits_session_staging {
             let sweep = blanket_stage_would_take(cwd);
             if !sweep.is_empty() {
                 return Ok(err_json(
