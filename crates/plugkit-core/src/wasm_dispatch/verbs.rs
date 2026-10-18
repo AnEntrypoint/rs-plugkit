@@ -2666,6 +2666,26 @@ fn body_cwd(body: &Value) -> Option<&str> {
         .or_else(|| body.get("projectPath").and_then(|v| v.as_str()))
 }
 
+fn default_git_root(verb: &str, body: &Value) -> Result<Value, u64> {
+    if !verb.starts_with("git_") && verb != "branch_status" {
+        return Ok(body.clone());
+    }
+    if body_cwd(body).is_some_and(|c| !c.is_empty()) {
+        return Ok(body.clone());
+    }
+    let Some(root) = super::host_abi::host_cwd_string().filter(|r| !r.is_empty()) else {
+        return Err(err(
+            verb,
+            "cwd-required: no cwd was passed and the dispatch project root is unknown; pass cwd set to the project root containing .gm/exec-spool",
+        ));
+    };
+    let mut defaulted = body.clone();
+    if let Some(map) = defaulted.as_object_mut() {
+        map.insert("cwd".to_string(), json!(root));
+    }
+    Ok(defaulted)
+}
+
 fn filter(body: &Value, raw: &str) -> u64 {
     let (data, err_msg) = crate::filter::dispatch(body, raw);
     match err_msg {
@@ -3137,7 +3157,10 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
             json!({ "error": err_msg, "stdout": out, "exitCode": code }),
         );
     }
-    let body = body.clone();
+    let body = match default_git_root(verb, body) {
+        Ok(defaulted) => defaulted,
+        Err(refusal) => return refusal,
+    };
     let body_s = body_s.to_string();
     if help_requested(&body) {
         if let Some(doc) = verb_help_doc(verb) {
