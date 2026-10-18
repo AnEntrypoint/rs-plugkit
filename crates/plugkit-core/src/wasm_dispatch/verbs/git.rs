@@ -2939,10 +2939,11 @@ const bad=wanted.filter(n=>!Number.isInteger(n)||n<1||n>hunks.length);if(bad.len
 patch+=header.join('\n')+'\n'+wanted.map(n=>hunks[n-1].join('\n')).join('\n')+'\n';for(const n of wanted)selected.push({path:file,hunk:n,header:hunks[n-1][0]});}}
 idx=P.join(gitdir,'gm-patch-index-'+process.pid+'-'+Date.now());const E={GIT_INDEX_FILE:idx};
 must('read_tree',git(['read-tree',head],E));
-must('apply',git(['apply','--cached','--whitespace=nowarn','-'],E,patch));
+if(patch){must('apply',git(['apply','--cached','--whitespace=nowarn','-'],E,patch));}
+if(I.remove&&I.remove.length){must('rm_cached',git(['rm','--cached','-r','-q','--'].concat(I.remove),E));}
 const tree=must('write_tree',git(['write-tree'],E)).trim();
 const headTree=must('head_tree',git(['rev-parse',head+'^{tree}'])).trim();
-if(tree===headTree)throw {stage:'apply',stderr:'the patch changes nothing against HEAD'};
+if(tree===headTree)throw {stage:'nothing',stderr:'the commit changes nothing against HEAD'};
 const commit=must('commit_tree',git(I.identity.concat(['commit-tree',tree,'-p',head,'-F','-']),{},I.message)).trim();
 must('update_ref',git(['update-ref','-m','gm git_commit patch','HEAD',commit,head]));
 const paths=must('paths',git(['diff-tree','--no-commit-id','--name-only','-r','-z',head,commit])).split('\0').filter(Boolean);
@@ -3027,21 +3028,9 @@ pub(super) fn git_commit_hunk_scoped(body: &Value) -> Option<u64> {
         "message": message,
         "identity": identity_config_argv(&commit_identity(body)),
     });
-    let code = GIT_PATCH_COMMIT_JS.replace("__INPUT__", &input.to_string());
-    let options = json!({ "timeoutMs": GIT_PATCH_COMMIT_TIMEOUT_MS }).to_string();
-    let packed = unsafe {
-        super::host_abi::host_exec_js(code.as_ptr(), code.len() as u32, options.as_ptr(), options.len() as u32)
-    };
-    let envelope = unpack_to_string(packed).and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-    let result = envelope
-        .as_ref()
-        .and_then(|e| e.get("stdout").and_then(Value::as_str))
-        .and_then(|s| serde_json::from_str::<Value>(s).ok());
-    let Some(result) = result else {
-        return Some(err_json("git_commit", json!({
-            "error": "the hunk-scoped commit helper returned no result",
-            "host_reply": envelope,
-        })));
+    let result = match run_git_patch_commit(&input) {
+        Ok(result) => result,
+        Err(detail) => return Some(err_json("git_commit", detail)),
     };
     if result.get("ok").and_then(Value::as_bool) != Some(true) {
         let stage = result.get("stage").and_then(Value::as_str).unwrap_or("internal");
@@ -3066,6 +3055,115 @@ pub(super) fn git_commit_hunk_scoped(body: &Value) -> Option<u64> {
         map.remove("ok");
     }
     Some(ok("git_commit", payload))
+}
+
+pub(super) fn run_git_patch_commit(input: &Value) -> Result<Value, Value> {
+    let code = GIT_PATCH_COMMIT_JS.replace("__INPUT__", &input.to_string());
+    let options = json!({ "timeoutMs": GIT_PATCH_COMMIT_TIMEOUT_MS }).to_string();
+    let packed = unsafe {
+        super::host_abi::host_exec_js(code.as_ptr(), code.len() as u32, options.as_ptr(), options.len() as u32)
+    };
+    let envelope = unpack_to_string(packed).and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let result = envelope
+        .as_ref()
+        .and_then(|e| e.get("stdout").and_then(Value::as_str))
+        .and_then(|s| serde_json::from_str::<Value>(s).ok());
+    result.ok_or_else(|| json!({ "error": "the commit helper returned no result", "host_reply": envelope }))
+}
+
+pub(super) fn untrack_plan(paths: &[String], cwd: Option<&str>) -> Result<Vec<String>, String> {
+    let mut specs: Vec<String> = Vec::new();
+    for raw in paths {
+        let spec = raw.replace('\\', "/");
+        let spec = spec.trim().trim_start_matches("./").trim_end_matches('/').to_string();
+        if !spec.starts_with(".agentplug") {
+            return Err(format!("refused: {raw} is not a .agentplug* path; an untrack commit names only .agentplug* paths, so commit other paths in a separate git_finalize"));
+        }
+        if spec.contains(['*', '?', '[']) || spec.split('/').any(|segment| segment == "..") {
+            return Err(format!("refused: {raw} is not one literal path; name each .agentplug* path exactly, with no glob and no .."));
+        }
+        let listed = git_call_argv(&["ls-files", "-z", "--", spec.as_str()], cwd);
+        let tracked = !listed.get("stdout").and_then(Value::as_str).unwrap_or("").trim().is_empty();
+        if !tracked {
+            return Err(format!("refused: {raw} is not tracked; .agentplug* is runtime state and is never added or modified, so there is nothing to untrack"));
+        }
+        specs.push(spec);
+    }
+    Ok(specs)
+}
+
+pub(super) fn git_finalize_untrack(body: &Value, paths: &[String]) -> u64 {
+    let cwd = body_cwd(body);
+    if paths.is_empty() {
+        return err_json("git_finalize", json!({
+            "error": "untrack requires paths: name the .agentplug* paths to remove from the index",
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "reason": "untrack with no paths",
+            "next_dispatch": "git_finalize",
+        }));
+    }
+    let specs = match untrack_plan(paths, cwd) {
+        Ok(specs) => specs,
+        Err(reason) => return err_json("git_finalize", json!({
+            "error": reason,
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "reason": reason,
+            "requested_paths": paths,
+            "next_dispatch": "git_finalize",
+        })),
+    };
+    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if message.is_empty() {
+        return err("git_finalize", "message required");
+    }
+    if let Err(reason) = commit_message_shape(message) {
+        return err("git_finalize", &reason);
+    }
+    let root = body_cwd(body).map(|c| if crate::pkfs::is_absolute(c) { c.to_string() } else { crate::pkfs::anchor(c) });
+    let input = json!({
+        "cwd": root,
+        "patch": "",
+        "remove": specs,
+        "message": message,
+        "identity": identity_config_argv(&commit_identity(body)),
+    });
+    let result = match run_git_patch_commit(&input) {
+        Ok(result) => result,
+        Err(detail) => return err_json("git_finalize", detail),
+    };
+    if result.get("ok").and_then(Value::as_bool) != Some(true) {
+        let stage = result.get("stage").and_then(Value::as_str).unwrap_or("internal");
+        let mut detail = result.clone();
+        detail["error"] = json!(format!("untrack commit failed at {stage}: {}", result.get("stderr").and_then(Value::as_str).unwrap_or("")));
+        detail["untracked"] = json!(specs);
+        detail["reason"] = json!("nothing was published; the work tree is untouched");
+        return err_json("git_finalize", detail);
+    }
+    let sha_full = result.get("sha_full").and_then(Value::as_str).unwrap_or("").to_string();
+    let mut push_body = body.clone();
+    if let Some(map) = push_body.as_object_mut() {
+        for key in ["message", "paths", "files", "untrack"] {
+            map.remove(key);
+        }
+    }
+    push_body["rev"] = json!(sha_full);
+    let push_resp = unpack_to_value(git_push(&push_body));
+    let pushed = push_resp.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    ok("git_finalize", json!({
+        "committed": true,
+        "pushed": pushed,
+        "untrack": true,
+        "untracked": specs,
+        "removed": result.get("paths").cloned().unwrap_or(Value::Null),
+        "index_synced": result.get("index_synced").cloned().unwrap_or(Value::Null),
+        "index_left_staged": result.get("index_left_staged").cloned().unwrap_or(Value::Null),
+        "sha": sha_full.chars().take(10).collect::<String>(),
+        "sha_full": sha_full,
+        "summary": message.lines().next().unwrap_or(""),
+        "work_tree_touched": false,
+        "push_result": push_resp,
+        "next_dispatch": if pushed { "ci-status" } else { "git_push" },
+    }))
 }
 
 pub(super) const GIT_ADD_STAGED_NS: &str = "git_add_staged";
@@ -4647,6 +4745,9 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                 .collect()
         })
         .unwrap_or_default();
+    if body.get("untrack").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return git_finalize_untrack(body, &paths);
+    }
     let scoped = !paths.is_empty();
     let blocked_paths = hard_excluded_pathspecs(&paths);
     if !blocked_paths.is_empty() {
@@ -10249,9 +10350,11 @@ pub(super) fn hard_excluded_pathspecs(paths: &[String]) -> Vec<String> {
 }
 
 pub(super) fn protected_pathspec_refusal(verb: &str, blocked: &[String]) -> Value {
+    let reason = ".agentplug* is runtime state: it is never added or modified. A tracked .agentplug* path can only be untracked (index removal, files stay on disk) through git_finalize with untrack:true and paths naming only .agentplug* entries";
     json!({
-        "error": format!("refusing to stage protected pathspec(s): {} -- .agentplug* is runtime state and is never staged", blocked.join(", ")),
+        "error": format!("refusing to stage protected pathspec(s): {} -- {}", blocked.join(", "), reason),
         "error_code": ERR_CODE_INVALID_ARGS,
+        "reason": reason,
         "blocked_paths": blocked,
         "next_dispatch": verb,
     })
