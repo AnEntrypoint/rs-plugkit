@@ -7253,9 +7253,6 @@ function stepof(j, ts, m,    i, n, t, from, opens) {
   opens = (index(m, "##[group]Run ") == 1 || index(m, "Post job cleanup.") == 1)
   for (i = from; i <= ns; i++) {
     if (!within(i, j, t)) continue
-    if (FO && !SF[i]) {
-      for (n = i + 1; n <= ns && within(n, j, t); n++) if (SF[n]) { i = n; break }
-    }
     if (opens && (i in HAS) && i + 1 <= ns && within(i + 1, j, t)) i++
     HAS[i] = 1
     CUR[j] = i
