@@ -303,6 +303,12 @@ fn evaluate_policy(
     let rounds = if policy.group_size.is_some() { waves } else { recorded_rounds.len() };
     let parallelism_bonus = observed.len() as f64 / rounds.max(1) as f64;
     let replay_score = quality - beta1 * cost as f64 + beta2 * parallelism_bonus;
+    if !replay_score.is_finite() {
+        return Err(format!(
+            "dream-replay policy {} replay score in world {} is non-finite",
+            policy.id, world.id
+        ));
+    }
     Ok(json!({
         "world_id": world.id,
         "observed_node_ids": observed.into_iter().collect::<Vec<_>>(),
@@ -352,6 +358,9 @@ fn evaluate_worlds(
             .filter_map(|replay| replay.get("replay_score").and_then(Value::as_f64))
             .sum::<f64>()
             / replays.len() as f64;
+        if !score.is_finite() {
+            return Err(format!("dream-replay policy {} score is non-finite", policy.id));
+        }
         let cost = replays
             .iter()
             .filter_map(|replay| replay.get("cost").and_then(Value::as_u64))
@@ -515,25 +524,6 @@ impl ObservationRecord {
 
     fn is_gate_drift_failure(&self) -> bool {
         !self.succeeded() && self.gate_drift.unwrap_or(true)
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-struct Strategy {
-    selection: Option<String>,
-    evidence: Option<Vec<ObservationRecord>>,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl Strategy {
-    fn from_value(value: &Value) -> Self {
-        Strategy {
-            selection: value.get("selection").and_then(Value::as_str).map(str::to_owned),
-            evidence: value
-                .get("evidence")
-                .and_then(Value::as_array)
-                .map(|entries| entries.iter().map(ObservationRecord::from_value).collect()),
-        }
     }
 }
 
@@ -795,7 +785,7 @@ fn scan_history() -> HistoryScan {
     let mut ledger = LedgerCheck::load();
     let mut scan = HistoryScan::default();
     let mut sessions = dir_entry_names(".gm/dream-rsi");
-    sessions.retain(|name| name != PROJECT_WIDE_MARKER_SESSION && !name.starts_with('.'));
+    sessions.retain(|name| !name.starts_with('.'));
     sessions.sort();
     for session_id in sessions {
         let mut records = session_history(&session_id);
