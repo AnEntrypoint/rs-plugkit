@@ -8820,6 +8820,7 @@ pub(super) const GIT_BODY_ENVELOPE_FIELDS: &[&str] = &[
     "projectPath",
     "git_root_override",
     "full_response",
+    "lean_node",
 ];
 
 pub(super) const HOST_RESERVED_BODY_KEY_PREFIX: &str = "_";
