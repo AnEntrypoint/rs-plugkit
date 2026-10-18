@@ -331,7 +331,9 @@ pub const ERR_CODE_DANGLING_SCAN_UNREADABLE: &str = "dangling_scan_unreadable";
 pub const ERR_CODE_APPEND_ONLY_SHRINK: &str = "append_only_shrink_refused";
 pub const ERR_CODE_APPEND_ONLY_REWRITE: &str = "append_only_rewrite_refused";
 
-const APPEND_ONLY_PATH_SUFFIXES: &[&str] = &["/.gm/witness-log.md"];
+const APPEND_ONLY_PATH_SUFFIXES: &[&str] = &["/.gm/witness-log.md", "/.gm/lean-walk/new-nodes.jsonl"];
+
+const APPEND_ONLY_PATH_PATTERNS: &[(&str, &str)] = &[("/.gm/pool/ledger-", ".txt")];
 
 fn shared_store_contract() -> Value {
     json!({
@@ -1302,6 +1304,9 @@ fn is_append_only_path(path: &str) -> bool {
     APPEND_ONLY_PATH_SUFFIXES
         .iter()
         .any(|suffix| anchored.ends_with(suffix))
+        || APPEND_ONLY_PATH_PATTERNS
+            .iter()
+            .any(|(prefix, suffix)| anchored.contains(prefix) && anchored.ends_with(suffix))
 }
 
 fn append_only_bytes_on_disk(path: &str) -> u64 {
