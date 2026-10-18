@@ -1964,6 +1964,16 @@ pub(super) fn git_add(body: &Value) -> u64 {
                 protected_pathspec_refusal("git_add", &blocked_paths),
             ));
         }
+        let add_all = body.get("add_all").and_then(|v| v.as_bool()).unwrap_or(false);
+        if paths.is_empty() && !add_all {
+            let sweep: Vec<String> = blanket_stage_would_take(cwd)
+                .into_iter()
+                .filter(|p| !(p == ".gm" || p.starts_with(".gm/") || p.starts_with(".agentplug")))
+                .collect();
+            if !sweep.is_empty() {
+                return Ok(err_json("git_add", blanket_stage_refusal("git_add", &sweep)));
+            }
+        }
         let mut write_steps: Vec<Value> = Vec::new();
         for argv_owned in git_add_stage_argvs(&paths, cwd) {
             let argv = as_argv(&argv_owned);
