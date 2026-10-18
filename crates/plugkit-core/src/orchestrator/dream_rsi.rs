@@ -880,15 +880,12 @@ impl LedgerCheck {
     fn verdict(&mut self, session_id: &str, record: &ObservationRecord) -> Result<Confirmation, &'static str> {
         let dispatch_id = record.dispatch_id.as_deref().ok_or("no_dispatch_id")?;
         let Some(entry) = self.entries.get(dispatch_id) else {
+            let aged_out = record.ts.is_some_and(|ts| u64::try_from(ts).is_ok_and(|ts| ts.saturating_add(crate::dispatch_ledger::RETAIN_MS) < self.newest_ts));
+            if (self.evicted_possible || aged_out) && self.unreadable.is_none() {
+                return Ok(Confirmation::Retained);
+            }
             if self.spool_out_confirms(session_id, dispatch_id) {
                 return Ok(Confirmation::SpoolOut);
-            }
-            if self.evicted_possible && self.unreadable.is_none() {
-                return Ok(Confirmation::Retained);
-            }
-            let aged_out = record.ts.is_some_and(|ts| u64::try_from(ts).is_ok_and(|ts| ts.saturating_add(crate::dispatch_ledger::RETAIN_MS) < self.newest_ts));
-            if aged_out && self.unreadable.is_none() {
-                return Ok(Confirmation::Retained);
             }
             return Err(self.unreadable.unwrap_or("unconfirmed_by_ledger_or_spool_out"));
         };
