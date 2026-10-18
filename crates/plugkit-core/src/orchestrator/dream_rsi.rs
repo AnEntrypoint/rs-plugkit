@@ -403,10 +403,27 @@ fn evaluate_worlds(
                 > baseline_score
         })
         .max_by(|left, right| {
-            left.get("score")
-                .and_then(Value::as_f64)
-                .partial_cmp(&right.get("score").and_then(Value::as_f64))
+            let score = |ranking: &Value| {
+                ranking
+                    .get("score")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(f64::NEG_INFINITY)
+            };
+            score(left)
+                .partial_cmp(&score(right))
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    right
+                        .get("cost")
+                        .and_then(Value::as_u64)
+                        .cmp(&left.get("cost").and_then(Value::as_u64))
+                })
+                .then_with(|| {
+                    right
+                        .get("policy_id")
+                        .and_then(Value::as_str)
+                        .cmp(&left.get("policy_id").and_then(Value::as_str))
+                })
         })
         .cloned()
         .unwrap_or(baseline.clone());
@@ -483,18 +500,18 @@ pub enum FailureClass {
 
 #[cfg(target_arch = "wasm32")]
 impl FailureClass {
-    pub fn error_code(&self) -> Option<&str> {
+    fn error_code(&self) -> Option<&str> {
         match self {
             Self::Coded(code) => Some(code),
             _ => None,
         }
     }
 
-    pub fn no_match(&self) -> bool {
+    fn no_match(&self) -> bool {
         matches!(self, Self::NoMatch)
     }
 
-    pub fn name(&self) -> &'static str {
+    fn name(&self) -> &'static str {
         match self {
             Self::Ok => "ok",
             Self::Coded(_) => "coded",
@@ -513,7 +530,7 @@ impl FailureClass {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn failure_class(result: &Value, exit_code: i64) -> FailureClass {
+fn failure_class(result: &Value, exit_code: i64) -> FailureClass {
     if exit_code == 0 {
         return FailureClass::Ok;
     }
@@ -970,7 +987,7 @@ pub struct HistoryRound {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2: f64) -> Result<HistoryRound, String> {
+pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2: f64) -> Result<HistoryRound, String> {
     let scan = scan_history();
     let latest_dispatch_id = scan.latest.as_ref().map(|(_, id)| id.clone());
     let lost_cursor = cursor
@@ -1063,7 +1080,7 @@ pub struct Outcome {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn outcome(result: &Value) -> Outcome {
+pub(crate) fn outcome(result: &Value) -> Outcome {
     let exit_code = if result.get("ok").and_then(Value::as_bool).unwrap_or(true) { 0 } else { 1 };
     let failure = failure_class(result, exit_code);
     Outcome {
@@ -1076,7 +1093,7 @@ pub fn outcome(result: &Value) -> Outcome {
 
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
-pub fn observe_recorded(
+pub(crate) fn observe_recorded(
     outcome: Outcome,
     dispatch_id: &str,
     session_id: &str,
@@ -1102,7 +1119,7 @@ pub fn observe_recorded(
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
+fn observe_dispatch(observed: ObservedDispatch<'_>) {
     let ObservedDispatch {
         session_id,
         dispatch_id,
@@ -1152,7 +1169,7 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn active_strategy(session_id: Option<&str>) -> Value {
+pub(super) fn active_strategy(session_id: Option<&str>) -> Value {
     let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
         return Value::Null;
     };
@@ -1164,7 +1181,7 @@ pub fn active_strategy(session_id: Option<&str>) -> Value {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn automatic_replay(session_id: Option<&str>) -> Value {
+fn automatic_replay(session_id: Option<&str>) -> Value {
     let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
         return Value::Null;
     };
@@ -1215,7 +1232,7 @@ pub fn automatic_replay(session_id: Option<&str>) -> Value {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn persisted_cycle_result(session_id: Option<&str>) -> Value {
+pub(super) fn persisted_cycle_result(session_id: Option<&str>) -> Value {
     let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
         return Value::Null;
     };
@@ -1230,7 +1247,7 @@ pub fn persisted_cycle_result(session_id: Option<&str>) -> Value {
 const AUTOMATIC_REPLAY_SAMPLE: usize = 8;
 
 #[cfg(target_arch = "wasm32")]
-pub fn propose_strategy() -> Result<Value, String> {
+fn propose_strategy() -> Result<Value, String> {
     let owner = session_id()?;
     if owner.len() > 256
         || matches!(owner.as_str(), "." | "..")
@@ -1262,7 +1279,7 @@ pub fn propose_strategy() -> Result<Value, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn handle_strategy_propose(_content: &str) -> (String, String, i32) {
+pub(super) fn handle_strategy_propose(_content: &str) -> (String, String, i32) {
     match propose_strategy() {
         Ok(result) => (result.to_string(), String::new(), 0),
         Err(error) => (
@@ -1274,7 +1291,7 @@ pub fn handle_strategy_propose(_content: &str) -> (String, String, i32) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn handle_strategy_propose(_content: &str) -> (String, String, i32) {
+pub(super) fn handle_strategy_propose(_content: &str) -> (String, String, i32) {
     (
         json!({ "ok": false, "error": "dream-strategy-propose runs only in the wasm guest" }).to_string(),
         String::new(),
@@ -1345,7 +1362,7 @@ fn verify_record(kind: &str, record: &Value) -> Result<Value, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn register_policy(content: &str) -> Result<Value, String> {
+fn register_policy(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content)
         .map_err(|error| format!("dream-policy-register requires JSON: {error}"))?;
     let policy = parse_policy(
@@ -1432,7 +1449,7 @@ const DISPATCH_PAYLOAD_KEYS: [&str; 9] = [
 ];
 
 #[cfg(target_arch = "wasm32")]
-pub fn dispatch_output_bytes(result: &Value) -> u64 {
+fn dispatch_output_bytes(result: &Value) -> u64 {
     fn payload_text_bytes(value: &Value) -> u64 {
         match value {
             Value::String(text) if text.trim().is_empty() => 0,
@@ -1450,7 +1467,7 @@ pub fn dispatch_output_bytes(result: &Value) -> u64 {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn outcome_score(exit_code: i64, no_match: bool, output_bytes: Option<u64>) -> f64 {
+fn outcome_score(exit_code: i64, no_match: bool, output_bytes: Option<u64>) -> f64 {
     match (exit_code, no_match, output_bytes) {
         (0, _, Some(0)) => 0.5,
         (0, _, _) => 1.0,
@@ -1460,7 +1477,7 @@ pub fn outcome_score(exit_code: i64, no_match: bool, output_bytes: Option<u64>) 
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn evaluator_receipt(content: &str) -> Result<Value, String> {
+fn evaluator_receipt(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content)
         .map_err(|error| format!("dream-evaluator-receipt requires JSON: {error}"))?;
     let receipt_id = string_field(&body, "receipt_id")?;
@@ -1511,7 +1528,7 @@ pub fn evaluator_receipt(content: &str) -> Result<Value, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn record_discovery(content: &str) -> Result<Value, String> {
+fn record_discovery(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content)
         .map_err(|error| format!("dream-discovery-record requires JSON: {error}"))?;
     let id = string_field(&body, "id")?;
@@ -1661,7 +1678,7 @@ pub fn record_discovery(content: &str) -> Result<Value, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn seal(content: &str) -> Result<Value, String> {
+fn seal(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content)
         .map_err(|error| format!("dream-world-seal requires JSON: {error}"))?;
     let world_id = string_field(&body, "world_id")?;
@@ -1765,7 +1782,7 @@ fn eligible_nodes(
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn replay_round(content: &str) -> Result<Value, String> {
+fn replay_round(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content)
         .map_err(|error| format!("dream-replay-round requires JSON: {error}"))?;
     let owner_session_id = session_id()?;
@@ -2021,7 +2038,7 @@ pub fn replay_round(content: &str) -> Result<Value, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn handle_replay_round(content: &str) -> (String, String, i32) {
+pub(super) fn handle_replay_round(content: &str) -> (String, String, i32) {
     match replay_round(content) {
         Ok(result) => (result.to_string(), String::new(), 0),
         Err(error) => (
@@ -2033,7 +2050,7 @@ pub fn handle_replay_round(content: &str) -> (String, String, i32) {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn handle_dream_round(content: &str) -> (String, String, i32) {
+pub(super) fn handle_dream_round(content: &str) -> (String, String, i32) {
     match dream_round(content) {
         Ok(result) => (result.to_string(), String::new(), 0),
         Err(error) => (
@@ -2045,7 +2062,7 @@ pub fn handle_dream_round(content: &str) -> (String, String, i32) {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn evaluate(content: &str) -> Result<Value, String> {
+fn evaluate(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content)
         .map_err(|error| format!("dream-replay requires JSON: {error}"))?;
     let owner_session_id = session_id()?;
@@ -2132,7 +2149,7 @@ pub fn evaluate(content: &str) -> Result<Value, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn dream_round(content: &str) -> Result<Value, String> {
+fn dream_round(content: &str) -> Result<Value, String> {
     let mut body: Value = serde_json::from_str(content)
         .map_err(|error| format!("dream-round requires JSON: {error}"))?;
     let baseline_id = string_field(&body, "baseline_policy_id")?;
@@ -2162,7 +2179,7 @@ pub fn dream_round(content: &str) -> Result<Value, String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn evaluate(content: &str) -> Result<Value, String> {
+fn evaluate(content: &str) -> Result<Value, String> {
     let body: Value = serde_json::from_str(content)
         .map_err(|error| format!("dream-replay requires JSON: {error}"))?;
     let baseline_id = string_field(&body, "baseline_policy_id")?;
@@ -2180,7 +2197,7 @@ pub fn evaluate(content: &str) -> Result<Value, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn handle_policy_register(content: &str) -> (String, String, i32) {
+pub(super) fn handle_policy_register(content: &str) -> (String, String, i32) {
     match register_policy(content) {
         Ok(result) => (result.to_string(), String::new(), 0),
         Err(error) => (
@@ -2192,7 +2209,7 @@ pub fn handle_policy_register(content: &str) -> (String, String, i32) {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn handle_evaluator_receipt(content: &str) -> (String, String, i32) {
+pub(super) fn handle_evaluator_receipt(content: &str) -> (String, String, i32) {
     match evaluator_receipt(content) {
         Ok(result) => (result.to_string(), String::new(), 0),
         Err(error) => (
@@ -2204,7 +2221,7 @@ pub fn handle_evaluator_receipt(content: &str) -> (String, String, i32) {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn handle_discovery_record(content: &str) -> (String, String, i32) {
+pub(super) fn handle_discovery_record(content: &str) -> (String, String, i32) {
     match record_discovery(content) {
         Ok(result) => (result.to_string(), String::new(), 0),
         Err(error) => (
@@ -2216,7 +2233,7 @@ pub fn handle_discovery_record(content: &str) -> (String, String, i32) {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn handle_seal(content: &str) -> (String, String, i32) {
+pub(super) fn handle_seal(content: &str) -> (String, String, i32) {
     match seal(content) {
         Ok(result) => (result.to_string(), String::new(), 0),
         Err(error) => (
@@ -2281,7 +2298,7 @@ impl ReplayFile {
 pub struct ReplaySource(pub &'static str);
 
 #[cfg(target_arch = "wasm32")]
-pub fn persist_replay_result(
+pub(super) fn persist_replay_result(
     file: ReplayFile,
     source: ReplaySource,
     fields: serde_json::Map<String, Value>,
@@ -2345,7 +2362,7 @@ fn persist_sealed_replay(source: &'static str, replay: &mut Value) {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn handle(content: &str) -> (String, String, i32) {
+pub(super) fn handle(content: &str) -> (String, String, i32) {
     let replay = match evaluate(content) {
         Ok(mut replay) => {
             persist_sealed_replay("dream-replay", &mut replay);
