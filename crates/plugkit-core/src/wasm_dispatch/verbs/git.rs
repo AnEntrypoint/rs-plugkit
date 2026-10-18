@@ -746,6 +746,17 @@ pub(super) fn branch_status(body: &Value) -> u64 {
     )
 }
 
+fn expand_short_rev(cwd: Option<&str>, rev: String) -> String {
+    let short_hex = (4..=39).contains(&rev.len()) && rev.bytes().all(|b| b.is_ascii_hexdigit());
+    if !short_hex {
+        return rev;
+    }
+    match resolve_ref(cwd, &format!("{}^{{commit}}", rev)) {
+        Some(full) if is_full_sha(&full) => full,
+        _ => rev,
+    }
+}
+
 pub(super) fn resolve_ref(cwd: Option<&str>, refspec: &str) -> Option<String> {
     let response = git_call_argv(&["rev-parse", refspec], cwd);
     let sha = response
@@ -1418,7 +1429,8 @@ pub(super) fn git_push(body: &Value) -> u64 {
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        .map(String::from);
+        .map(String::from)
+        .map(|rev| expand_short_rev(repo.as_deref(), rev));
     let current_branch = exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD")
         .trim()
         .to_string();
