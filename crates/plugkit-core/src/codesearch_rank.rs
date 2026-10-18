@@ -551,6 +551,11 @@ pub fn dual_channels(query: &str, raw: &Value, opts: &RankOptions) -> serde_json
     let mut files: std::collections::HashMap<String, Option<Vec<String>>> =
         std::collections::HashMap::new();
     let mut out = serde_json::Map::new();
+    let channel_cap = if opts.limit_was_explicit {
+        opts.limit.max(1)
+    } else {
+        CHANNEL_TOP_K
+    };
     for channel in ["bm25_hits", "vector_hits"] {
         let hits: Vec<Value> = raw
             .get(channel)
@@ -558,7 +563,7 @@ pub fn dual_channels(query: &str, raw: &Value, opts: &RankOptions) -> serde_json
             .map(|list| {
                 list.iter()
                     .filter(|hit| opts.include_docs || !hit_is_doc(hit, opts))
-                    .take(CHANNEL_TOP_K)
+                    .take(channel_cap)
                     .map(|hit| channel_hit(query, hit, opts, &mut files))
                     .collect()
             })
