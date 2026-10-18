@@ -592,7 +592,9 @@ struct ObservationRecord {
     fingerprint: Option<String>,
     exit_code: Option<i64>,
     gate_drift: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     prd_open_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     mutable_open_count: Option<u64>,
     quality: Option<f64>,
     ts: Option<i64>,
@@ -893,6 +895,7 @@ struct HistoryScan {
     ledger_confirmed: usize,
     spool_out_confirmed: usize,
     dropped: BTreeMap<&'static str, usize>,
+    rejected: usize,
     latest: Option<(i64, String)>,
     windows: BTreeMap<String, BTreeSet<String>>,
 }
@@ -942,7 +945,8 @@ fn scan_history() -> HistoryScan {
     sessions.retain(|name| !name.starts_with('.'));
     sessions.sort();
     for session_id in sessions {
-        let (mut records, _) = session_history(&session_id);
+        let (mut records, rejected) = session_history(&session_id);
+        scan.rejected += rejected;
         if records.is_empty() {
             continue;
         }
@@ -1062,7 +1066,7 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
     let history = json!({
         "sessions": scan.sessions, "observations": scan.observations,
         "ledger_confirmed": scan.ledger_confirmed, "spool_out_confirmed": scan.spool_out_confirmed,
-        "dropped": scan.dropped, "worlds": scan.worlds.len(),
+        "dropped": scan.dropped, "rejected": scan.rejected, "worlds": scan.worlds.len(),
     });
     if scan.worlds.is_empty() {
         return Ok(HistoryRound {
@@ -1194,19 +1198,12 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
     let path = format!(".gm/dream-rsi/{session_id}/observations.json");
     let ts = super::state::now_ms() as i64;
     rotate_observations_if_full(session_id, &path, ts);
-    let prd_open_count = crate::orchestrator::prd::handle_list_full().0
-        .parse::<Value>().ok().and_then(|value| value.get("items").and_then(Value::as_array).cloned())
-        .map(|items| items.iter().filter(|item| crate::orchestrator::prd::status_is_open(item.get("status").and_then(Value::as_str).unwrap_or("pending"))).count())
-        .unwrap_or(0);
-    let mutable_open_count = crate::orchestrator::mutables::pending_detailed().len();
     let record = ObservationRecord {
         dispatch_id: Some(dispatch_id.to_string()),
         verb: Some(verb.to_string()),
         fingerprint: Some(fingerprint.to_string()),
         exit_code: Some(exit_code),
         gate_drift: Some(gate_drift),
-        prd_open_count: Some(prd_open_count as u64),
-        mutable_open_count: Some(mutable_open_count as u64),
         quality: Some(outcome_score(exit_code, failure.no_match(), output_bytes)),
         ts: Some(ts),
         reply_sha256: Some(reply_sha256_hex(reply)),
@@ -1215,6 +1212,7 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         no_match: failure.no_match(),
         failure_class: Some(failure.name().to_owned()),
         run_end,
+        ..Default::default()
     };
     let Ok(line) = serde_json::to_string(&record) else {
         return;
