@@ -408,6 +408,53 @@ pub fn failure_is_gate_drift(result: &Value) -> bool {
     )
 }
 
+#[cfg(target_arch = "wasm32")]
+const FAILURE_CLASS_KEYS: [&str; 4] = ["error_code", "error_kind", "reason", "code"];
+
+#[cfg(target_arch = "wasm32")]
+const FAILURE_CLASS_MAX_CHARS: usize = 64;
+
+#[cfg(target_arch = "wasm32")]
+const MATCH_COUNT_KEYS: [&str; 3] = ["match_count", "total_matches", "returned"];
+
+#[cfg(target_arch = "wasm32")]
+fn token_like(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= FAILURE_CLASS_MAX_CHARS
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn reply_layers(result: &Value) -> [Option<&Value>; 2] {
+    [Some(result), result.get("data")]
+}
+
+#[cfg(target_arch = "wasm32")]
+pub struct FailureClass {
+    pub error_code: Option<String>,
+    pub no_match: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn failure_class(result: &Value, exit_code: i64) -> FailureClass {
+    if exit_code == 0 {
+        return FailureClass { error_code: None, no_match: false };
+    }
+    let layers = reply_layers(result);
+    let error_code = layers.iter().flatten().find_map(|layer| {
+        FAILURE_CLASS_KEYS.iter().find_map(|key| {
+            layer.get(*key).and_then(Value::as_str).map(str::trim).filter(|text| token_like(text)).map(str::to_owned)
+        })
+    });
+    let no_match = error_code.is_none()
+        && layers.iter().flatten().any(|layer| {
+            MATCH_COUNT_KEYS.iter().any(|key| layer.get(*key).and_then(Value::as_u64) == Some(0))
+        });
+    FailureClass { error_code, no_match }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg(target_arch = "wasm32")]
 struct ObservationRecord {
@@ -423,6 +470,10 @@ struct ObservationRecord {
     reply_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     lean_node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    no_match: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -484,6 +535,7 @@ pub struct ObservedDispatch<'a> {
     pub gate_drift: bool,
     pub reply: &'a str,
     pub lean_node: Option<&'a str>,
+    pub failure: FailureClass,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -497,6 +549,7 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
         gate_drift,
         reply,
         lean_node,
+        failure,
     } = observed;
     if verb.starts_with("dream-")
         || matches!(
@@ -526,10 +579,10 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
         .map(|items| items.iter().filter(|item| crate::orchestrator::prd::status_is_open(item.get("status").and_then(Value::as_str).unwrap_or("pending"))).count())
         .unwrap_or(0);
     let mutable_open_count = crate::orchestrator::mutables::pending_detailed().len();
-    let quality = if exit_code == 0 {
-        1.0
-    } else {
-        0.0
+    let quality = match (exit_code, failure.no_match) {
+        (0, _) => 1.0,
+        (_, true) => 0.5,
+        _ => 0.0,
     };
     let ts = super::state::now_ms() as i64;
     observations.push(ObservationRecord {
@@ -544,6 +597,8 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
         ts: Some(ts),
         reply_sha256: Some(reply_sha256_hex(reply)),
         lean_node: lean_node.map(str::to_owned),
+        error_code: failure.error_code,
+        no_match: failure.no_match,
     });
     if observations.len() > 256 {
         observations.drain(0..observations.len() - 256);
@@ -1628,6 +1683,7 @@ pub fn dream_round(content: &str) -> Result<Value, String> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     result["rankings"] = Value::Array(rankings);
+    persist_sealed_replay("dream-round", &mut result);
     Ok(result)
 }
 
@@ -1698,9 +1754,67 @@ pub fn handle_seal(content: &str) -> (String, String, i32) {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub const REPLAY_RESULT_FILE: &str = "replay-result";
+
+#[cfg(target_arch = "wasm32")]
+pub const CYCLE_RESULT_FILE: &str = "cycle-result";
+
+#[cfg(target_arch = "wasm32")]
+pub fn persist_replay_result(file: &str, source: &str, fields: Value) -> Option<String> {
+    let owner = session_id().ok()?;
+    let path = session_store_path(file).ok()?;
+    let mut record = json!({
+        "kind": "replay-result",
+        "source": source,
+        "owner_session_id": owner,
+        "ts": super::state::now_ms() as i64,
+    });
+    if let (Some(target), Value::Object(extra)) = (record.as_object_mut(), fields) {
+        target.extend(extra);
+    }
+    crate::pkfs::write(&path, &record.to_string()).then_some(path)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn persist_sealed_replay(source: &str, replay: &mut Value) {
+    let baseline_score = replay.get("baseline_score").and_then(Value::as_f64);
+    let selected_score = replay.get("selected_score").and_then(Value::as_f64);
+    let rankings = replay
+        .get("rankings")
+        .and_then(Value::as_array)
+        .map(|rankings| {
+            rankings
+                .iter()
+                .map(|ranking| json!({
+                    "policy_id": ranking.get("policy_id"),
+                    "score": ranking.get("score"),
+                    "cost": ranking.get("cost"),
+                }))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let summary = json!({
+        "baseline_policy_id": replay.get("baseline_policy_id"),
+        "selected_policy_id": replay.get("selected_policy_id"),
+        "baseline_score": baseline_score,
+        "selected_score": selected_score,
+        "improved": replay.get("improved"),
+        "never_worse": matches!((baseline_score, selected_score), (Some(base), Some(sel)) if sel >= base),
+        "beta1": replay.get("beta1"),
+        "beta2": replay.get("beta2"),
+        "rankings": rankings,
+    });
+    let persisted = persist_replay_result(REPLAY_RESULT_FILE, source, summary);
+    replay["replay_result_path"] = persisted.map(Value::String).unwrap_or(Value::Null);
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn handle(content: &str) -> (String, String, i32) {
     let replay = match evaluate(content) {
-        Ok(replay) => replay,
+        Ok(mut replay) => {
+            persist_sealed_replay("dream-replay", &mut replay);
+            replay
+        }
         Err(error) => {
             return (
                 json!({ "ok": false, "error": error }).to_string(),
@@ -1753,7 +1867,7 @@ fn per_verb_stats(observations: &[Value]) -> Vec<VerbStat> {
             .to_owned();
         let tally = tallies.entry(verb).or_insert((0, 0, 0));
         tally.0 += 1;
-        if !record_succeeded(record) {
+        if !record_succeeded(record) && record.get("no_match").and_then(Value::as_bool) != Some(true) {
             tally.1 += 1;
         }
         if record_gate_drift_failure(record) {

@@ -2947,7 +2947,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
     let mut result_value = super::host_abi::unpack_to_value(result_packed);
     #[cfg(target_arch = "wasm32")]
-    let recorded: Option<(String, i64, bool)> = {
+    let recorded: Option<(String, i64, bool, crate::orchestrator::dream_rsi::FailureClass)> = {
         let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
         let exit_code = if result_value
             .get("ok")
@@ -2976,19 +2976,20 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
             }
             let gate_drift = exit_code != 0
                 && crate::orchestrator::dream_rsi::failure_is_gate_drift(&result_value);
-            Some((dispatch_id, exit_code, gate_drift))
+            let failure = crate::orchestrator::dream_rsi::failure_class(&result_value, exit_code);
+            Some((dispatch_id, exit_code, gate_drift, failure))
         }
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let recorded: Option<(String, i64, bool)> = None;
+    let recorded: Option<(String, i64, bool, ())> = None;
     let reply = stamp_request_identity(
         result_value,
         &fingerprint,
         body_parse_failed,
-        recorded.as_ref().map(|(dispatch_id, _, _)| dispatch_id.as_str()),
+        recorded.as_ref().map(|(dispatch_id, _, _, _)| dispatch_id.as_str()),
     );
     #[cfg(target_arch = "wasm32")]
-    if let (Some((dispatch_id, exit_code, gate_drift)), Some(session_id)) =
+    if let (Some((dispatch_id, exit_code, gate_drift, failure)), Some(session_id)) =
         (recorded, dispatch_session_id.as_deref())
     {
         let lean_node = body
@@ -3006,6 +3007,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
                 gate_drift,
                 reply: &reply,
                 lean_node,
+                failure,
             },
         );
     }
