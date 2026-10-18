@@ -823,7 +823,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rs-plugkit"
-version = "0.1.1798"
+version = "0.1.1812"
 dependencies = [
  "gemm",
  "getrandom 0.2.17",
@@ -842,7 +842,7 @@ dependencies = [
 [[package]]
 name = "rs-search"
 version = "0.1.0"
-source = "git+https://github.com/AnEntrypoint/rs-search.git#1bbeaf68c953e665979c2f8c9b69550599c0827e"
+source = "git+https://github.com/AnEntrypoint/rs-search.git?rev=1bbeaf68c953e665979c2f8c9b69550599c0827e#1bbeaf68c953e665979c2f8c9b69550599c0827e"
 
 [[package]]
 name = "rustversion"
