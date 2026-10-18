@@ -145,10 +145,12 @@ pub fn item_stem(id: &str) -> String {
         format!("{}-{:08x}", out, fnv1a64(trimmed))
     };
     let capped = if suffixed.chars().count() > ITEM_STEM_MAX_CHARS {
+        let hash_suffix = format!("-{:08x}", fnv1a64(trimmed));
+        let head_len = ITEM_STEM_MAX_CHARS - hash_suffix.len();
         format!(
-            "{}-{:08x}",
-            suffixed.chars().take(ITEM_STEM_MAX_CHARS).collect::<String>(),
-            fnv1a64(trimmed)
+            "{}{}",
+            suffixed.chars().take(head_len).collect::<String>(),
+            hash_suffix
         )
     } else {
         suffixed
