@@ -2198,6 +2198,26 @@ pub(super) fn porcelain_without_path(porcelain: &str, drop: &str) -> String {
     out
 }
 
+pub(super) fn identity_config_argv(identity: &(String, String)) -> Vec<String> {
+    ["user", "author", "committer"]
+        .iter()
+        .flat_map(|scope| {
+            [
+                "-c".to_string(),
+                format!("{scope}.name={}", identity.0),
+                "-c".to_string(),
+                format!("{scope}.email={}", identity.1),
+            ]
+        })
+        .collect()
+}
+
+pub(super) fn git_call_with_identity(argv: &[&str], identity: &(String, String), cwd: Option<&str>) -> Value {
+    let mut full = identity_config_argv(identity);
+    full.extend(argv.iter().map(|s| s.to_string()));
+    git_call_argv(&as_argv(&full), cwd)
+}
+
 pub(super) fn git_commit_argv(
     message: &str,
     allow_empty: bool,
@@ -2205,12 +2225,7 @@ pub(super) fn git_commit_argv(
     scoped_paths: &[String],
     identity: &(String, String),
 ) -> Vec<String> {
-    let mut argv: Vec<String> = vec![
-        "-c".to_string(),
-        format!("user.name={}", identity.0),
-        "-c".to_string(),
-        format!("user.email={}", identity.1),
-    ];
+    let mut argv: Vec<String> = identity_config_argv(identity);
     argv.push("commit".to_string());
     if amend {
         argv.push("--amend".to_string());
@@ -3622,12 +3637,7 @@ fn scope_reland_commits(
             .trim_end()
             .to_string();
         let subject = message.lines().next().unwrap_or("").to_string();
-        let mut argv: Vec<String> = vec![
-            "-c".to_string(),
-            format!("user.name={}", identity.0),
-            "-c".to_string(),
-            format!("user.email={}", identity.1),
-        ];
+        let mut argv: Vec<String> = identity_config_argv(identity);
         argv.push("commit-tree".to_string());
         argv.push(tree.clone());
         argv.push("-p".to_string());
@@ -4991,17 +5001,16 @@ pub(super) fn git_log(body: &Value) -> u64 {
         "git_log",
         body,
         &[
-            "limit", "count", "range", "ref", "rev", "path", "paths", "files",
+            "limit", "count", "max_count", "n", "range", "ref", "rev", "path", "paths", "files",
         ],
     ) {
         return refusal;
     }
     git_async_entry("git_log", body, |body, plan| {
         let cwd = body_cwd(body);
-        let count = body
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .or_else(|| body.get("count").and_then(|v| v.as_u64()))
+        let count = ["limit", "count", "max_count", "n"]
+            .iter()
+            .find_map(|key| body.get(*key).and_then(|v| v.as_u64()))
             .unwrap_or(10);
         let nflag = format!("-{}", count);
         let range = body_revision(body);
@@ -5180,17 +5189,20 @@ pub(super) fn git_diff(body: &Value) -> u64 {
     })
 }
 
+pub(super) const GIT_SHOW_PAGE_BYTES: usize = 60000;
+
 pub(super) fn git_show(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_show",
         body,
         &[
-            "rev", "ref", "sha", "commit", "stat", "path", "paths", "files",
+            "rev", "ref", "sha", "commit", "stat", "path", "paths", "files", "offset",
         ],
     ) {
         return refusal;
     }
     let cwd = body_cwd(body);
+    let offset = body.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
     let refspec = ["rev", "ref", "sha", "commit"]
         .iter()
         .find_map(|k| body.get(*k).and_then(|v| v.as_str()))
@@ -5249,21 +5261,26 @@ pub(super) fn git_show(body: &Value) -> u64 {
             }),
         );
     }
-    let mut out = r
-        .get("stdout")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
-    let mut truncated = r
+    let full = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    let host_truncated = r
         .get("stdout_truncated")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
-    if out.len() > 60000 {
-        let cut = (0..=60000).rev().find(|&i| out.is_char_boundary(i)).unwrap_or(0);
-        out.truncate(cut);
-        truncated = true;
-    }
-    ok("git_show", json!({ "output": out, "rev": refspec, "truncated": truncated }))
+    let boundary_at_or_before = |i: usize| (0..=i.min(full.len())).rev().find(|&b| full.is_char_boundary(b)).unwrap_or(0);
+    let start = boundary_at_or_before(offset);
+    let end = boundary_at_or_before(start + GIT_SHOW_PAGE_BYTES);
+    let next_offset = (end < full.len()).then_some(end);
+    ok(
+        "git_show",
+        json!({
+            "output": &full[start..end],
+            "rev": refspec,
+            "truncated": host_truncated || next_offset.is_some(),
+            "offset": start,
+            "total_bytes": full.len(),
+            "next_offset": next_offset,
+        }),
+    )
 }
 
 fn git_show_repo_name(cwd: Option<&str>) -> String {
@@ -5282,12 +5299,30 @@ fn git_show_repo_name(cwd: Option<&str>) -> String {
 }
 
 pub(super) fn git_fetch(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_fetch", body, &["remote", "ref", "rev", "refspec"]) {
+        return refusal;
+    }
     let cwd = body_cwd(body);
     let remote = body
         .get("remote")
         .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
         .unwrap_or("origin");
-    let r = git_call_argv(&["fetch", remote], cwd);
+    if !valid_remote_name(remote) {
+        return err("git_fetch", "remote must name a configured remote: letters, digits, '.', '_' or '-' (max 64)");
+    }
+    let refspec = ["ref", "rev", "refspec"]
+        .iter()
+        .find_map(|key| body.get(*key).and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()));
+    if refspec.is_some_and(|r| r.starts_with('-')) {
+        return err("git_fetch", "ref must be a sha, branch or refspec, not an option");
+    }
+    let mut argv: Vec<&str> = vec!["fetch", remote];
+    if let Some(r) = refspec {
+        argv.push(r);
+    }
+    let r = git_call_argv(&argv, cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let out = format!(
         "{}{}",
@@ -5297,7 +5332,7 @@ pub(super) fn git_fetch(body: &Value) -> u64 {
     if code != 0 {
         return err("git_fetch", &out);
     }
-    ok("git_fetch", json!({ "remote": remote, "output": out }))
+    ok("git_fetch", json!({ "remote": remote, "ref": refspec, "output": out }))
 }
 
 pub(super) fn classify_pull_hang_phase(output: &str) -> &'static str {
@@ -5392,13 +5427,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
     };
 
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-    let (name, email) = pull_identity(body);
-    let mut argv: Vec<String> = vec![
-        "-c".to_string(),
-        format!("user.name={name}"),
-        "-c".to_string(),
-        format!("user.email={email}"),
-    ];
+    let mut argv: Vec<String> = identity_config_argv(&pull_identity(body));
     argv.push("pull".to_string());
     argv.push("--no-edit".to_string());
     argv.push(String::from(if rebase { "--rebase" } else { "--no-rebase" }));
@@ -7661,7 +7690,7 @@ pub(super) fn git_merge(body: &Value) -> u64 {
         argv.push(message);
     }
     argv.push(refspec);
-    let r = git_call_argv(&argv, cwd);
+    let r = git_call_with_identity(&argv, &commit_identity(body), cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let out = format!(
         "{}{}",
@@ -7951,7 +7980,7 @@ pub(super) fn git_cherry_pick(body: &Value) -> u64 {
         );
     }
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-    let result = git_call_argv(&["cherry-pick", refspec], cwd);
+    let result = git_call_with_identity(&["cherry-pick", refspec], &commit_identity(body), cwd);
     let code = result
         .get("exit_code")
         .and_then(|x| x.as_i64())
@@ -8620,8 +8649,10 @@ pub(super) fn git_revert(body: &Value) -> u64 {
         return ok("git_revert", json!({ "discarded": paths }));
     }
     if let Some(refspec) = body.get("ref").and_then(|v| v.as_str()) {
+        let mut argv = identity_config_argv(&commit_identity(body));
+        argv.extend(["revert", "--no-edit", refspec].map(String::from));
         if let Err(e) = run_git_checked(
-            &["revert", "--no-edit", refspec],
+            &as_argv(&argv),
             cwd,
             "git_revert",
             "revert failed",
