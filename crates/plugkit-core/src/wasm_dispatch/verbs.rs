@@ -616,10 +616,14 @@ fn err_coded_hinted(verb: &str, code: &str, reason: &str, next_dispatch_hint: Va
 }
 
 fn err_json(verb: &str, detail: Value) -> u64 {
+    err_json_coded(verb, ERR_CODE_FAILED, detail)
+}
+
+fn err_json_coded(verb: &str, error_code: &str, detail: Value) -> u64 {
     let mut obj = json!({
         "ok": false,
         "verb": verb,
-        "error_code": ERR_CODE_FAILED,
+        "error_code": error_code,
         "next_dispatch_hint": next_dispatch_hint_for(verb),
     });
     if let Some(map) = detail.as_object() {
@@ -3207,8 +3211,14 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
             let data: Value = serde_json::from_str(&out).unwrap_or(Value::String(out));
             return ok(verb, data);
         }
-        return err_json(
+        let error_code = if code == crate::orchestrator::prd::LOOKUP_MISS_EXIT {
+            "not_found"
+        } else {
+            ERR_CODE_FAILED
+        };
+        return err_json_coded(
             verb,
+            error_code,
             json!({ "error": err_msg, "stdout": out, "exitCode": code }),
         );
     }

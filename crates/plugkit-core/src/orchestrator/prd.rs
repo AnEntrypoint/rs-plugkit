@@ -561,6 +561,8 @@ fn nearest_ids(ids: &[String], want: &str, n: usize) -> Vec<String> {
     scored.into_iter().take(n).map(|(_, id)| id.clone()).collect()
 }
 
+pub const LOOKUP_MISS_EXIT: i32 = 4;
+
 pub fn handle_list(content: &str) -> (String, String, i32) {
     let request = request_object(content);
     let limit = match request_limit(&request) {
@@ -638,7 +640,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
                 open_ids.len(),
                 nearest_ids(&open_ids, &wanted_ids[0], 3).join(", ")
             ),
-            1,
+            LOOKUP_MISS_EXIT,
         );
     }
     let matched = selected.len();
