@@ -488,6 +488,24 @@ pub fn host_cas_write(path: &str, expected: &str, data: &str) -> u32 {
     }
 }
 
+pub fn host_append(path: &str, data: &str) -> bool {
+    let (Ok(target), Ok(payload)) = (serde_json::to_string(path), serde_json::to_string(data)) else {
+        return false;
+    };
+    let code = format!(
+        "const fs=require('fs');const P=require('path');const f={target};try{{fs.mkdirSync(P.dirname(f),{{recursive:true}});fs.appendFileSync(f,{payload});process.stdout.write(JSON.stringify({{ok:true}}));}}catch(e){{process.stdout.write(JSON.stringify({{ok:false}}));}}"
+    );
+    let options = json!({ "timeoutMs": 15_000 }).to_string();
+    let packed = unsafe {
+        host_exec_js(code.as_ptr(), code.len() as u32, options.as_ptr(), options.len() as u32)
+    };
+    unpack_to_string(packed)
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|envelope| envelope.get("stdout").and_then(Value::as_str).map(str::to_string))
+        .and_then(|stdout| serde_json::from_str::<Value>(&stdout).ok())
+        .is_some_and(|result| result.get("ok").and_then(Value::as_bool) == Some(true))
+}
+
 pub fn host_stat(path: &str) -> Option<Value> {
     let packed = unsafe { host_fs_stat(path.as_ptr(), path.len() as u32) };
     unpack_to_string(packed).map(|s| serde_json::from_str(&s).unwrap_or(Value::Null))

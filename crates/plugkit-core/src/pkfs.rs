@@ -68,6 +68,11 @@ pub fn write(path: &str, data: &str) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub fn append(path: &str, data: &str) -> bool {
+    crate::wasm_dispatch::host_abi::host_append(&anchor(path), data)
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn write_if_changed(path: &str, data: &str) -> bool {
     if read_to_string(path).as_deref() == Some(data) {
         return true;
@@ -124,6 +129,10 @@ pub fn read_to_string(_path: &str) -> Option<String> {
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write(_path: &str, _data: &str) -> bool {
+    false
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub fn append(_path: &str, _data: &str) -> bool {
     false
 }
 #[cfg(not(target_arch = "wasm32"))]

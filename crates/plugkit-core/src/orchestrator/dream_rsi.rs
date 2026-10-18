@@ -538,12 +538,18 @@ impl Strategy {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn read_observations(raw: &str) -> Vec<ObservationRecord> {
-    serde_json::from_str::<Vec<Value>>(raw)
-        .unwrap_or_default()
-        .iter()
-        .map(ObservationRecord::from_value)
+fn read_observation_values(raw: &str) -> Vec<Value> {
+    if raw.trim_start().starts_with('[') {
+        return serde_json::from_str::<Vec<Value>>(raw).unwrap_or_default();
+    }
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn read_observations(raw: &str) -> Vec<ObservationRecord> {
+    read_observation_values(raw).iter().map(ObservationRecord::from_value).collect()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -567,9 +573,6 @@ pub struct ObservedDispatch<'a> {
 
 #[cfg(target_arch = "wasm32")]
 const OBSERVATIONS_LIVE_CAP: usize = 256;
-
-#[cfg(target_arch = "wasm32")]
-const OBSERVATIONS_ARCHIVE_CHUNK: usize = 64;
 
 #[cfg(target_arch = "wasm32")]
 const OBSERVATIONS_ARCHIVE_MAX_CHUNKS: usize = 32;
@@ -609,19 +612,41 @@ fn archive_names(session_id: &str) -> Vec<String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn archive_observations(session_id: &str, ts: i64, records: &[ObservationRecord]) -> bool {
-    let Ok(serialized) = serde_json::to_string(records) else {
-        return false;
-    };
+fn archive_observations(session_id: &str, ts: i64, raw: &str) -> Option<String> {
     let path = format!(".gm/dream-rsi/{session_id}/{OBSERVATIONS_ARCHIVE_PREFIX}{ts}.json");
-    if !crate::pkfs::write(&path, &serialized) {
-        return false;
+    if crate::pkfs::exists(&path) || !crate::pkfs::write(&path, raw) {
+        return None;
     }
     let names = archive_names(session_id);
     for stale in names.iter().take(names.len().saturating_sub(OBSERVATIONS_ARCHIVE_MAX_CHUNKS)) {
         crate::pkfs::remove_file(&format!(".gm/dream-rsi/{session_id}/{stale}"));
     }
-    true
+    Some(path)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn rotate_observations_if_full(session_id: &str, path: &str, ts: i64) {
+    let Some(raw) = crate::pkfs::read_to_string(path) else {
+        return;
+    };
+    if raw.trim().is_empty() {
+        return;
+    }
+    let legacy_array = raw.trim_start().starts_with('[');
+    let live_lines = raw.lines().filter(|line| !line.trim().is_empty()).count();
+    if !legacy_array && live_lines < OBSERVATIONS_LIVE_CAP {
+        return;
+    }
+    let Some(archive) = archive_observations(session_id, ts, &raw) else {
+        return;
+    };
+    let swapped = matches!(
+        crate::pkfs::cas_write(path, &raw, ""),
+        crate::pkfs::CasWriteOutcome::Swapped
+    );
+    if !swapped {
+        crate::pkfs::remove_file(&archive);
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -977,20 +1002,14 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
         return;
     }
     let path = format!(".gm/dream-rsi/{session_id}/observations.json");
-    let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
-    let mut observations = read_observations(&raw);
+    let ts = super::state::now_ms() as i64;
+    rotate_observations_if_full(session_id, &path, ts);
     let prd_open_count = crate::orchestrator::prd::handle_list_full().0
         .parse::<Value>().ok().and_then(|value| value.get("items").and_then(Value::as_array).cloned())
         .map(|items| items.iter().filter(|item| crate::orchestrator::prd::status_is_open(item.get("status").and_then(Value::as_str).unwrap_or("pending"))).count())
         .unwrap_or(0);
     let mutable_open_count = crate::orchestrator::mutables::pending_detailed().len();
-    let quality = match (exit_code, failure.no_match) {
-        (0, _) => 1.0,
-        (_, true) => 0.5,
-        _ => 0.0,
-    };
-    let ts = super::state::now_ms() as i64;
-    observations.push(ObservationRecord {
+    let record = ObservationRecord {
         dispatch_id: Some(dispatch_id.to_string()),
         verb: Some(verb.to_string()),
         fingerprint: Some(fingerprint.to_string()),
@@ -998,25 +1017,17 @@ pub fn observe_dispatch(observed: ObservedDispatch<'_>) {
         gate_drift: Some(gate_drift),
         prd_open_count: Some(prd_open_count as u64),
         mutable_open_count: Some(mutable_open_count as u64),
-        quality: Some(quality),
+        quality: Some(outcome_score(exit_code, failure.no_match, None)),
         ts: Some(ts),
         reply_sha256: Some(reply_sha256_hex(reply)),
         lean_node: lean_node.map(str::to_owned),
         error_code: failure.error_code,
         no_match: failure.no_match,
-    });
-    if observations.len() > OBSERVATIONS_LIVE_CAP + OBSERVATIONS_ARCHIVE_CHUNK
-        && archive_observations(session_id, ts, &observations[..OBSERVATIONS_ARCHIVE_CHUNK])
-    {
-        observations.drain(0..OBSERVATIONS_ARCHIVE_CHUNK);
-    }
-    if observations.len() > OBSERVATIONS_LIVE_CAP * 2 {
-        observations.drain(0..observations.len() - OBSERVATIONS_LIVE_CAP);
-    }
-    let _ = crate::pkfs::write(
-        &path,
-        &serde_json::to_string(&observations).unwrap_or_else(|_| "[]".to_string()),
-    );
+    };
+    let Ok(line) = serde_json::to_string(&record) else {
+        return;
+    };
+    let _ = crate::pkfs::append(&path, &format!("{line}\n"));
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1285,7 +1296,7 @@ fn verify_record(kind: &str, record: &Value) -> Result<Value, String> {
         if record.get("target").and_then(Value::as_str)
             != Some(format!("{}:{}", verb, fingerprint).as_str())
             || record.get("evaluator_score").and_then(Value::as_f64)
-                != Some(evaluator_score(exit_code, output_bytes))
+                != Some(outcome_score(exit_code, false, output_bytes))
             || record.get("cost").and_then(Value::as_u64) != Some(1)
         {
             return Err("Dream-RSI evaluator metrics do not match dispatch evidence".to_string());
@@ -1375,10 +1386,11 @@ pub fn dispatch_output_bytes(result: &Value) -> u64 {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn evaluator_score(exit_code: i64, output_bytes: Option<u64>) -> f64 {
-    match (exit_code, output_bytes) {
-        (0, Some(0)) => 0.5,
-        (0, _) => 1.0,
+pub fn outcome_score(exit_code: i64, no_match: bool, output_bytes: Option<u64>) -> f64 {
+    match (exit_code, no_match, output_bytes) {
+        (0, _, Some(0)) => 0.5,
+        (0, _, _) => 1.0,
+        (_, true, _) => 0.5,
         _ => 0.0,
     }
 }
@@ -1418,7 +1430,7 @@ pub fn evaluator_receipt(content: &str) -> Result<Value, String> {
     let target = format!("{}:{}", verb, fingerprint);
     let signed = signed_record(
         "evaluator",
-        json!({ "id": receipt_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": evaluator_score(exit_code, output_bytes), "cost": 1, "parent_id": parent_id, "owner_session_id": owner_session_id, "metric": "completed-dispatch-success" }),
+        json!({ "id": receipt_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": outcome_score(exit_code, false, output_bytes), "cost": 1, "parent_id": parent_id, "owner_session_id": owner_session_id, "metric": "completed-dispatch-success" }),
     )?;
     let path = evaluator_receipt_path()?;
     let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
@@ -2240,8 +2252,8 @@ pub fn handle(content: &str) -> (String, String, i32) {
 fn observations_for_result() -> Result<Vec<Value>, String> {
     let session = session_id()?;
     let path = format!(".gm/dream-rsi/{session}/observations.json");
-    let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
-    Ok(serde_json::from_str::<Vec<Value>>(&raw).unwrap_or_default())
+    let raw = crate::pkfs::read_to_string(&path).unwrap_or_default();
+    Ok(read_observation_values(&raw))
 }
 
 #[cfg(target_arch = "wasm32")]
