@@ -7620,30 +7620,46 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
                 .collect()
         })
         .unwrap_or_default();
-    let run_has_failed_job = |id: u64| {
+    let run_failed_job = |id: u64| {
         ci_status_gh_api_json(&format!("repos/{}/actions/runs/{}/jobs?per_page=100", repo, id))
-            .ok()
-            .and_then(|jobs| {
-                jobs.get("jobs").and_then(Value::as_array).map(|jobs| {
+            .map(|jobs| {
+                jobs.get("jobs").and_then(Value::as_array).map_or(false, |jobs| {
                     jobs.iter()
                         .any(|job| job.get("conclusion").and_then(Value::as_str) == Some("failure"))
                 })
             })
-            .unwrap_or(false)
     };
-    let run_with_failed_job = failing_run_ids
-        .iter()
-        .copied()
-        .find(|id| run_has_failed_job(*id))
-        .or_else(|| {
-            if failing_run_ids.is_empty() {
-                return None;
-            }
-            runs?
-                .iter()
+    let other_run_ids: Vec<u64> = if failing_run_ids.is_empty() {
+        Vec::new()
+    } else {
+        runs.map(|runs| {
+            runs.iter()
                 .filter_map(newest_id)
-                .find(|id| !failing_run_ids.contains(id) && run_has_failed_job(*id))
-        });
+                .filter(|id| !failing_run_ids.contains(id))
+                .collect()
+        })
+        .unwrap_or_default()
+    };
+    let mut run_with_failed_job = None;
+    let mut unreadable_run = None;
+    for id in failing_run_ids.iter().chain(other_run_ids.iter()).copied() {
+        match run_failed_job(id) {
+            Ok(true) => {
+                run_with_failed_job = Some(id);
+                break;
+            }
+            Ok(false) => {}
+            Err(reason) => {
+                unreadable_run.get_or_insert((id, format!("{}", reason)));
+            }
+        }
+    }
+    if let Some((id, reason)) = unreadable_run.filter(|_| run_with_failed_job.is_none()) {
+        return Err(json!({
+            "error": format!("could not read the jobs of run {} in {} to pick the failing run: {}", id, repo, reason),
+            "repo": repo, "sha": sha, "run_id": id,
+        }));
+    }
     match run_with_failed_job
         .or_else(|| failing_run_ids.first().copied())
         .or_else(|| runs.and_then(|runs| runs.first()).and_then(newest_id))
