@@ -3464,7 +3464,7 @@ pub(super) fn check_ci_status_and_write_validated_marker_if_green(
         Ok(v) => {
             let status = v
                 .get("data")
-                .and_then(|d| d.get("status"))
+                .and_then(|d| d.get("run_status"))
                 .and_then(|s| s.as_str())
                 .unwrap_or("unknown");
             let written = if (status == "success" || status == "no_applicable_workflow")
@@ -6405,7 +6405,7 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
                 Ok(parsed) => {
                     let runs = ci_status_runs_from(&parsed);
                     return Ok(ci_status_annotate_sha_resolution(
-                        ci_status_summarize(
+                        ci_status_reply_shape(ci_status_summarize(
                             body,
                             &repo,
                             &sha,
@@ -6413,7 +6413,7 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
                             transport,
                             &tree_path,
                             &rest_opts,
-                        ),
+                        )),
                         &resolution,
                     ));
                 }
@@ -6459,7 +6459,7 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
             .map(|f| f.transport.label())
             .unwrap_or("github_rest");
         return Ok(ci_status_annotate_sha_resolution(
-            json!({
+            ci_status_reply_shape(json!({
                 "ok": true, "verb": "ci-status",
                 "data": {
                     "status": "unknown",
@@ -6482,7 +6482,7 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
                         }))
                         .collect::<Vec<_>>(),
                 },
-            }),
+            })),
             &resolution,
         ));
     }
@@ -6722,8 +6722,66 @@ pub(super) fn ci_status_job_entry(workflow: &str, run_id: u64, job: &Value) -> V
         "github_status": status,
         "github_conclusion": github_conclusion,
         "run_id": run_id,
+        "job_id": job.get("id").and_then(Value::as_u64),
         "job_url": job.get("html_url").and_then(Value::as_str),
     })
+}
+
+pub(super) fn ci_status_reply_shape(mut reply: Value) -> Value {
+    let Some(data) = reply.get_mut("data").and_then(Value::as_object_mut) else {
+        return reply;
+    };
+    if let Some(status) = data.remove("status") {
+        data.insert("run_status".into(), status);
+    }
+    match data.remove("failed_jobs") {
+        Some(Value::Array(runs)) if !runs.is_empty() => {
+            data.insert("failing_runs".into(), Value::Array(runs));
+        }
+        _ => {}
+    }
+    if data
+        .get("jobs_unavailable")
+        .and_then(Value::as_array)
+        .is_some_and(|a| a.is_empty())
+    {
+        data.remove("jobs_unavailable");
+    }
+    if let Some(Value::Array(jobs)) = data.remove("jobs") {
+        let conclusion_of = |job: &Value| {
+            job.get("conclusion")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        let count = |wanted: &str| jobs.iter().filter(|j| conclusion_of(j) == wanted).count();
+        let failing_jobs: Vec<Value> = jobs
+            .iter()
+            .filter(|j| conclusion_of(j) == "failure")
+            .map(|j| {
+                json!({
+                    "name": j.get("name"),
+                    "workflow": j.get("workflow"),
+                    "job_id": j.get("job_id"),
+                    "run_id": j.get("run_id"),
+                    "log_url": j.get("job_url"),
+                })
+            })
+            .collect();
+        data.insert(
+            "job_counts".into(),
+            json!({
+                "total": jobs.len(),
+                "success": count("success"),
+                "failure": count("failure"),
+                "pending": count("pending"),
+                "skipped": count("skipped"),
+            }),
+        );
+        data.insert("pending_count".into(), json!(count("pending")));
+        data.insert("failing_jobs".into(), Value::Array(failing_jobs));
+    }
+    reply
 }
 
 pub(super) fn ci_status(body: &Value) -> u64 {
@@ -6761,9 +6819,15 @@ pub(super) const CI_LOG_FIELDS: &[&str] = &[
     "sha",
     "rev",
     "ref",
+    "failed_only",
+    "tail_lines",
 ];
 
-pub(super) const CI_LOG_AWK: &str = r#"BEGIN {
+pub(super) const CI_LOG_DEFAULT_TAIL_LINES: usize = 10;
+pub(super) const CI_LOG_TAIL_LINES_CEILING: usize = 100;
+pub(super) const CI_LOG_STEP_TABLE_MAX_BYTES: usize = 64 * 1024;
+
+pub(super) const CI_LOG_AWK: &str = r###"BEGIN {
   FS = "\t"
   JOBP = ENVIRON["GMCLOG_JOB"]
   STEPP = ENVIRON["GMCLOG_STEP"]
@@ -6772,6 +6836,18 @@ pub(super) const CI_LOG_AWK: &str = r#"BEGIN {
   IC = ENVIRON["GMCLOG_IC"] + 0
   CAP = ENVIRON["GMCLOG_CAP"] + 0
   BCAP = ENVIRON["GMCLOG_BCAP"] + 0
+  FO = ENVIRON["GMCLOG_FO"] + 0
+  TAIL = ENVIRON["GMCLOG_TAIL"] + 0
+  AFTER = 2
+  ANSI = "(" sprintf("%c", 27) "|\\^\\[)\\[[0-9;]*[A-Za-z]"
+  ns = 0
+  nr = split(ENVIRON["GMCLOG_STEPS"], recs, "\n")
+  for (i = 1; i <= nr; i++) {
+    if (recs[i] == "") continue
+    split(recs[i], f, "\037")
+    ns++
+    SJ[ns] = f[1]; SN[ns] = f[2]; SS[ns] = f[3]; SE[ns] = f[4]; SF[ns] = f[5] + 0
+  }
 }
 function keep(s, p,    a, b) {
   if (p == "") return 1
@@ -6779,28 +6855,171 @@ function keep(s, p,    a, b) {
   if (RX) return (a ~ b)
   return index(a, b) > 0
 }
+function bare(s) {
+  if (substr(s, 1, 3) == "\357\273\277") return substr(s, 4)
+  return s
+}
+function within(i, j, t) {
+  return SJ[i] == j && t >= SS[i] && (SE[i] == "" || t <= SE[i])
+}
+function stepof(j, ts, m,    i, t, from, opens) {
+  t = substr(ts, 1, 19)
+  from = (j in CUR) ? CUR[j] : 1
+  opens = (index(m, "##[group]Run ") == 1 || index(m, "Post job cleanup.") == 1)
+  for (i = from; i <= ns; i++) {
+    if (!within(i, j, t)) continue
+    if (opens && (i in HAS) && i + 1 <= ns && within(i + 1, j, t)) i++
+    HAS[i] = 1
+    CUR[j] = i
+    return i
+  }
+  for (i = 1; i < from; i++) if (within(i, j, t)) return i
+  return 0
+}
+function iserr(s,    a) {
+  if (index(s, "##[error]") > 0) return 1
+  a = tolower(s)
+  return (a ~ /(^|[^a-z_])(error|fatal|panicked|failed|failure)([^a-z_]|$)/)
+}
+function emit(kind, k, j, s, ts, m) {
+  printf "%s\t%d\t%s\t%s\t%s\t%s\n", kind, k, j, s, ts, m
+  printed++
+  used += length(j) + length(s) + length(ts) + length(m) + 8
+}
 {
   scanned++
   if (NF < 1) next
-  j = $1; s = $2; rest = $3
+  j = bare($1); s = $2; rest = $3
   for (i = 4; i <= NF; i++) rest = rest "\t" $i
   sp = index(rest, " ")
   if (sp > 0) { ts = substr(rest, 1, sp - 1); m = substr(rest, sp + 1) } else { ts = rest; m = "" }
+  ts = bare(ts)
+  gsub(ANSI, "", m)
+  k = stepof(j, ts, m)
+  if (k > 0) s = SN[k]
   if (!keep(j, JOBP)) next
   if (!keep(s, STEPP)) next
+  if (FO) {
+    if (k == 0 || !SF[k]) next
+    seen[k]++
+    if (TAIL > 0) { TT[k, seen[k] % TAIL] = ts; TM[k, seen[k] % TAIL] = m }
+    if ((PAT != "") ? keep(m, PAT) : iserr(m)) {
+      total++
+      errs[k]++
+      ctx[k] = AFTER
+      if (printed < CAP && used <= BCAP) emit("E", k, j, s, ts, m)
+    } else if (ctx[k] > 0) {
+      ctx[k]--
+      if (printed < CAP && used <= BCAP) emit("C", k, j, s, ts, m)
+    }
+    next
+  }
   if (!keep(m, PAT)) next
   total++
-  if (printed < CAP && used <= BCAP) {
-    printf "%s\t%s\t%s\t%s\n", j, s, ts, m
-    printed++
-    used += length(j) + length(s) + length(rest) + 8
-  }
+  if (printed < CAP && used <= BCAP) emit("L", k, j, s, ts, m)
 }
 END {
+  if (FO && TAIL > 0) {
+    for (k = 1; k <= ns; k++) {
+      if (seen[k] == 0 || errs[k] > 0) continue
+      n = (seen[k] < TAIL) ? seen[k] : TAIL
+      for (i = seen[k] - n + 1; i <= seen[k]; i++) {
+        if (used > BCAP) break
+        emit("T", k, SJ[k], SN[k], TT[k, i % TAIL], TM[k, i % TAIL])
+      }
+    }
+  }
   printf "ci_log_scanned=%d\n", scanned + 0 > "/dev/stderr"
   printf "ci_log_matched=%d\n", total + 0 > "/dev/stderr"
 }
-"#;
+"###;
+
+pub(super) struct CiLogStep {
+    job: String,
+    job_id: Option<u64>,
+    job_url: Option<String>,
+    name: String,
+    number: Option<u64>,
+    started: String,
+    completed: String,
+    failing: bool,
+}
+
+pub(super) fn ci_log_table_field(text: &str) -> String {
+    text.chars()
+        .filter(|c| *c != '\n' && *c != '\r' && *c != '\t' && *c != '\u{1f}')
+        .collect()
+}
+
+pub(super) fn ci_log_second_prefix(stamp: Option<&str>) -> String {
+    stamp
+        .filter(|s| s.len() >= 19 && s.is_char_boundary(19))
+        .map(|s| s[..19].to_string())
+        .unwrap_or_default()
+}
+
+pub(super) fn ci_log_steps(repo: &str, run_id: u64) -> Result<Vec<CiLogStep>, String> {
+    let parsed = ci_status_gh_api_json(&format!(
+        "repos/{}/actions/runs/{}/jobs?per_page=100",
+        repo, run_id
+    ))?;
+    let jobs = parsed
+        .get("jobs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "jobs response carries no jobs array".to_string())?;
+    let failed = |v: Option<&str>| matches!(v, Some("failure" | "timed_out" | "startup_failure"));
+    let mut steps = Vec::new();
+    for job in jobs {
+        let job_failed = failed(job.get("conclusion").and_then(Value::as_str));
+        let listed = job
+            .get("steps")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let any_failed_step = listed
+            .iter()
+            .any(|s| failed(s.get("conclusion").and_then(Value::as_str)));
+        for step in &listed {
+            let started = ci_log_second_prefix(step.get("started_at").and_then(Value::as_str));
+            if started.is_empty() {
+                continue;
+            }
+            let step_failed = failed(step.get("conclusion").and_then(Value::as_str));
+            steps.push(CiLogStep {
+                job: ci_log_table_field(job.get("name").and_then(Value::as_str).unwrap_or("")),
+                job_id: job.get("id").and_then(Value::as_u64),
+                job_url: job.get("html_url").and_then(Value::as_str).map(String::from),
+                name: ci_log_table_field(step.get("name").and_then(Value::as_str).unwrap_or("")),
+                number: step.get("number").and_then(Value::as_u64),
+                started,
+                completed: ci_log_second_prefix(step.get("completed_at").and_then(Value::as_str)),
+                failing: job_failed && (step_failed || !any_failed_step),
+            });
+        }
+    }
+    Ok(steps)
+}
+
+pub(super) fn ci_log_step_table(steps: &[CiLogStep]) -> (String, usize) {
+    let mut table = String::new();
+    let mut kept = 0usize;
+    for step in steps {
+        let row = format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\n",
+            step.job,
+            step.name,
+            step.started,
+            step.completed,
+            if step.failing { 1 } else { 0 }
+        );
+        if table.len() + row.len() > CI_LOG_STEP_TABLE_MAX_BYTES {
+            break;
+        }
+        table.push_str(&row);
+        kept += 1;
+    }
+    (table, kept)
+}
 
 pub(super) fn ci_log_string(body: &Value, fields: &[&str]) -> String {
     for field in fields {
@@ -6960,7 +7179,45 @@ pub(super) fn ci_log_shell_result(code: &str) -> Value {
         )
     };
     let raw = unpack_to_string(packed).unwrap_or_default();
-    serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({ "stdout": raw }))
+    let result = serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({ "stdout": raw }));
+    match result.get("task_id").and_then(Value::as_str) {
+        Some(task_id) if result.get("background").and_then(Value::as_bool) == Some(true) => {
+            ci_log_await_background_task(task_id, &result)
+        }
+        _ => result,
+    }
+}
+
+pub(super) const CI_LOG_TASK_POLL_MS: u64 = 500;
+pub(super) const CI_LOG_TASK_OUTPUT_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+pub(super) fn ci_log_await_background_task(task_id: &str, handover: &Value) -> Value {
+    let deadline = unsafe { host_now_ms() }.saturating_add(CI_LOG_GH_TIMEOUT_MS);
+    loop {
+        let output = crate::wasm_dispatch::host_task(
+            "output",
+            &json!({ "id": task_id, "max_bytes": CI_LOG_TASK_OUTPUT_MAX_BYTES }),
+        );
+        if output.get("ok").and_then(Value::as_bool) == Some(false) {
+            let mut failed = handover.clone();
+            failed["stderr"] = json!(format!(
+                "{}{}1\nbackground task {} unreadable: {}",
+                handover.get("stderr").and_then(Value::as_str).unwrap_or(""),
+                CI_LOG_FAILURE_MARKER,
+                task_id,
+                output.get("error").and_then(Value::as_str).unwrap_or("unknown error"),
+            ));
+            return failed;
+        }
+        if output.get("running").and_then(Value::as_bool) != Some(true) {
+            return output;
+        }
+        if unsafe { host_now_ms() } >= deadline {
+            crate::wasm_dispatch::host_task("stop", &json!({ "id": task_id }));
+            return json!({ "timed_out": true, "task_id": task_id });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(CI_LOG_TASK_POLL_MS));
+    }
 }
 
 pub(super) fn ci_log_command(
@@ -6974,26 +7231,33 @@ pub(super) fn ci_log_command(
     ignore_case: bool,
     max_lines: usize,
     max_chars: usize,
+    failed_only: bool,
+    tail_lines: usize,
+    step_table: &str,
 ) -> String {
     let job_flag = match job_id {
         Some(job_id) => format!(" --job {}", ci_status_shell_quote(&job_id.to_string())),
         None => String::new(),
     };
     let target = format!(
-        "gh run view {}{} --log --repo {}",
+        "gh run view {}{} {} --repo {}",
         ci_status_shell_quote(&run_id.to_string()),
         job_flag,
+        if failed_only { "--log-failed" } else { "--log" },
         ci_status_shell_quote(repo)
     );
     let env = format!(
-        "GMCLOG_JOB={} GMCLOG_STEP={} GMCLOG_PAT={} GMCLOG_RX={} GMCLOG_IC={} GMCLOG_CAP={} GMCLOG_BCAP={}",
+        "GMCLOG_JOB={} GMCLOG_STEP={} GMCLOG_PAT={} GMCLOG_RX={} GMCLOG_IC={} GMCLOG_CAP={} GMCLOG_BCAP={} GMCLOG_FO={} GMCLOG_TAIL={} GMCLOG_STEPS={}",
         ci_status_shell_quote(job_filter),
         ci_status_shell_quote(step_filter),
         ci_status_shell_quote(pattern),
         if regex_mode { 1 } else { 0 },
         if ignore_case { 1 } else { 0 },
         max_lines,
-        max_chars
+        max_chars,
+        if failed_only { 1 } else { 0 },
+        tail_lines,
+        ci_status_shell_quote(step_table)
     );
     format!(
         "err=\"$(mktemp 2>/dev/null || printf '/tmp/gm-ci-log-%s' \"$$\")\"\n\
@@ -7063,6 +7327,35 @@ pub(super) fn ci_log(body: &Value) -> u64 {
         Ok(max_chars) => max_chars,
         Err(detail) => return err_json("ci-log", detail),
     };
+    let failed_only = match body_bool_flag(body, "failed_only", "ci-log") {
+        Ok(failed_only) => failed_only,
+        Err(detail) => return err_json("ci-log", detail),
+    };
+    let tail_lines = match ci_log_bounded(
+        body,
+        "tail_lines",
+        CI_LOG_DEFAULT_TAIL_LINES,
+        CI_LOG_TAIL_LINES_CEILING,
+    ) {
+        Ok(tail_lines) => tail_lines,
+        Err(detail) => return err_json("ci-log", detail),
+    };
+    let (steps, step_labels_error) = match ci_log_steps(&repo, run_id) {
+        Ok(steps) => (steps, None),
+        Err(reason) => (Vec::new(), Some(reason)),
+    };
+    if failed_only {
+        if let Some(reason) = &step_labels_error {
+            return err_json(
+                "ci-log",
+                json!({
+                    "error": format!("failed_only needs the run's job and step list, which could not be read: {}", reason),
+                    "repo": repo, "run_id": run_id,
+                }),
+            );
+        }
+    }
+    let (step_table, steps_labelled) = ci_log_step_table(&steps);
     let command = ci_log_command(
         &repo,
         run_id,
@@ -7074,6 +7367,9 @@ pub(super) fn ci_log(body: &Value) -> u64 {
         ignore_case,
         max_lines,
         max_chars,
+        failed_only,
+        tail_lines,
+        &step_table,
     );
     let result = ci_log_shell_result(&command);
     if result.get("timed_out").and_then(Value::as_bool) == Some(true) {
@@ -7118,11 +7414,35 @@ pub(super) fn ci_log(body: &Value) -> u64 {
     let mut lines: Vec<Value> = Vec::new();
     let mut returned_chars = 0usize;
     let mut truncated_by: Option<&'static str> = None;
+    let mut error_lines_returned = 0usize;
+    let mut capped_lines_returned = 0usize;
+    let mut failures: Vec<Value> = Vec::new();
+    let mut failure_slot: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    if failed_only {
+        for (index, step) in steps.iter().take(steps_labelled).enumerate() {
+            if step.failing {
+                failure_slot.insert(index + 1, failures.len());
+                failures.push(json!({
+                    "job": step.job,
+                    "job_id": step.job_id,
+                    "log_url": step.job_url,
+                    "step": step.name,
+                    "step_number": step.number,
+                    "error_lines": [],
+                }));
+            }
+        }
+    }
     for raw in ci_status_shell_stdout(&result).lines() {
         if raw.is_empty() {
             continue;
         }
-        let mut parts = raw.splitn(4, '\t');
+        let mut parts = raw.splitn(6, '\t');
+        let kind = parts.next().unwrap_or("");
+        let step_index = parts
+            .next()
+            .and_then(|k| k.parse::<usize>().ok())
+            .unwrap_or(0);
         let job = parts
             .next()
             .unwrap_or("")
@@ -7135,6 +7455,27 @@ pub(super) fn ci_log(body: &Value) -> u64 {
             .trim_start_matches('\u{feff}')
             .to_string();
         let text = parts.next().unwrap_or("").to_string();
+        if failed_only {
+            let Some(slot) = failure_slot.get(&step_index).copied() else {
+                continue;
+            };
+            let field = if kind == "T" { "tail" } else { "error_lines" };
+            let entry = &mut failures[slot];
+            if entry.get(field).is_none() {
+                entry[field] = json!([]);
+            }
+            if let Some(list) = entry[field].as_array_mut() {
+                list.push(json!({ "at": at, "text": text }));
+            }
+            returned_chars += text.chars().count() + 8;
+            if kind == "E" {
+                error_lines_returned += 1;
+            }
+            if kind != "T" {
+                capped_lines_returned += 1;
+            }
+            continue;
+        }
         let cost = text.chars().count() + job.chars().count() + step.chars().count() + 8;
         if !lines.is_empty() && returned_chars + cost > max_chars {
             truncated_by = Some("max_chars");
@@ -7152,6 +7493,49 @@ pub(super) fn ci_log(body: &Value) -> u64 {
             "at": at,
             "text": text,
         }));
+    }
+    let step_labels = match &step_labels_error {
+        None if steps_labelled < steps.len() => json!({
+            "source": "github_jobs_api",
+            "steps_labelled": steps_labelled,
+            "steps_total": steps.len(),
+        }),
+        None => json!({ "source": "github_jobs_api" }),
+        Some(reason) => json!({ "source": "gh_log", "unavailable_reason": reason }),
+    };
+    if failed_only {
+        let truncated = error_lines_returned < matched;
+        let mut data = json!({
+            "repo": repo,
+            "run_id": run_id,
+            "run_url": format!("https://github.com/{}/actions/runs/{}", repo, run_id),
+            "mode": "failed_only",
+            "failing_steps": failures.len(),
+            "failures": failures,
+            "lines_scanned": scanned,
+            "error_lines_matched": matched,
+            "error_lines_returned": error_lines_returned,
+            "returned_chars": returned_chars,
+            "truncated": truncated,
+            "step_labels": step_labels,
+            "transport": "gh_cli",
+        });
+        if truncated {
+            data["truncated_by"] = json!(if capped_lines_returned >= max_lines {
+                "max_lines"
+            } else {
+                "max_chars"
+            });
+        }
+        if failures.is_empty() {
+            data["hint"] = json!("no job in this run failed; drop failed_only to read the whole log");
+        } else if matched == 0 {
+            data["hint"] = json!(format!(
+                "no line in a failing step matched the error pattern; each failing step carries its last {} lines under tail",
+                tail_lines
+            ));
+        }
+        return pack(json!({ "ok": true, "verb": "ci-log", "data": data }).to_string());
     }
     let truncated = truncated_by.is_some() || lines.len() < matched;
     let truncated_by = truncated_by.or(if !truncated {
@@ -7184,6 +7568,7 @@ pub(super) fn ci_log(body: &Value) -> u64 {
         "truncated": truncated,
         "truncated_by": truncated_by,
         "lines": lines,
+        "step_labels": step_labels,
         "transport": "gh_cli",
     });
     if lines.is_empty() {
