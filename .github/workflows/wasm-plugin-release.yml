@@ -76,7 +76,15 @@ jobs:
             deps="$deps$repo@$sha "
           done
           deps=${deps% }
-          body=$(gh api "repos/$RELEASE_REPO/releases/latest" --jq '.body' 2>/dev/null || true)
+          api_err=$(mktemp)
+          if ! body=$(gh api "repos/$RELEASE_REPO/releases/latest" --jq '.body' 2>"$api_err"); then
+            if grep -q 'HTTP 404' "$api_err"; then
+              body=""
+            else
+              cat "$api_err" >&2
+              exit 1
+            fi
+          fi
           recorded_head=$(printf '%s\n' "$body" | sed -n 's/^source-head: //p')
           recorded_deps=$(printf '%s\n' "$body" | sed -n 's/^source-deps: //p')
           skip=false
