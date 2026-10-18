@@ -91,6 +91,7 @@ fn evaluate(content: &str) -> Result<Value, String> {
             "ok": true, "kind": "observations", "status": "replayed",
             "owner_session_id": owner, "cycle_id": cycle_id,
             "last_dispatch_id": latest, "cycle": fields,
+            "replay": {"replays": [{"dispatch_id": latest}]},
             "replay_result_path": replay_result_path
         })),
         Err(error) => Ok(json!({
