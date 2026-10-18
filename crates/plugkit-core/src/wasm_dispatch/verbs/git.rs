@@ -6456,9 +6456,22 @@ pub(super) fn ci_status_rest_api_json(
         .and_then(Value::as_i64)
         .or_else(|| resp.get("statusCode").and_then(Value::as_i64))
         .unwrap_or(0);
+    let empty_reply = body_text.trim().is_empty();
     if status_code != 200 {
         let rate_limit = ci_status_rate_limit_from_reply(&resp, status_code, &body_text);
-        return Err((status_code, body_text, rate_limit));
+        let body = if empty_reply {
+            format!("empty reply from api.github.com (HTTP {})", status_code)
+        } else {
+            body_text
+        };
+        return Err((status_code, body, rate_limit));
+    }
+    if empty_reply {
+        return Err((
+            status_code,
+            format!("empty reply from api.github.com (HTTP {})", status_code),
+            None,
+        ));
     }
     serde_json::from_str::<Value>(&body_text).map_err(|parse_error| {
         (
