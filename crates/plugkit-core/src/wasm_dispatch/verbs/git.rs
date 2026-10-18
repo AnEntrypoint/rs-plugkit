@@ -6608,10 +6608,26 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
     if let Some(run_id) = ci_log_id(body, &["run_id", "run"]) {
         return Ok(run_id);
     }
+    if let Some(job_id) = ci_log_id(body, &["job_id"]) {
+        let parsed = ci_status_gh_api_json(&format!("repos/{}/actions/jobs/{}", repo, job_id))
+            .map_err(|reason| {
+                json!({
+                    "error": format!("could not read job {} in {}: {}", job_id, repo, reason),
+                    "repo": repo, "job_id": job_id,
+                })
+            })?;
+        return match parsed.get("run_id").and_then(Value::as_u64) {
+            Some(run_id) => Ok(run_id),
+            None => Err(json!({
+                "error": format!("job {} in {} has no run_id", job_id, repo),
+                "repo": repo, "job_id": job_id,
+            })),
+        };
+    }
     let sha = ci_log_string(body, &["sha", "rev", "ref"]);
     if sha.is_empty() {
         return Err(json!({
-            "error": "run_id required: name the GitHub Actions run whose log to read, or pass sha/rev/ref to read the newest run for that commit; ci-status returns run_id for every job",
+            "error": "run_id required: name the GitHub Actions run whose log to read, pass job_id to resolve its run, or pass sha/rev/ref to read the newest run for that commit; ci-status returns run_id for every job",
             "error_code": ERR_CODE_INVALID_ARGS,
             "accepted_fields": ["run_id", "job_id", "sha"],
         }));
@@ -6667,18 +6683,16 @@ pub(super) fn ci_log_command(
     max_lines: usize,
     max_chars: usize,
 ) -> String {
-    let target = match job_id {
-        Some(job_id) => format!(
-            "gh run view --job {} --log --repo {}",
-            ci_status_shell_quote(&job_id.to_string()),
-            ci_status_shell_quote(repo)
-        ),
-        None => format!(
-            "gh run view {} --log --repo {}",
-            ci_status_shell_quote(&run_id.to_string()),
-            ci_status_shell_quote(repo)
-        ),
+    let job_flag = match job_id {
+        Some(job_id) => format!(" --job {}", ci_status_shell_quote(&job_id.to_string())),
+        None => String::new(),
     };
+    let target = format!(
+        "gh run view {}{} --log --repo {}",
+        ci_status_shell_quote(&run_id.to_string()),
+        job_flag,
+        ci_status_shell_quote(repo)
+    );
     let env = format!(
         "GMCLOG_JOB={} GMCLOG_STEP={} GMCLOG_PAT={} GMCLOG_RX={} GMCLOG_IC={} GMCLOG_CAP={} GMCLOG_BCAP={}",
         ci_status_shell_quote(job_filter),
