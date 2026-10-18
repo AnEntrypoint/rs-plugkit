@@ -13,6 +13,7 @@ use crate::orchestrator::yaml_util::base64_decode;
 use serde_json::{json, Value};
 
 mod git;
+mod lane_claims;
 mod search;
 mod web;
 use git::*;
