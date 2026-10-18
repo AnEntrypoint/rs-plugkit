@@ -698,8 +698,24 @@ pub(super) fn git_status(body: &Value) -> u64 {
                 }
             }
         }
+        if let Some(map) = lists.as_object_mut() {
+            map.insert("root".to_string(), json!(cwd));
+            map.insert("remote".to_string(), resolved_remote_report(cwd));
+        }
         Ok(ok("git_status", lists))
     })
+}
+
+fn resolved_remote_report(cwd: Option<&str>) -> Value {
+    let branch = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string();
+    let name = exec_git_in(cwd, &format!("config --get branch.{}.remote", branch))
+        .trim()
+        .to_string();
+    let name = if name.is_empty() { "origin".to_string() } else { name };
+    let url = exec_git_in(cwd, &format!("remote get-url {}", name))
+        .trim()
+        .to_string();
+    json!({ "name": name, "url": url })
 }
 
 pub(super) fn branch_status(body: &Value) -> u64 {
@@ -740,6 +756,7 @@ pub(super) fn branch_status(body: &Value) -> u64 {
     ok(
         "branch_status",
         json!({
+            "root": cwd,
             "branch": branch,
             "ahead": ahead,
             "behind": behind,
