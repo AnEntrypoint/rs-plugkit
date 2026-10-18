@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 mod git;
 mod lane_claims;
 mod search;
+mod tree_staleness;
 mod web;
 use git::*;
 use web::{fetch, websearch};
@@ -3090,7 +3091,7 @@ fn codeinsight_action(verb: &str, action: &str, body: &Value) -> u64 {
         map.entry("action").or_insert_with(|| json!(action));
     }
     match crate::code_symbols::handle(&routed) {
-        Ok(data) => ok(verb, data),
+        Ok(data) => tree_staleness::stamp_tree_staleness_packed(body, ok(verb, data)),
         Err(reason) => err_coded_hinted(verb, ERR_CODE_FAILED, &reason, json!("codeinsight")),
     }
 }
@@ -3281,7 +3282,9 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "cache_stats" => cache_stats(&body),
         "codeinsight_index" => codeinsight_index(&body),
         "codeinsight" => codeinsight(&body),
-        "codesearch" | "code_search" | "search" => codesearch(&body),
+        "codesearch" | "code_search" | "search" => {
+            tree_staleness::stamp_tree_staleness_packed(&body, codesearch(&body))
+        }
         "grep" | "rg" => grep(&body),
         "callers" => callers(&body),
         "callees" => callees(&body),

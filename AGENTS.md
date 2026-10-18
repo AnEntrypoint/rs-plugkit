@@ -184,6 +184,7 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 - `hoist_glob_paths` moves a glob written under `path`, `paths` or `files` to the `glob` field; left under `path`, the scan refused outright.
 - `finish_scan_reply`: a rule exclusion costs coverage only while the excluded paths stay unread; once `uncovered_scan` reports complete, `exhaustive` keeps its result.
 - The `dual` route builds `PathScope::from_body` and resolves it with `scope_paths_resolve` under `.`; without that, ranked channels answer a scoped query with project-wide hits.
+- `verbs/tree_staleness.rs` stamps `stale_tree` on codesearch and codeinsight replies when the scoped repo (a submodule when `path` lies in one) is behind `@{u}` or its `FETCH_HEAD` is over 24 h old; it reads local refs only (one `rev-parse`, plus `rev-list` when the shas differ), never fetches, so behind counts are as of the last fetch.
 - `fetch`: an empty converted text is a failed retrieval (`ok` false), never an empty answer.
 - `page_or_clamp`: with no page the whole-document read answers, clipped tail included; with a page the bounded read reports page fields.
 - Percent-encoding keeps search qualifiers literal (`:`, `>`, `<`, `=`, `/`, `@`, `*`, `!`, parentheses, commas), since github reads `user:`, `repo:owner/name` and `stars:>=100`.
