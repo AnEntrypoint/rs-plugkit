@@ -188,7 +188,7 @@ for that path rather than a runtime check a caller could skip.
 `discipline-audit`'s ordering check now obtains this same proof object
 rather than a parallel hand-rolled equivalent.
 
-`orchestrator/codeinsight_component.rs` is a FOURTH component kind,
+`orchestrator/codeinsight_component.rs` is a component kind,
 chosen adversarially rather than to confirm the pattern already worked:
 its substance (`code_index.rs`'s codeinsight/manifest/vec namespaces)
 lives in a libsql database (`shared_db.rs`), not a filesystem tree like
