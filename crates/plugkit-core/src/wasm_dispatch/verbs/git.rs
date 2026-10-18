@@ -5700,10 +5700,19 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         Ok(v) => v,
         Err(detail) => return err_json("git_pull", detail),
     };
-    let autostash = match body_bool_flag(body, "autostash", "git_pull") {
+    let autostash_requested = match body_bool_flag(body, "autostash", "git_pull") {
         Ok(v) => v,
         Err(detail) => return err_json("git_pull", detail),
     };
+    let dirty_tracked: Vec<String> = git_porcelain_in(cwd)
+        .lines()
+        .filter(|line| !line.starts_with("??"))
+        .filter_map(|line| line.get(3..).map(|path| path.trim().to_string()))
+        .filter(|path| !path.is_empty())
+        .collect();
+    let only_runtime_state_dirty =
+        !dirty_tracked.is_empty() && dirty_tracked.iter().all(|path| path.starts_with(".gm/"));
+    let autostash = autostash_requested || only_runtime_state_dirty;
 
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
     let mut argv: Vec<String> = identity_config_argv(&pull_identity(body));
