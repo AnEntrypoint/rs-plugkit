@@ -227,7 +227,7 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
         return (out.to_string(), String::new(), 0);
     }
     let partial_supply = !launch_ids.is_empty() && (launch_ids.len() as u64) < shortfall;
-    if observed.is_some() && open_rows > 0 && live < floor && !partial_supply {
+    if observed.is_some() && open_rows > 0 && live < floor && !launch_ids.is_empty() && !partial_supply {
         let launch_text = launch_instruction(&launch_ids, shortfall, &route.text);
         let mut text = floor_denial_text("pool-observe", live, floor, open_rows, launch_ids.len() as u64, shortfall, &launch_text);
         if refill_needed == 0 {
