@@ -7410,7 +7410,8 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     if !unread_paths.is_empty() {
         out.insert("paths_not_read_count".to_string(), json!(unread_paths.len()));
         out.insert("paths_not_read".to_string(), json!(unread_paths.iter().take(SKIPPED_SAMPLE_LEN).cloned().collect::<Vec<_>>()));
-        out.insert("paths_not_read_note".to_string(), json!("the hit cap was reached before these named paths were opened, so nothing in them can appear above: the paths list above is what you asked for, files_scanned is what was actually read -- raise max_results or scan these paths one per call"));
+        out.insert("paths_not_read_reason".to_string(), json!("matches_cap"));
+        out.insert("paths_not_read_note".to_string(), json!(format!("the hit cap (matches_truncated) was reached before these paths were opened, so nothing in them can appear above; paths_not_read lists the first {} of paths_not_read_count, files_scanned is what was actually read -- raise max_results or scan these paths one per call", SKIPPED_SAMPLE_LEN)));
     }
     if req.refresh {
         out.insert("refreshed".to_string(), json!(true));
