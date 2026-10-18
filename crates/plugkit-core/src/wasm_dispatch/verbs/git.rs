@@ -1169,18 +1169,20 @@ pub(super) fn pushed_commits_published(repo: Option<&str>, from: Option<&str>, t
     })
 }
 
-fn bin_drift_check_js(base: &str, repo: &str) -> String {
+fn bin_drift_check_js(base: &str, repo: &str, include: &[String]) -> String {
     format!(
         r#"(() => {{
   const cp = require('child_process');
   const path = require('path');
   const repoDir = path.resolve({base}, {repo});
   const script = path.join(repoDir, 'scripts', 'check-bin-drift.mjs');
-  const r = cp.spawnSync(process.execPath, [script], {{ cwd: repoDir, encoding: 'utf8', windowsHide: true, timeout: 120000 }});
+  const env = {{ ...process.env, GM_MCP_BUILD_INCLUDE: {include} }};
+  const r = cp.spawnSync(process.execPath, [script], {{ cwd: repoDir, env, encoding: 'utf8', windowsHide: true, timeout: 120000 }});
   process.stdout.write(JSON.stringify({{ exit_code: r.status, output: String(r.stdout || '') + String(r.stderr || ''), error: r.error ? String(r.error.message || r.error) : null }}));
 }})();"#,
         base = serde_json::to_string(base).unwrap_or_else(|_| "\"\"".to_string()),
         repo = serde_json::to_string(repo).unwrap_or_else(|_| "\"\"".to_string()),
+        include = serde_json::to_string(&include.join(",")).unwrap_or_else(|_| "\"\"".to_string()),
     )
 }
 
@@ -1202,10 +1204,10 @@ fn bin_drift_tracks_gate(repo: Option<&str>, rev: &str) -> bool {
         == 0
 }
 
-fn bin_drift_run(repo: Option<&str>) -> Result<(), String> {
+fn bin_drift_run(repo: Option<&str>, include: &[String]) -> Result<(), String> {
     let checkout = repo.unwrap_or("the checkout");
     let base = super::host_abi::host_cwd_string().unwrap_or_default();
-    let code = bin_drift_check_js(&base, repo.unwrap_or(""));
+    let code = bin_drift_check_js(&base, repo.unwrap_or(""), include);
     let opts = json!({ "timeoutMs": 150000 }).to_string();
     let packed = unsafe {
         super::host_abi::host_exec_js(
@@ -1270,7 +1272,7 @@ fn bin_drift_refusal(
             "bin drift gate cannot certify {source_sha}: check-bin-drift reads bin/, src/ and the build inputs from the checkout, so the push must be HEAD ({head_sha}) with no uncommitted changes under those paths. Commit or revert them, then push again. After the commit, run: node scripts/check-bin-drift.mjs; if it reports STALE, run: npm run build, then commit bin/gm-mcp-server.js with the src/ change."
         ));
     }
-    bin_drift_run(repo)
+    bin_drift_run(repo, &[])
         .err()
         .map(|detail| format!("bin drift gate refused the push: {detail}"))
 }
@@ -1290,6 +1292,7 @@ fn bin_drift_commit_refusal(repo: Option<&str>, paths: &[String], add_all: bool)
     let index_only = !add_all && paths.is_empty();
     let porcelain = git_push_porcelain_in(repo);
     let mut touches_gate = false;
+    let mut committed_inputs: Vec<String> = Vec::new();
     let mut outside: Vec<String> = Vec::new();
     for line in porcelain.lines() {
         let path = line.get(3..).unwrap_or("").trim().trim_matches('"');
@@ -1308,6 +1311,7 @@ fn bin_drift_commit_refusal(repo: Option<&str>, paths: &[String], add_all: bool)
         };
         if in_commit {
             touches_gate = true;
+            committed_inputs.push(path.to_string());
         }
         if index_only && staged && unstaged {
             outside.push(path.to_string());
@@ -1323,7 +1327,7 @@ fn bin_drift_commit_refusal(repo: Option<&str>, paths: &[String], add_all: bool)
             listed.join(", ")
         ));
     }
-    bin_drift_run(repo)
+    bin_drift_run(repo, &committed_inputs)
         .err()
         .map(|detail| format!("bin drift gate refused the commit: {detail}"))
 }
@@ -5904,6 +5908,24 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         .filter(|line| !line.starts_with("??"))
         .filter_map(|line| line.get(3..).map(|path| path.trim().to_string()))
         .filter(|path| !path.is_empty())
+        .collect();
+    let gitlink_paths: std::collections::HashSet<String> = if dirty_tracked.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        let mut ls_argv: Vec<&str> = vec!["ls-files", "-s", "--"];
+        ls_argv.extend(dirty_tracked.iter().map(|path| path.as_str()));
+        git_call_argv(&ls_argv, cwd)
+            .get("stdout")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .lines()
+            .filter(|line| line.starts_with("160000 "))
+            .filter_map(|line| line.split_once('\t').map(|(_, path)| path.to_string()))
+            .collect()
+    };
+    let dirty_tracked: Vec<String> = dirty_tracked
+        .into_iter()
+        .filter(|path| !gitlink_paths.contains(path))
         .collect();
     let only_runtime_state_dirty =
         !dirty_tracked.is_empty() && dirty_tracked.iter().all(|path| path.starts_with(".gm/"));
