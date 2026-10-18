@@ -62,9 +62,9 @@ fn evaluate(content: &str) -> Result<Value, String> {
     fields["cycle_id"] = json!(cycle_id);
     fields["last_dispatch_id"] = json!(latest);
     match super::dream_rsi::persist_replay_result(
-        super::dream_rsi::CYCLE_RESULT_FILE,
-        "dream-replay-cycle",
-        fields.clone(),
+        super::dream_rsi::ReplayFile::Cycle,
+        super::dream_rsi::ReplaySource("dream-replay-cycle"),
+        fields.as_object().cloned().unwrap_or_default(),
     ) {
         Ok(replay_result_path) => Ok(json!({
             "ok": true, "kind": "observations", "status": "replayed",
