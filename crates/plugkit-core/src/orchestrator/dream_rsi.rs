@@ -918,7 +918,7 @@ fn session_world(session_id: &str, records: &[ObservationRecord]) -> Option<Worl
     nodes.insert(previous.clone(), Node { id: previous.clone(), score: 0.0, cost: 0, round: 0, children: Vec::new() });
     for record in records {
         let Some(verb) = record.verb.clone() else { continue };
-        let quality = record.quality.unwrap_or(if record.succeeded() { 1.0 } else { 0.0 });
+        let Some(quality) = record.quality else { continue };
         let next_round = nodes.len() as u64;
         let node = nodes.entry(verb.clone()).or_insert_with(|| Node {
             id: verb.clone(),
