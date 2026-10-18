@@ -3197,6 +3197,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "ci-log" | "ci_log" => ci_log(&body),
             "git_branch" => git_branch(&body),
             "git_remote" => git_remote(&body),
+            "git_submodule_add" => git_submodule_add(&body),
             "git_worktree" => git_worktree(&body),
             "git_checkout" => git_checkout(&body),
         "git_merge" => git_merge(&body),

@@ -204,6 +204,7 @@ pub(super) fn git_async_reenter(verb: &str, body: &Value) -> u64 {
         "git_log" => git_log(body),
         "git_diff" => git_diff(body),
         "git_remote" => git_remote(body),
+        "git_submodule_add" => git_submodule_add(body),
         _ => err(
             "git_poll",
             "parked plan names a verb with no async-resume support",
@@ -744,6 +745,17 @@ pub(super) fn branch_status(body: &Value) -> u64 {
             "remote": remote,
         }),
     )
+}
+
+fn expand_short_rev(cwd: Option<&str>, rev: String) -> String {
+    let short_hex = (4..=39).contains(&rev.len()) && rev.bytes().all(|b| b.is_ascii_hexdigit());
+    if !short_hex {
+        return rev;
+    }
+    match resolve_ref(cwd, &format!("{}^{{commit}}", rev)) {
+        Some(full) if is_full_sha(&full) => full,
+        _ => rev,
+    }
 }
 
 pub(super) fn resolve_ref(cwd: Option<&str>, refspec: &str) -> Option<String> {
@@ -1418,7 +1430,8 @@ pub(super) fn git_push(body: &Value) -> u64 {
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        .map(String::from);
+        .map(String::from)
+        .map(|rev| expand_short_rev(repo.as_deref(), rev));
     let current_branch = exec_git_in(repo.as_deref(), "rev-parse --abbrev-ref HEAD")
         .trim()
         .to_string();
@@ -6608,10 +6621,26 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
     if let Some(run_id) = ci_log_id(body, &["run_id", "run"]) {
         return Ok(run_id);
     }
+    if let Some(job_id) = ci_log_id(body, &["job_id"]) {
+        let parsed = ci_status_gh_api_json(&format!("repos/{}/actions/jobs/{}", repo, job_id))
+            .map_err(|reason| {
+                json!({
+                    "error": format!("could not read job {} in {}: {}", job_id, repo, reason),
+                    "repo": repo, "job_id": job_id,
+                })
+            })?;
+        return match parsed.get("run_id").and_then(Value::as_u64) {
+            Some(run_id) => Ok(run_id),
+            None => Err(json!({
+                "error": format!("job {} in {} has no run_id", job_id, repo),
+                "repo": repo, "job_id": job_id,
+            })),
+        };
+    }
     let sha = ci_log_string(body, &["sha", "rev", "ref"]);
     if sha.is_empty() {
         return Err(json!({
-            "error": "run_id required: name the GitHub Actions run whose log to read, or pass sha/rev/ref to read the newest run for that commit; ci-status returns run_id for every job",
+            "error": "run_id required: name the GitHub Actions run whose log to read, pass job_id to resolve its run, or pass sha/rev/ref to read the newest run for that commit; ci-status returns run_id for every job",
             "error_code": ERR_CODE_INVALID_ARGS,
             "accepted_fields": ["run_id", "job_id", "sha"],
         }));
@@ -6667,18 +6696,16 @@ pub(super) fn ci_log_command(
     max_lines: usize,
     max_chars: usize,
 ) -> String {
-    let target = match job_id {
-        Some(job_id) => format!(
-            "gh run view --job {} --log --repo {}",
-            ci_status_shell_quote(&job_id.to_string()),
-            ci_status_shell_quote(repo)
-        ),
-        None => format!(
-            "gh run view {} --log --repo {}",
-            ci_status_shell_quote(&run_id.to_string()),
-            ci_status_shell_quote(repo)
-        ),
+    let job_flag = match job_id {
+        Some(job_id) => format!(" --job {}", ci_status_shell_quote(&job_id.to_string())),
+        None => String::new(),
     };
+    let target = format!(
+        "gh run view {}{} --log --repo {}",
+        ci_status_shell_quote(&run_id.to_string()),
+        job_flag,
+        ci_status_shell_quote(repo)
+    );
     let env = format!(
         "GMCLOG_JOB={} GMCLOG_STEP={} GMCLOG_PAT={} GMCLOG_RX={} GMCLOG_IC={} GMCLOG_CAP={} GMCLOG_BCAP={}",
         ci_status_shell_quote(job_filter),
@@ -7008,6 +7035,94 @@ fn git_remote_mutate(body: &Value, action: &str) -> u64 {
             return Ok(err("git_remote", reason));
         }
         Ok(ok("git_remote", json!({ "action": action, "name": name })))
+    })
+}
+
+fn valid_submodule_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 255
+        && !path.starts_with('/')
+        && path.bytes().all(|b| b.is_ascii_graphic())
+        && path
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != ".." && seg != ".git")
+}
+
+fn valid_submodule_branch(branch: &str) -> bool {
+    branch.len() <= 128
+        && !branch.starts_with('-')
+        && branch
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
+}
+
+pub(super) fn git_submodule_add(body: &Value) -> u64 {
+    git_async_entry("git_submodule_add", body, |body, plan| {
+        let cwd = body_cwd(body);
+        let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if !valid_https_url(&url) {
+            return Ok(err(
+                "git_submodule_add",
+                "url must be https:// with a host, no user:password@ and no whitespace",
+            ));
+        }
+        let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if !valid_submodule_path(&path) {
+            return Ok(err(
+                "git_submodule_add",
+                "path must be relative to the repo root: no leading '/', no '.', '..' or '.git' segment, no whitespace",
+            ));
+        }
+        let branch = body
+            .get("branch")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(str::to_string);
+        if branch.as_deref().is_some_and(|b| !valid_submodule_branch(b)) {
+            return Ok(err(
+                "git_submodule_add",
+                "branch must hold only letters, digits, '.', '_', '-' or '/' and must not start with '-' (max 128)",
+            ));
+        }
+        let blocked_paths = hard_excluded_pathspecs(std::slice::from_ref(&path));
+        if !blocked_paths.is_empty() {
+            return Ok(err_json(
+                "git_submodule_add",
+                protected_pathspec_refusal("git_submodule_add", &blocked_paths),
+            ));
+        }
+        let mut argv: Vec<&str> = vec!["submodule", "add"];
+        if let Some(b) = branch.as_deref() {
+            argv.extend(["-b", b]);
+        }
+        argv.extend(["--", url.as_str(), path.as_str()]);
+        let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
+        let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+        if code != 0 {
+            let reason = r
+                .get("stderr")
+                .and_then(|x| x.as_str())
+                .unwrap_or("git submodule add failed");
+            return Ok(err("git_submodule_add", reason));
+        }
+        let staged_out = git_step_replayed_by_call_order(
+            plan,
+            &["diff", "--cached", "--name-only", "-z"],
+            cwd,
+        )?;
+        let staged: Vec<String> = staged_out
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .split('\0')
+            .filter(|e| !e.is_empty())
+            .map(String::from)
+            .collect();
+        Ok(ok(
+            "git_submodule_add",
+            json!({ "path": path, "url": url, "branch": branch, "staged": staged }),
+        ))
     })
 }
 
@@ -9320,13 +9435,23 @@ pub(super) fn git_porcelain_argv(paths: &[String], cwd: Option<&str>) -> Vec<Str
     argv
 }
 
+const EXCLUDED_DIRTY_SAMPLE: usize = 10;
+
 pub(super) fn with_exclusion_report(mut data: Value, cwd: Option<&str>, paths: &[String]) -> Value {
     let withheld = withheld_dirty_entries(cwd);
-    let listed: Vec<String> = withheld
+    let all_withheld: Vec<String> = withheld
         .iter()
-        .take(50)
         .map(|(status, path)| format!("{} {}", status, path))
         .collect();
+    let listed: Vec<String> = all_withheld.iter().take(EXCLUDED_DIRTY_SAMPLE).cloned().collect();
+    let withheld_spill = (all_withheld.len() > EXCLUDED_DIRTY_SAMPLE).then(|| {
+        let spill_name = format!(
+            "git_status-excluded-{}.txt",
+            super::search::dispatch_task_id()
+                .unwrap_or_else(|| unsafe { host_now_ms() }.to_string())
+        );
+        git_status_spill_listing(&spill_name, &all_withheld)
+    }).flatten();
     let active = excluded_pathspecs(paths, cwd);
     let active_count = active.len();
     let active: Vec<String> = active.into_iter().take(5).collect();
@@ -9341,6 +9466,10 @@ pub(super) fn with_exclusion_report(mut data: Value, cwd: Option<&str>, paths: &
             "excluded_but_dirty_count".to_string(),
             json!(withheld.len()),
         );
+        if let Some(file) = withheld_spill {
+            map.insert("excluded_but_dirty_spill_file".to_string(), json!(file));
+            map.insert("excluded_but_dirty_truncated".to_string(), json!(true));
+        }
         if !withheld.is_empty() {
             let tracked: Vec<&str> = crate::gitignore::MUST_STAY_TRACKED
                 .iter()
