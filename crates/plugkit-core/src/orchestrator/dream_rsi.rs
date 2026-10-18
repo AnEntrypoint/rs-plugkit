@@ -1051,6 +1051,9 @@ fn policy_json(policy: &Policy) -> Value {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub const POSTCONDITION_FAILED: &str = "dream-replay-cycle postcondition failed";
+
+#[cfg(target_arch = "wasm32")]
 pub const DEFAULT_CYCLE_BETA1: f64 = 0.01;
 
 #[cfg(target_arch = "wasm32")]
@@ -1122,7 +1125,7 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
         defects.push("postcondition_rankings_incomplete");
     }
     if !defects.is_empty() {
-        return Err(format!("dream-replay-cycle postcondition failed: {}", defects.join(", ")));
+        return Err(format!("{POSTCONDITION_FAILED}: {}", defects.join(", ")));
     }
     rankings.sort_by(|left, right| {
         right.get("score").and_then(Value::as_f64).partial_cmp(&left.get("score").and_then(Value::as_f64)).unwrap_or(std::cmp::Ordering::Equal)
@@ -1140,6 +1143,7 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
             "selected_policy_id": selected_id,
             "selected_policy": selected_policy,
             "baseline_score": baseline_score,
+            "incumbent_score": baseline_score,
             "selected_score": selected_score,
             "improved": improved,
             "never_worse": never_worse,
