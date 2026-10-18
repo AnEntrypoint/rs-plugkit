@@ -353,11 +353,18 @@ fn evaluate_worlds(
             .iter()
             .map(|world| evaluate_policy(world, policy, beta1, beta2))
             .collect::<Result<Vec<_>, _>>()?;
-        let score = replays
+        let scores = replays
             .iter()
-            .filter_map(|replay| replay.get("replay_score").and_then(Value::as_f64))
-            .sum::<f64>()
-            / replays.len() as f64;
+            .map(|replay| {
+                replay
+                    .get("replay_score")
+                    .and_then(Value::as_f64)
+                    .ok_or_else(|| {
+                        format!("dream-replay policy {} replay lacks a numeric replay_score", policy.id)
+                    })
+            })
+            .collect::<Result<Vec<f64>, String>>()?;
+        let score = scores.iter().sum::<f64>() / scores.len() as f64;
         if !score.is_finite() {
             return Err(format!("dream-replay policy {} score is non-finite", policy.id));
         }
@@ -811,6 +818,7 @@ struct HistoryScan {
     spool_out_confirmed: usize,
     dropped: BTreeMap<&'static str, usize>,
     latest: Option<(i64, String)>,
+    windows: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -864,6 +872,10 @@ fn scan_history() -> HistoryScan {
         }
         scan.sessions += 1;
         scan.observations += records.len();
+        scan.windows.insert(
+            session_id.clone(),
+            records.iter().filter_map(|record| record.dispatch_id.clone()).collect(),
+        );
         records.retain(|record| match ledger.verdict(&session_id, record) {
             Ok(Confirmation::Ledger) => {
                 scan.ledger_confirmed += 1;
@@ -954,12 +966,16 @@ pub const DEFAULT_CYCLE_BETA2: f64 = 0.05;
 pub struct HistoryRound {
     pub latest_dispatch_id: Option<String>,
     pub summary: Value,
+    pub lost_cursor: Option<String>,
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn history_round(owner: &str, beta1: f64, beta2: f64) -> Result<HistoryRound, String> {
+pub fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2: f64) -> Result<HistoryRound, String> {
     let scan = scan_history();
     let latest_dispatch_id = scan.latest.as_ref().map(|(_, id)| id.clone());
+    let lost_cursor = cursor
+        .filter(|id| !scan.windows.get(owner).is_some_and(|ids| ids.contains(*id)))
+        .map(str::to_owned);
     let incumbent = incumbent_policy(owner);
     let candidates = dream_candidates(&incumbent);
     let mut defects: Vec<&str> = Vec::new();
@@ -977,6 +993,7 @@ pub fn history_round(owner: &str, beta1: f64, beta2: f64) -> Result<HistoryRound
         return Ok(HistoryRound {
             latest_dispatch_id: latest_dispatch_id.clone(),
             summary: json!({ "history": history, "incumbent_policy_id": incumbent.id, "candidates": candidates.len() }),
+            lost_cursor: lost_cursor.clone(),
         });
     }
     let candidate_count = candidates.len();
@@ -1013,6 +1030,7 @@ pub fn history_round(owner: &str, beta1: f64, beta2: f64) -> Result<HistoryRound
     let improved = selected_id != incumbent.id;
     Ok(HistoryRound {
         latest_dispatch_id,
+        lost_cursor,
         summary: json!({
             "selection": if improved { "propose-challenger" } else { "keep-incumbent" },
             "incumbent_policy_id": incumbent.id,
