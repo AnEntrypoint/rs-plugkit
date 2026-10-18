@@ -55,12 +55,15 @@ jobs:
           wasm=target/wasm32-wasip3/release/rs_plugkit.wasm
           wasm-tools validate "$wasm"
           wasm-tools component wit "$wasm" > component.wit
-          cat component.wit
-          grep -q 'gm:plugkit/env' component.wit
-          grep -q 'gm:plugkit/guest' component.wit
-          grep -q 'dispatch-verb' component.wit
-          grep -q 'plugkit-version' component.wit
-          for fn in $(sed -n 's/^  \([a-z-]*\): func.*/\1/p' crates/plugkit-core/wit/env.wit); do
-            grep -q "$fn" component.wit || { echo "::error::env.wit function $fn not in component"; exit 1; }
-          done
+          grep -q 'import gm:plugkit/env' component.wit
+          grep -q 'export gm:plugkit/guest' component.wit
+          awk '/^package gm:plugkit@/{on=1;next} /^package /{on=0} on' component.wit \
+            | sed -n 's/^    \([a-z-]*\): func.*/\1/p' | sort -u > component-funcs.txt
+          sed -n 's/^  \([a-z-]*\): func.*/\1/p' crates/plugkit-core/wit/env.wit | sort -u > env-funcs.txt
+          test -s component-funcs.txt
+          grep -qx 'dispatch-verb' component-funcs.txt
+          grep -qx 'plugkit-version' component-funcs.txt
+          unknown=$(comm -23 component-funcs.txt env-funcs.txt)
+          if [ -n "$unknown" ]; then echo "::error::component declares functions absent from env.wit: $unknown"; exit 1; fi
+          echo "component gm:plugkit functions: $(wc -l < component-funcs.txt) of $(wc -l < env-funcs.txt) declared in env.wit"
           echo "size_bytes=$(stat -c %s "$wasm")"
