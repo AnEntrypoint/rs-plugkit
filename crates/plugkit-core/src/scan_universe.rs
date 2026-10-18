@@ -445,7 +445,7 @@ fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec
     files.sort_unstable();
     files.dedup();
     let untracked_count = files.len().saturating_sub(tracked_count.min(files.len()));
-    Ok((files, complete, tracked_count, untracked_count, nested_worktrees, nested_untracked_failed))
+    Ok((files, complete && !nested_untracked_failed, tracked_count, untracked_count, nested_worktrees, nested_untracked_failed))
 }
 
 fn runtime_artifact_rule(path: &str) -> Option<&'static str> {
