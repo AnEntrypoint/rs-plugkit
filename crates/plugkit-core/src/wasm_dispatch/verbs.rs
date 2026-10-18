@@ -3058,6 +3058,7 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
             match crate::dispatch_ledger::record(
                 cwd,
                 &verb,
+                &body_s,
                 &fingerprint,
                 outcome.exit_code,
                 dispatch_session_id.as_deref(),
