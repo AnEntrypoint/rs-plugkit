@@ -329,6 +329,18 @@ fn prd_pending_count(items: &[serde_json::Value]) -> usize {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub(super) fn open_row_counts() -> (u64, u64) {
+    let prd_open = dedup_rows_by_id_keeping_last(
+        prd_items_json()
+            .into_iter()
+            .filter(|it| item_is_open(it))
+            .collect(),
+    );
+    let mutables_open = dedup_rows_by_id_keeping_last(mutables::pending_detailed());
+    (prd_open.len() as u64, mutables_open.len() as u64)
+}
+
+#[cfg(target_arch = "wasm32")]
 fn item_is_open(it: &serde_json::Value) -> bool {
     let status = it
         .get("status")

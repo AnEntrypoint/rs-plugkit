@@ -1233,12 +1233,15 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
     let path = format!(".gm/dream-rsi/{session_id}/observations.json");
     let ts = super::state::now_ms() as i64;
     rotate_observations_if_full(session_id, &path, ts);
+    let (prd_open_count, mutable_open_count) = super::instructions::open_row_counts();
     let record = ObservationRecord {
         dispatch_id: Some(dispatch_id.to_string()),
         verb: Some(verb.to_string()),
         fingerprint: Some(fingerprint.to_string()),
         exit_code: Some(exit_code),
         gate_drift: Some(gate_drift),
+        prd_open_count: Some(prd_open_count),
+        mutable_open_count: Some(mutable_open_count),
         quality: Some(outcome_score(exit_code, failure.no_match(), output_bytes)),
         ts: Some(ts),
         reply_sha256: Some(reply_sha256_hex(reply)),
