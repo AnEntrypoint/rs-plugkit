@@ -1946,6 +1946,12 @@ pub(super) fn git_push(body: &Value) -> u64 {
 
 pub(super) fn git_add(body: &Value) -> u64 {
     git_async_entry("git_add", body, |body, plan| {
+        if body.get("hunks").is_some() || body.get("patch").is_some() {
+            return Ok(err_json(
+                "git_add",
+                json!({ "error": "git_add stages whole files only: hunks and patch scope belong to git_commit, which commits the named hunks without staging the rest; partial staging has no verb", "error_code": ERR_CODE_INVALID_ARGS }),
+            ));
+        }
         let cwd = body_cwd(body);
         let paths: Vec<String> = body
             .get("paths")
@@ -10731,8 +10737,7 @@ pub(super) struct PushDirtyScope {
 
 impl PushDirtyScope {
     pub fn blocks(&self) -> bool {
-        self.dirty_count > 0
-            && !(self.delta_known && self.fast_forward && self.overlapping.is_empty())
+        self.dirty_count > 0 && !(self.delta_known && self.fast_forward)
     }
 }
 
