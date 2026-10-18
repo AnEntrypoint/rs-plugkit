@@ -2717,7 +2717,17 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
     let dataflow_override_active = crate::dataflow::document_detailed().1
         != crate::dataflow::DataflowTier::CompiledDefault
         && crate::dataflow::pipeline_for("codesearch").is_some();
+    let scope = match PathScope::from_body(body) {
+        Ok(scope) => scope,
+        Err(e) => return err("codesearch", &e),
+    };
+    if let Some(scope) = scope.as_ref() {
+        if let Err(e) = scope_paths_resolve(".", scope) {
+            return err("codesearch", &e);
+        }
+    }
     let identifier_route = mode == "dual"
+        && scope.is_none()
         && !rank_opts.verbose
         && !flag("rebuild")
         && !flag("auto_indexed")
@@ -2728,15 +2738,6 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             Some(Ok(report)) => return ok("codesearch", report),
             Some(Err(e)) => return err("codesearch", &e),
             None => {}
-        }
-    }
-    let scope = match PathScope::from_body(body) {
-        Ok(scope) => scope,
-        Err(e) => return err("codesearch", &e),
-    };
-    if let Some(scope) = scope.as_ref() {
-        if let Err(e) = scope_paths_resolve(".", scope) {
-            return err("codesearch", &e);
         }
     }
     if mode == "dual" && scope.is_some() {
