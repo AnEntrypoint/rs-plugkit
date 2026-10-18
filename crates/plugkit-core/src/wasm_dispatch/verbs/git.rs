@@ -6624,12 +6624,20 @@ pub(super) fn ci_status_epoch_to_utc_iso(epoch: i64) -> String {
     )
 }
 
+const CI_STATUS_HANDOFF_ATTEMPTS: usize = 3;
+
 pub(super) fn ci_status_gh_api_json(path: &str) -> Result<Value, String> {
     let code = format!(
         "gh api -H 'Accept: application/vnd.github+json' {}",
         ci_status_shell_quote(path)
     );
-    let result = ci_status_shell_result(&code);
+    let mut result = ci_status_shell_result(&code);
+    for _ in 1..CI_STATUS_HANDOFF_ATTEMPTS {
+        if result.get("error_code").and_then(Value::as_str) != Some("task_handoff_pending") {
+            break;
+        }
+        result = ci_status_shell_result(&code);
+    }
     if result.get("timed_out").and_then(Value::as_bool) == Some(true) {
         return Err(format!(
             "gh api {} timed out after {} ms",
@@ -6638,10 +6646,16 @@ pub(super) fn ci_status_gh_api_json(path: &str) -> Result<Value, String> {
     }
     let stdout = ci_status_shell_stdout(&result);
     let stderr = ci_status_shell_stream(&result, "stderr");
-    let detail_source = if stderr.trim().is_empty() {
+    let host_error = result
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let detail_source = if !stderr.trim().is_empty() {
+        stderr.trim()
+    } else if !stdout.trim().is_empty() {
         stdout.trim()
     } else {
-        stderr.trim()
+        host_error.trim()
     };
     let detail = ci_status_truncate_for_error(detail_source, 300);
     match (
