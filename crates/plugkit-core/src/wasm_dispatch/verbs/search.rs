@@ -1555,11 +1555,14 @@ The append reply carries {\"bytes\": <written>, \"path\": ..., \"append\": true,
 Raw (non-JSON) body: accepted when the first line is a path= directive, the rest is the contents:
   path=<relative path>
   <the file contents>
-Returns {\"bytes\": <written>}. A write outside the root is always refused, allowOutsideRoot included: that
-flag widens the read verbs only.";
+Returns {\"bytes\": <written>}; missing parent directories are created (\"parents_created\": true when the
+retry made them), and a file standing where a parent directory is needed is named in \"blocking_path\".
+A write outside the root is always refused, allowOutsideRoot included: that flag widens the read verbs only.";
 
 pub(super) const FS_READDIR_HELP: &str = "\
 fs_readdir lists one directory inside the project. {\"path\":\"<relative dir>\"} (default \".\").
+A missing directory answers ok with an empty listing and \"missing\": true; a file path (ENOTDIR) or an
+unreadable directory (EACCES) is an error.
   {\"allowOutsideRoot\":true}      opt in to an absolute path outside the project root; required per call.
                                   \"allow_outside_root\" is an alias. A path holding a \"..\" segment is still
                                   refused, and the host sandbox still serves only paths under the user gm root
