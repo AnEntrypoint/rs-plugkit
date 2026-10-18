@@ -20,6 +20,8 @@ pub const DEFAULT_REPO_CACHE_REL: &str = ".gm/config-source-cache-default";
 
 pub const GLOBAL_PROBE_REL: &str = "config-source-remote-probe";
 
+const RESOLVED_SIGNATURE_REL: &str = ".gm/exec-spool/.config-resolved-signature";
+
 pub fn global_probe_root(project_gm_fallback_dir: Option<&str>) -> Option<String> {
     match home_dir() {
         Some(home) => Some(join(&join(&home, ".gm"), GLOBAL_PROBE_REL)),
@@ -869,13 +871,17 @@ pub fn resolve_and_report(project_root: &str, fetcher: &dyn RepoFetcher) -> Reso
             }),
         );
     }
-    crate::wasm_dispatch::emit_event(
-        "config_resolved",
-        json!({
-            "tier": r.tier.as_str(),
-            "why": r.why,
-            "version": r.config.version,
-        }),
-    );
+    let signature = format!("{}|{}|{}", r.tier.as_str(), r.config.version, r.why);
+    if pkfs::read_to_string(RESOLVED_SIGNATURE_REL).as_deref() != Some(signature.as_str()) {
+        pkfs::write(RESOLVED_SIGNATURE_REL, &signature);
+        crate::wasm_dispatch::emit_event(
+            "config_resolved",
+            json!({
+                "tier": r.tier.as_str(),
+                "why": r.why,
+                "version": r.config.version,
+            }),
+        );
+    }
     r
 }

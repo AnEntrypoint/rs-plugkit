@@ -3,7 +3,13 @@ name: release
 on:
   push:
     branches: [main]
-    paths-ignore: ['*.md', 'docs/**', 'LICENSE', '.gitignore']
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/wasm-plugin-release.yml'
   workflow_dispatch:
 
 concurrency:

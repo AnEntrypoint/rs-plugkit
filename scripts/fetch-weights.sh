@@ -16,7 +16,7 @@ check_sha() {
   local path="$1" expected="$2"
   [ -f "$path" ] || return 1
   local actual
-  actual=$(sha256sum "$path" | awk '{print $1}')
+  actual=$(if command -v sha256sum >/dev/null 2>&1; then sha256sum "$path"; else shasum -a 256 "$path"; fi | awk '{print $1}')
   [ "$actual" = "$expected" ]
 }
 
