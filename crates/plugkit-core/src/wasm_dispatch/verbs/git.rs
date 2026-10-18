@@ -1895,6 +1895,16 @@ pub(super) fn git_add(body: &Value) -> u64 {
                     .collect()
             })
             .unwrap_or_default();
+        if body.get("hunks").is_some() {
+            return Ok(err_json(
+                "git_add",
+                json!({
+                    "error": "git_add stages whole paths only; hunks are staged by git_commit {hunks:{<file>:[<n>]}}",
+                    "error_code": ERR_CODE_INVALID_ARGS,
+                    "undeclared_keys": ["hunks"],
+                }),
+            ));
+        }
         let blocked_paths = hard_excluded_pathspecs(&paths);
         if !blocked_paths.is_empty() {
             return Ok(err_json(
@@ -1985,10 +1995,11 @@ pub(super) fn git_add(body: &Value) -> u64 {
             ));
         }
         let step_refs: Vec<&Value> = write_steps.iter().collect();
-        Ok(ok(
-            "git_add",
-            with_index_lock_report(with_exclusion_report(payload, cwd, &paths), &step_refs),
-        ))
+        let reply = with_index_lock_report(with_exclusion_report(payload, cwd, &paths), &step_refs);
+        if !paths.is_empty() && staged.is_empty() {
+            return Ok(err_json("git_add", reply));
+        }
+        Ok(ok("git_add", reply))
     })
 }
 
@@ -5460,16 +5471,25 @@ pub(super) fn git_show(body: &Value) -> u64 {
         } else {
             stderr.to_string()
         };
-        let error_code = if path.is_some() {
-            "git_show_path_unresolved"
-        } else {
-            "git_show_rev_unresolved"
+        let spec = format!("{refspec}^{{commit}}");
+        let probe = git_call_argv(&["rev-parse", "--verify", "--quiet", spec.as_str()], cwd);
+        let rev_resolves = probe.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) == 0
+            && probe.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
+        let (error_code, error) = match (path, rev_resolves) {
+            (Some(p), true) => (
+                "git_show_path_unresolved",
+                format!("path {} does not exist at rev {} in {}: {}", p, refspec, repo, detail),
+            ),
+            _ => (
+                "git_show_rev_unresolved",
+                format!("rev {} does not resolve in {}: {}", refspec, repo, detail),
+            ),
         };
         return err_json(
             "git_show",
             json!({
                 "error_code": error_code,
-                "error": format!("rev {} does not resolve in {}: {}", refspec, repo, detail),
+                "error": error,
                 "rev": refspec,
                 "repo": repo,
                 "hint": "A git_show reply carrying no object is never a delivered commit; name a rev that resolves in this repo.",
@@ -6052,10 +6072,19 @@ pub(super) fn ci_status_gh_unusable_reason() -> Option<String> {
             "gh CLI is installed but not authenticated -- run `gh auth login`, or supply GITHUB_TOKEN/GH_TOKEN ({})",
             ci_status_truncate_for_error(&stdout, 300)
         )),
-        _ => Some(format!(
-            "gh CLI probe returned no usable answer ({})",
-            ci_status_truncate_for_error(&stdout, 300)
-        )),
+        _ => {
+            let stderr = ci_status_shell_stream(&result, "stderr");
+            let detail = if stdout.trim().is_empty() {
+                stderr
+            } else {
+                stdout
+            };
+            Some(format!(
+                "gh CLI probe returned no usable answer (exit {}: {})",
+                result.get("exit_code").and_then(Value::as_i64).unwrap_or(-1),
+                ci_status_truncate_for_error(&detail, 300)
+            ))
+        }
     }
 }
 
@@ -6345,10 +6374,13 @@ pub(super) fn ci_status_attempt(
         }),
         CiStatusTransport::GithubRest => {
             ci_status_rest_api_json(path, rest_opts).map_err(|(status, body, rate_limit)| {
+                let detail = ci_status_truncate_for_error(&body, 300);
                 let reason = if status > 0 {
-                    format!("HTTP {} {}", status, ci_status_truncate_for_error(&body, 300))
+                    format!("HTTP {} {}", status, detail)
+                } else if detail.is_empty() {
+                    "host_fetch returned an empty reply (no status, no body)".to_string()
                 } else {
-                    ci_status_truncate_for_error(&body, 300)
+                    detail
                 };
                 CiStatusAttemptFailure {
                     transport,
@@ -6848,6 +6880,8 @@ pub(super) const CI_LOG_AWK: &str = r###"BEGIN {
   BCAP = ENVIRON["GMCLOG_BCAP"] + 0
   FO = ENVIRON["GMCLOG_FO"] + 0
   TAIL = ENVIRON["GMCLOG_TAIL"] + 0
+  TAILMODE = (PAT == "" && CAP > 0)
+  R = 0
   AFTER = 2
   ANSI = "(" sprintf("%c", 27) "|\\^\\[)\\[[0-9;]*[A-Za-z]"
   ns = 0
@@ -6938,9 +6972,31 @@ function emit(kind, k, j, s, ts, m) {
   }
   if (!keep(m, PAT)) next
   total++
+  if (TAILMODE) {
+    R++
+    slot = R % CAP
+    RK[slot] = k; RJ[slot] = j; RSTEP[slot] = s; RT[slot] = ts; RM[slot] = m
+    next
+  }
   if (printed < CAP && used <= BCAP) emit("L", k, j, s, ts, m)
 }
 END {
+  if (TAILMODE && R > 0) {
+    n = (R < CAP) ? R : CAP
+    start = R + 1
+    bytes = 0
+    for (i = R; i > R - n; i--) {
+      slot = i % CAP
+      cost = length(RJ[slot]) + length(RSTEP[slot]) + length(RT[slot]) + length(RM[slot]) + 8
+      if (start <= R && bytes + cost > BCAP) break
+      bytes += cost
+      start = i
+    }
+    for (i = start; i <= R; i++) {
+      slot = i % CAP
+      emit("L", RK[slot], RJ[slot], RSTEP[slot], RT[slot], RM[slot])
+    }
+  }
   if (FO && TAIL > 0) {
     for (k = 1; k <= ns; k++) {
       if (seen[k] == 0 || errs[k] > generic[k] + 0) continue
@@ -7282,12 +7338,13 @@ pub(super) fn ci_log_command(
         ci_status_shell_quote(step_table)
     );
     format!(
-        "err=\"$(mktemp 2>/dev/null || printf '/tmp/gm-ci-log-%s' \"$$\")\"\n\
-         trap 'rm -f \"$err\"' EXIT\n\
-         {target} 2>\"$err\" | {env} awk {program}\n\
-         code=${{PIPESTATUS[0]}}\n\
-         if [ \"$code\" -ne 0 ]; then printf '{failure}%s\\n' \"$code\" >&2; head -c 400 \"$err\" >&2; fi\n\
-         rm -f \"$err\"\n\
+        "err=\"$(mktemp 2>/dev/null || printf '%s' \"${{TMPDIR:-.}}/gm-ci-log-$$\")\"\n\
+         rc=\"$err.rc\"\n\
+         trap 'rm -f \"$err\" \"$rc\"' EXIT\n\
+         {{ {target} 2>\"$err\"; printf '%s' \"$?\" >\"$rc\"; }} | {env} awk {program}\n\
+         code=\"$(cat \"$rc\" 2>/dev/null)\"\n\
+         if [ \"${{code:-1}}\" -ne 0 ]; then printf '{failure}%s\\n' \"${{code:-1}}\" >&2; head -c 400 \"$err\" >&2; fi\n\
+         rm -f \"$err\" \"$rc\"\n\
          exit 0\n",
         target = target,
         env = env,
@@ -7301,6 +7358,25 @@ pub(super) fn ci_log_marker(stream: &str, marker: &str) -> Option<String> {
         .lines()
         .find_map(|line| line.trim().strip_prefix(marker))
         .map(|value| value.trim().to_string())
+}
+
+pub(super) fn ci_log_gh_failure_class(detail: &str) -> (Option<&'static str>, Option<&'static str>) {
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("expired") || lower.contains("http 410") {
+        (
+            Some("log_expired"),
+            Some("logs are retained for a limited time and are gone once expired"),
+        )
+    } else if lower.contains("http 404") || lower.contains("not found") {
+        (Some("run_not_found"), None)
+    } else if lower.contains("http 401")
+        || lower.contains("http 403")
+        || lower.contains("gh auth login")
+    {
+        (Some("auth_failed"), None)
+    } else {
+        (None, None)
+    }
 }
 
 pub(super) fn ci_log(body: &Value) -> u64 {
@@ -7405,15 +7481,20 @@ pub(super) fn ci_log(body: &Value) -> u64 {
     }
     let stderr = ci_status_shell_stream(&result, "stderr");
     if let Some(code) = ci_log_marker(&stderr, CI_LOG_FAILURE_MARKER) {
-        return err_json(
-            "ci-log",
-            json!({
-                "error": format!("gh exited {} reading the log of {} run {}", code, repo, run_id),
-                "detail": ci_status_truncate_for_error(&stderr, 400),
-                "repo": repo, "run_id": run_id, "job_id": job_id,
-                "hint": "logs are retained for a limited time and are gone once expired; a run that never started has no log",
-            }),
-        );
+        let detail = ci_status_truncate_for_error(&stderr, 400);
+        let (error_code, hint) = ci_log_gh_failure_class(&detail);
+        let mut reply = json!({
+            "error": format!("gh exited {} reading the log of {} run {}", code, repo, run_id),
+            "detail": detail,
+            "repo": repo, "run_id": run_id, "job_id": job_id,
+        });
+        if let Some(error_code) = error_code {
+            reply["error_code"] = json!(error_code);
+        }
+        if let Some(hint) = hint {
+            reply["hint"] = json!(hint);
+        }
+        return err_json("ci-log", reply);
     }
     let scanned = ci_log_marker(&stderr, CI_LOG_SCANNED_MARKER);
     if scanned.is_none() {
