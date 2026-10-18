@@ -1,6 +1,8 @@
 #![cfg(target_arch = "wasm32")]
 
 pub(crate) mod host_abi;
+#[cfg(feature = "wit-env")]
+mod wit_env;
 mod dangling_refs;
 mod events;
 mod verbs;
