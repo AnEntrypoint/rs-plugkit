@@ -5425,21 +5425,20 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
     )
 }
 
-/// Commit count precedence: the first present key wins in the order
-/// `limit`, `count`, `max_count`, `n` (default 10). Live-verified: `{limit:1, n:4}` returns one commit.
+/// Commit count: `limit` (canonical) or its git-native alias `max_count`; `limit` wins when both are present (default 10).
 pub(super) fn git_log(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_log",
         body,
         &[
-            "limit", "count", "max_count", "n", "range", "ref", "rev", "path", "paths", "files",
+            "limit", "max_count", "range", "ref", "rev", "path", "paths", "files",
         ],
     ) {
         return refusal;
     }
     git_async_entry("git_log", body, |body, plan| {
         let cwd = body_cwd(body);
-        let count = ["limit", "count", "max_count", "n"]
+        let count = ["limit", "max_count"]
             .iter()
             .find_map(|key| body.get(*key).and_then(|v| v.as_u64()))
             .unwrap_or(10);
