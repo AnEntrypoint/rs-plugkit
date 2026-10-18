@@ -22,6 +22,5 @@ Module-scoped rules for the orchestrator sources in this directory. The [root AG
 - `dispatch_ledger::record` compare-and-swaps the ledger (`host_cas_write`, 16 attempts) so concurrent dispatches do not drop entries.
 - `dream-replay-round` is session-owned progressive reveal from the policy roots and the revealed frontier; it closes at `max_rounds` or `max_nodes`, and `max_online_rounds` bounds new distinct values.
 - `dream-replay-cycle` is observation-only maintenance: it uses the canonical owner `session_id`, replays the whole project history through `history_round`, defers when no new confirmed dispatch exists project-wide, and never refreshes phase clocks.
-- `admit_dispatch` ranks and never refuses: `Admission::Allow` or `Admission::Advisory`, attached to a dispatch that ran (`dream_rsi_advisory`).
-- A successful `instruction` clears the ranking by stamping `.gm/dream-rsi/<sid>/reorientation-ts` and the project-wide `.gm/dream-rsi/_any-session/reorientation-ts` (`PROJECT_WIDE_MARKER_SESSION`); the ranking lapses after `VETO_MAX_AGE_MS` (600000). `.gm/last-instruction-ts` is a third marker, but `gates` stamps it only for a prose-serving dispatch.
+- Dispatch admission is not gated by Dream-RSI: no `admit_dispatch`, no `dream_rsi_advisory` field, and `instruction` writes no `.gm/dream-rsi/*/reorientation-ts` marker. `.gm/last-instruction-ts` is stamped by `gates` only for a prose-serving dispatch.
 
