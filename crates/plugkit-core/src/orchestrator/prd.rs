@@ -2399,9 +2399,20 @@ fn prune_receipts(id: &str) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn scratch_temp_prefix() -> Option<String> {
+    let temp = std::env::temp_dir();
+    Some(format!("{}/", temp.to_string_lossy().trim_end_matches('/')))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn scratch_temp_prefix() -> Option<String> {
+    None
+}
+
 fn scratch_witness_root(root: &str) -> Option<String> {
     let root = root.trim().trim_end_matches('/');
-    let inside_tmp = root.strip_prefix("/config/tmp/").is_some_and(|rest| !rest.is_empty());
+    let inside_tmp = scratch_temp_prefix().is_some_and(|prefix| root.strip_prefix(prefix.as_str()).is_some_and(|rest| !rest.is_empty()));
     let escapes = root.split('/').any(|segment| segment == "..");
     (inside_tmp && !escapes).then(|| root.to_string())
 }

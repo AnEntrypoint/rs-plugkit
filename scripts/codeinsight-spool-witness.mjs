@@ -1,9 +1,13 @@
 import { readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const WITNESS_ROOT = process.env.GM_WITNESS_ROOT || resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 const TREESITTER_FAILED = 'code_index_treesitter_failed';
 const REBUILD = 'codeinsight_rebuild';
 const CHECKED_EVENTS = [TREESITTER_FAILED, REBUILD];
-const DEFAULT_LOG_PATH = 'C:/dev/spoint/.gm/exec-spool/.watcher.log';
+const DEFAULT_LOG_PATH = join(WITNESS_ROOT, '.gm', 'exec-spool', '.watcher.log');
 const DEFAULT_WINDOW_MS = '600000';
 
 const argv = process.argv.slice(2);

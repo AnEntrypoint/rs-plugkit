@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "formal/**"
+      - ".github/workflows/lean-formal-proof.yml"
   pull_request:
     paths:
       - "formal/**"

@@ -1,8 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const DEFAULT_PROJECT = 'C:/dev/spoint';
+const DEFAULT_PROJECT = process.env.GM_WITNESS_ROOT || path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DEFAULT_SCOPE_PATH = '.gm/pool';
 const DEFAULT_QUERY = '.live';
 const WITNESS_SESSION_ID = 'codesearch-filename-gitignored-witness';
