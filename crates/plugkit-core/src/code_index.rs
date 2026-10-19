@@ -4340,7 +4340,7 @@ fn publish_codesearch_artifact(
         sequence
     );
     let artifact_path = crate::pkfs::anchor(&relative_path);
-    crate::dispatch_ledger::sweep_stale_tmp_beside(&artifact_path, unsafe {
+    crate::dispatch_ledger::sweep_stale_tmp_under(&artifact_path, "codesearch-result-", unsafe {
         crate::wasm_dispatch::host_now_ms()
     });
     let temporary_path = format!("{}.tmp-{}", artifact_path, sequence);
