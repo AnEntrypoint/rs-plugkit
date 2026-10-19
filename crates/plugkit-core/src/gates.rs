@@ -671,6 +671,17 @@ fn split_inline_scripts(text: &str) -> (String, Vec<(&str, char)>) {
     (code, scripts)
 }
 
+fn contains_git_word(script: &str) -> bool {
+    let lower = script.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    lower.match_indices("git").any(|(i, _)| {
+        let before = i.checked_sub(1).is_some_and(|p| is_word(bytes[p]));
+        let after = bytes.get(i + 3).is_some_and(|&b| is_word(b));
+        !before && !after
+    })
+}
+
 fn substitutions_invoke_git(
     text: &str,
     is_git_token: &dyn Fn(&str) -> bool,
@@ -689,7 +700,9 @@ fn text_invokes_git(text: &str, is_git_token: &dyn Fn(&str) -> bool, depth: usiz
     let quoted_substitution = scripts.iter().any(|&(script, quote)| {
         quote == '"' && substitutions_invoke_git(script, is_git_token, depth)
     });
+    let script_names_git = scripts.iter().any(|&(script, _)| contains_git_word(script));
     quoted_substitution
+        || script_names_git
         || code
             .split([';', '\n', '|', '&'])
             .any(|segment| segment_invokes_git(segment, is_git_token, depth))
