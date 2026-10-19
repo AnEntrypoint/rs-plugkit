@@ -47,7 +47,7 @@ pub struct RuleExclusion {
 
 pub const OWN_STATE_RULE: &str = "gm_state_dir";
 
-pub const GM_STATE_EXCLUSION_RULES: &[&str] = &[OWN_STATE_RULE, "agentplug_kv_cache"];
+pub const GM_STATE_EXCLUSION_RULES: &[&str] = &[OWN_STATE_RULE, "agentplug_kv_cache", "gm_exec_spool"];
 
 pub fn is_own_state_name(name: &str) -> bool {
     name == ".gm" || name.starts_with(".agentplug")
