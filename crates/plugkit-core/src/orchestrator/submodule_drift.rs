@@ -259,6 +259,19 @@ pub fn submodules_clean() -> bool {
     drifted_submodules().is_empty()
 }
 
+fn checkouts_behind_pin(drifted: &[DriftedSubmodule]) -> Vec<PinRegression> {
+    drifted
+        .iter()
+        .filter(|entry| is_ancestor(&entry.submodule_head_sha, &entry.gm_tracked_sha, &entry.path))
+        .map(|entry| PinRegression {
+            path: entry.path.clone(),
+            old_sha: entry.submodule_head_sha.clone(),
+            new_sha: entry.gm_tracked_sha.clone(),
+            where_found: "the checkout HEAD -- behind its gitlink; staging it would move the pin backwards".to_string(),
+        })
+        .collect()
+}
+
 fn recovery_for(drifted: &[DriftedSubmodule]) -> Option<String> {
     if drifted.is_empty() {
         return None;
@@ -297,7 +310,8 @@ fn recovery_for(drifted: &[DriftedSubmodule]) -> Option<String> {
 
 pub fn handle_check(_content: &str) -> (String, String, i32) {
     let drifted = drifted_submodules();
-    let regressions = pin_regressions();
+    let mut regressions = pin_regressions();
+    regressions.extend(checkouts_behind_pin(&drifted));
     let recovery_command = recovery_for(&drifted);
     let warnings: Vec<String> = regressions.iter().map(pin_regression_message).collect();
     let payload = serde_json::json!({
