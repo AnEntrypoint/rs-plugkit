@@ -512,6 +512,14 @@ pub fn host_readdir_via_exec(path: &str) -> Option<Vec<Value>> {
     result.get("entries").and_then(Value::as_array).cloned()
 }
 
+pub fn host_readdir(path: &str) -> Option<Vec<Value>> {
+    let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
+    match unpack_to_value(packed) {
+        Value::Array(entries) => Some(entries),
+        _ => host_readdir_via_exec(path),
+    }
+}
+
 fn host_stat_via_exec(path: &str) -> Option<Value> {
     if !is_installed_package_root(path) {
         return None;
