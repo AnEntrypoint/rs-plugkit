@@ -123,21 +123,14 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 - `scope_path_exists` tests a named scope under the root; `search.rs` answers a scope that resolves to nothing as an error, never an empty scan, because an unopened scope reads as a real zero.
 - `git_join` answers on the union of the walk and git's listing when git's tracked set is empty, so an untracked tree is scanned rather than reported as covered and empty.
 
-### crates/plugkit-core/examples/prd_yaml_guard.rs
-
-- A native harness for the YAML write guard, since `pkfs` is wasm32-only; each guard is a pure text function driven with `std::fs` on a real file.
-
 ## Remote-tip probe and config sync (config.rs, config_sync.rs, config_sync_native.rs)
 
-- Without a home directory `global_probe_root` falls back to the project's `.gm` directory, keeping per-project granularity.
 - `SHARED_PROBE_WAIT_MS` (5 s): a dispatch waits for another process's in-flight probe of the same (repo, reference) before serving its checkout.
 - `UNMEASURED_REF_INTERVAL_MS` (60 s) re-probes a ref with no measured cadence; the first probe that sees a new tip stores the measured `change_interval_ms`.
 - A failure backoff caps at `PROBE_BACKOFF_MAX_MS` (1 h).
-- A project whose checkout is behind a freshly recorded tip never probes; it materializes to that tip.
 - `IN_MEMORY_REMOTE_RECORDS` is the in-memory twin of the disk record; without it a failed disk write re-runs `git ls-remote` on every dispatch.
 - `global_remote_tip_with` adopts the lock holder's recorded answer, polling it every `SHARED_PROBE_POLL_MS` (250 ms) for at most `SHARED_PROBE_WAIT_MS` (5 s) through `orchestrator::sleep_ms`; after that it returns `GlobalTip::Held(reason)`, a named timeout that serves the checkout without counting a failure. A forced caller that cannot hold the lock never learns the tip and never reports success.
 - `ensure_current` skips the debounce for a forced refresh and when the clock is not sane (last probe zero or in the future).
-- A recorded Skip sha equal to the checkout returns without probe or fetch; a different sha falls through to materialize.
 
 ## Row stores and PRD (orchestrator/row_store.rs, cas.rs, mutables.rs, prd.rs)
 
@@ -156,7 +149,6 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 - `is_prd_state_pathspec` covers legacy files, row folders and logs; with one file per row no git verb needs a whole-file foreign-row filter.
 - `canonical_persisted_witness_path`: `referenced_path_token` trims a leading `.`, so `.gm/witness-out/...` and `gm/witness-out/...` name one file.
 - `prd_repair.rs`: other row-writing verbs refuse an unparseable PRD file, so one unquoted scalar locks the store; `repair_prd_store` re-quotes the scalar, backs the original up, and writes only if the copy re-parses and round-trips.
-- `PIN_HISTORY_SEARCH_DEPTH` (50) bounds the pin-history walk, which also stops at the first commit that pinned a different value.
 
 ## Submodule pins and YAML repair (orchestrator/submodule_drift.rs, yaml_util.rs)
 
@@ -197,5 +189,4 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 - `dataflow::default_document` is not executed for CompiledDefault: configured pipelines run declared steps then fuse nodes, with no topological scheduler, and `plugin == "gm"` calls internal functions, not WASM self-dispatch.
 - `legacy_reaper::RETIRED_ARTIFACTS` is an exact allowlist, never a glob and never a memory or database deletion; its hash invalidates the reap marker.
 - `mediator::SELF_LANG_VERBS` share dispatch code with their base verbs but are not aliases; each keeps its own language for `shell_exec`.
-- `submodule_head_sha` skips uninitialized submodule directories without their own `.git`.
 
