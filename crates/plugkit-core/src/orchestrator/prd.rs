@@ -2613,7 +2613,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             },
         };
         let verified_via = match (dispatch_verified, bound_in_project) {
-            (true, Some(true)) => witness_dispatch_id.as_deref().and_then(known_via),
+            (true, Some(true)) => witness_dispatch_id.as_deref().and_then(|id| known_via(id).ok().flatten()),
             (true, _) => Some("spool_out"),
             _ => None,
         };
