@@ -538,6 +538,28 @@ fn git_status_remove_spill(_path: &str) -> bool {
     false
 }
 
+fn submodule_divergence(cwd: Option<&str>, modified: &[String]) -> Option<Value> {
+    let declared = submodule_gitlink_paths(cwd);
+    let root = cwd.unwrap_or(".").trim_end_matches(['/', '\\']);
+    let mut out = serde_json::Map::new();
+    for path in modified.iter().filter(|p| declared.contains(p.as_str())) {
+        let dir = format!("{root}/{path}");
+        let v = git_call_argv(&["rev-list", "--left-right", "--count", "@{u}...HEAD"], Some(&dir));
+        let stdout = (v.get("exit_code").and_then(Value::as_i64) == Some(0))
+            .then(|| v.get("stdout").and_then(Value::as_str).map(str::to_string))
+            .flatten();
+        let entry = match stdout {
+            Some(stdout) => {
+                let mut n = stdout.split_whitespace().map(|x| x.parse::<u64>().unwrap_or(0));
+                json!({ "behind": n.next().unwrap_or(0), "ahead": n.next().unwrap_or(0) })
+            }
+            None => json!({ "behind": null, "ahead": null, "note": "no upstream to compare" }),
+        };
+        out.insert(path.clone(), entry);
+    }
+    (!out.is_empty()).then(|| Value::Object(out))
+}
+
 pub(super) fn git_status(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_status",
@@ -707,6 +729,9 @@ pub(super) fn git_status(body: &Value) -> u64 {
                 "excluded".to_string(),
                 json!(GIT_PROTECTED_PATHSPECS.iter().map(|(name, _)| *name).collect::<Vec<_>>()),
             );
+            if let Some(divergence) = submodule_divergence(cwd, &modified) {
+                map.insert("submodules".to_string(), divergence);
+            }
         }
         if let Some(run) = &eol_run {
             let code = run.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
