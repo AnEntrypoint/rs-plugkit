@@ -65,20 +65,21 @@ fn reported_own_state_entry_under_root(root: &str, path: &str) -> Option<String>
     Some(format!("{prefix}{}", segments[..=reported_child_at].join("/")))
 }
 
-fn is_versioned_gm_state(root: &str, path: &str) -> bool {
-    let prefix = join_under(root, "");
-    let Some(rel) = path.strip_prefix(prefix.as_str()) else {
-        return false;
-    };
-    let segments: Vec<&str> = rel.split('/').collect();
-    segments[..segments.len() - 1].iter().any(|segment| *segment == ".gm")
+fn tracked_gm_state(root: &str) -> std::collections::HashSet<String> {
+    let mut listed: Vec<String> = Vec::new();
+    let _ = git_list_into(root, &["--cached"], Some(".gm"), 0, &mut listed);
+    listed.into_iter().map(|rel| join_under(root, &rel)).collect()
 }
 
-fn prune_own_state(root: &str, files: Vec<String>, keep_versioned_gm: bool) -> (Vec<String>, Vec<RuleExclusion>) {
+fn prune_own_state(
+    root: &str,
+    files: Vec<String>,
+    versioned_gm: &std::collections::HashSet<String>,
+) -> (Vec<String>, Vec<RuleExclusion>) {
     let mut kept = Vec::with_capacity(files.len());
     let mut pruned: Vec<RuleExclusion> = Vec::new();
     for file in files {
-        if keep_versioned_gm && is_versioned_gm_state(root, &file) {
+        if versioned_gm.contains(&file) {
             kept.push(file);
             continue;
         }
@@ -750,7 +751,8 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
                     let (files, mut pruned) = if named_scope {
                         (files, Vec::new())
                     } else {
-                        let (kept, mut pruned) = prune_own_state(root, files, keep_versioned_gm);
+                        let versioned_gm = if keep_versioned_gm { tracked_gm_state(root) } else { Default::default() };
+                        let (kept, mut pruned) = prune_own_state(root, files, &versioned_gm);
                         report_unlisted_own_state(root, &kept, &mut pruned);
                         (kept, pruned)
                     };
