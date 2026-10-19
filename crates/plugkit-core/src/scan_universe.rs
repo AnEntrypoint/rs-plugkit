@@ -560,6 +560,7 @@ struct RuleRecordingWalk<'a> {
     max_files: usize,
     deadline_ms: u64,
     reached_deadline: bool,
+    reached_cap: bool,
     files: Vec<String>,
     excluded: Vec<RuleExclusion>,
 }
@@ -568,7 +569,11 @@ impl RuleRecordingWalk<'_> {
     fn descend(&mut self, dir: &str) {
         let children_of_granted_root = self.granted_root.as_deref() == Some(dir);
         for entry in list_dir(dir) {
-            if self.files.len() >= self.max_files || self.reached_deadline {
+            if self.files.len() >= self.max_files {
+                self.reached_cap = true;
+                return;
+            }
+            if self.reached_deadline {
                 return;
             }
             if unsafe { host_now_ms() } >= self.deadline_ms {
@@ -606,6 +611,7 @@ impl RuleRecordingWalk<'_> {
         if self.named_target_is_at_or_above(path) { return None; }
         if gitignore_excludes(&self.gitignore, path, is_dir) { return Some("gitignore"); }
         if !is_dir { return None; }
+        if is_own_state_name(name) { return Some(OWN_STATE_RULE); }
         if is_hidden_segment(name) { return Some("hidden_dir"); }
         let noise = match self.noise {
             NoiseDirs::ProjectNoiseList => is_skipped_dir_segment(name, self.cfg),
@@ -806,12 +812,13 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         deadline_ms: unsafe { host_now_ms() }
             .saturating_add(cfg.wall_budget_ms.min(LISTING_WALK_ANSWERABLE_BUDGET_MS)),
         reached_deadline: false,
+        reached_cap: false,
         files: Vec::new(),
         excluded: Vec::new(),
     };
     walk.descend(&target);
     let mut files = walk.files;
-    let mut listing_complete = !walk.reached_deadline;
+    let mut listing_complete = !walk.reached_deadline && !walk.reached_cap;
     let tracked = 0usize;
     let mut untracked = 0usize;
     let mut nested = 0usize;
