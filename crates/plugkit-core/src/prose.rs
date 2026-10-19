@@ -9,7 +9,7 @@ const SOURCE_CACHE_BASE: &str = ".gm/instructions-source-cache";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    LocalOverride,
+    LocalOverride { reason: String },
     SourceRepo,
     CompiledDefault,
     SourceRepoDegraded { reason: String },
@@ -20,7 +20,7 @@ pub enum Outcome {
 impl Outcome {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Outcome::LocalOverride => "local_override",
+            Outcome::LocalOverride { .. } => "local_override",
             Outcome::SourceRepo => "source_repo",
             Outcome::CompiledDefault => "compiled_default",
             Outcome::SourceRepoDegraded { .. } => "source_repo_degraded",
@@ -106,9 +106,7 @@ pub fn resolve_with_degradation(key: &str, default: &str) -> (String, Option<Str
         Outcome::SourceRepoDegraded { reason }
         | Outcome::Degraded { reason }
         | Outcome::ConfigRepoUnreachable { reason } => Some(reason.clone()),
-        Outcome::LocalOverride => Some(
-            "served from the project-vendored .gm/instructions copy, which is edited or lacks .vendored.json and shadows the gm-config cache".to_string(),
-        ),
+        Outcome::LocalOverride { reason } => Some(reason.clone()),
         Outcome::SourceRepo | Outcome::CompiledDefault => None,
     };
     (text, degraded)
@@ -166,11 +164,31 @@ fn tier1_project_vendored(key: &str) -> TierResult {
             reason: format!("prose key resolves to {local_path}, which escapes {LOCAL_BASE}"),
         });
     }
-    match read_clean(&local_path) {
-        Some(text) if !is_unedited_snapshot(key, &text) => {
-            TierResult::Answered(text, Outcome::LocalOverride)
+    let text = match read_clean(&local_path) {
+        Some(text) => text,
+        None => return TierResult::FallThrough,
+    };
+    let current = snapshot_hash(&text);
+    let manifest = read_vendor_manifest();
+    match manifest.get(key).and_then(|recorded| recorded.as_str()) {
+        Some(recorded) if recorded != current.as_str() => TierResult::Answered(
+            text,
+            Outcome::LocalOverride {
+                reason: format!(
+                    "served from the project-vendored {local_path}: its hash {current} differs from the .vendored.json snapshot {recorded}, so the local copy shadows the gm-config cache"
+                ),
+            },
+        ),
+        Some(_) => TierResult::FallThrough,
+        None => {
+            let default = crate::orchestrator::instructions::compiled_default_for_prose_key(key);
+            if crate::orchestrator::instructions::has_compiled_default_for_prose_key(key)
+                && current == snapshot_hash(default)
+            {
+                record_snapshot(key, &text);
+            }
+            TierResult::FallThrough
         }
-        _ => TierResult::FallThrough,
     }
 }
 
