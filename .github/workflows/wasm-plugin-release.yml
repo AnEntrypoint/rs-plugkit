@@ -164,26 +164,14 @@ jobs:
           set -e
           git config user.name "lanmower"
           git config user.email "lanmower@users.noreply.github.com"
-          ver="$VER"
-          for attempt in 1 2 3 4 5; do
-            if [ "$attempt" -gt 1 ]; then
-              echo "[retry] attempt $attempt: main moved, re-bumping on origin/main"
-              git fetch origin main
-              git reset --hard origin/main
-              current=$(grep '^version' "$MANIFEST" | head -1 | sed 's/.*= *"//;s/"//')
-              IFS='.' read -r MAJOR MINOR PATCH <<< "$current"
-              ver="$MAJOR.$MINOR.$((PATCH + 1))"
-              sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$ver\"/}" "$MANIFEST"
-            fi
-            git add "$MANIFEST"
-            git commit -m "chore: auto-bump version to $ver"
-            if git push origin HEAD:main; then
-              echo "version=$ver" >> "$GITHUB_OUTPUT"
-              echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
-          echo "::error::version bump push rejected after 5 attempts; main kept moving"
+          git add "$MANIFEST"
+          git commit -m "chore: auto-bump version to $VER"
+          if git push origin HEAD:main; then
+            echo "version=$VER" >> "$GITHUB_OUTPUT"
+            echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::error::main moved after the build of v$VER; refusing to re-bump because the uploaded wasm would report a version the tag does not carry"
           exit 1
 
       - name: Stage release assets with checksum
