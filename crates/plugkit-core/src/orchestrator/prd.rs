@@ -1404,6 +1404,7 @@ fn ledger_unreadable_refusal(cwd: &str, detail: &str) -> (String, String, i32) {
     (body, message, 1)
 }
 
+#[cfg(target_arch = "wasm32")]
 pub fn dispatch_in_spool_out(cwd: &str, dispatch_id: &str) -> bool {
     let Some(id_ts) = dispatch_id
         .split('-')
