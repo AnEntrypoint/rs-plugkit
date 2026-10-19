@@ -1203,7 +1203,14 @@ pub struct Outcome {
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn outcome(result: &Value) -> Outcome {
-    let exit_code = if result.get("ok").and_then(Value::as_bool).unwrap_or(true) { 0 } else { 1 };
+    let data = result.get("data");
+    let top_ok = result.get("ok").and_then(Value::as_bool).unwrap_or(true);
+    let data_ok = data.and_then(|d| d.get("ok")).and_then(Value::as_bool).unwrap_or(true);
+    let exit_code = if top_ok && data_ok {
+        0
+    } else {
+        data.and_then(|d| d.get("exit_code")).and_then(Value::as_i64).filter(|code| *code != 0).unwrap_or(1)
+    };
     let failure = failure_class(result, exit_code);
     Outcome {
         exit_code,
@@ -1285,6 +1292,60 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         return;
     };
     let _ = crate::pkfs::append(&path, &format!("{line}\n"));
+}
+
+fn is_failure_reply(map: &serde_json::Map<String, Value>) -> bool {
+    map.get("ok") == Some(&Value::Bool(false)) || map.contains_key("error") || map.contains_key("error_code")
+}
+
+fn is_blank(value: &Value) -> bool {
+    value.is_null() || value.as_str() == Some("") || value.as_array().is_some_and(Vec::is_empty)
+}
+
+fn insert_if_present(out: &mut serde_json::Map<String, Value>, key: &str, value: Option<&Value>) {
+    if let Some(value) = value.filter(|value| !is_blank(value)) {
+        out.insert(key.to_string(), value.clone());
+    }
+}
+
+pub(super) fn compact_active_strategy(strategy: Value) -> Value {
+    let Some(map) = strategy.as_object() else {
+        return strategy;
+    };
+    if is_failure_reply(map) {
+        return strategy;
+    }
+    let evidence_rows = map.get("evidence").and_then(Value::as_array).map_or(0, Vec::len);
+    let mut out = serde_json::Map::new();
+    for (wire, raw) in [
+        ("selection", "selection"),
+        ("observations", "observation_count"),
+        ("succeeded", "successful_dispatch_count"),
+        ("failed", "failed_dispatch_count"),
+        ("unverified", "unverified_dispatch_count"),
+        ("unscored", "unscored_dispatch_count"),
+        ("gate_drift_failures", "gate_drift_failure_count"),
+    ] {
+        insert_if_present(&mut out, wire, map.get(raw));
+    }
+    out.insert("evidence_rows".to_string(), json!(evidence_rows));
+    Value::Object(out)
+}
+
+pub(super) fn compact_persisted_replay(replay: Value) -> Value {
+    let Some(map) = replay.as_object() else {
+        return replay;
+    };
+    if is_failure_reply(map) {
+        return replay;
+    }
+    let replay_rows = map.get("replays").and_then(Value::as_array).map_or(0, Vec::len);
+    let mut out = serde_json::Map::new();
+    for key in ["ok", "selection", "score"] {
+        insert_if_present(&mut out, key, map.get(key));
+    }
+    out.insert("replay_rows".to_string(), json!(replay_rows));
+    Value::Object(out)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2488,7 +2549,7 @@ fn persist_sealed_replay(source: &'static str, replay: &mut Value) {
         "n_observations": replay.get("n_observations"),
         "domain": replay.get("domain"),
         "improved": replay.get("improved"),
-        "never_worse": matches!((baseline_score, selected_score), (Some(base), Some(sel)) if sel >= base),
+        "never_worse": replay.get("never_worse"),
         "beta1": replay.get("beta1"),
         "beta2": replay.get("beta2"),
         "rankings": rankings,
