@@ -620,9 +620,10 @@ pub fn log_row(store: &Store, id: &str) -> Result<Option<serde_json::Value>, Str
             found = Some(entry);
         }
     }
-    let Some(entry) = found else {
-        return Ok(None);
-    };
+    Ok(found.map(|entry| log_row_from_entry(store, id, &entry)))
+}
+
+fn log_row_from_entry(store: &Store, id: &str, entry: &serde_json::Value) -> serde_json::Value {
     let mut row = match entry.get("row") {
         Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map.clone()),
         _ => serde_json::json!({}),
@@ -645,15 +646,23 @@ pub fn log_row(store: &Store, id: &str) -> Result<Option<serde_json::Value>, Str
             map.insert("resolved_at".to_string(), ts.clone());
         }
     }
-    Ok(Some(row))
+    row
 }
 
 pub fn log_rows_with_status(
     store: &Store,
     statuses: &[String],
 ) -> Result<Vec<serde_json::Value>, String> {
+    let entries = log_entries(store)?;
+    let mut newest: std::collections::HashMap<&str, &serde_json::Value> =
+        std::collections::HashMap::new();
+    for entry in &entries {
+        if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
+            newest.insert(id, entry);
+        }
+    }
     let mut out = Vec::new();
-    for entry in log_entries(store)? {
+    for entry in &entries {
         let status = entry
             .get("status")
             .and_then(|v| v.as_str())
@@ -663,8 +672,8 @@ pub fn log_rows_with_status(
             continue;
         }
         let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        if let Some(row) = log_row(store, id)? {
-            out.push(row);
+        if let Some(last) = newest.get(id) {
+            out.push(log_row_from_entry(store, id, last));
         }
     }
     Ok(out)
