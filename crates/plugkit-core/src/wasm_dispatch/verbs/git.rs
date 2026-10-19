@@ -7818,6 +7818,18 @@ pub(super) fn ci_log_regex_mode(body: &Value) -> Result<bool, Value> {
     }
 }
 
+fn ci_status_gh_api_json_retrying_timeout(path: &str) -> Result<Value, String> {
+    let mut result = ci_status_gh_api_json(path);
+    for _ in 1..CI_STATUS_HANDOFF_ATTEMPTS {
+        match &result {
+            Err(reason) if reason.contains("timed out") => {}
+            _ => break,
+        }
+        result = ci_status_gh_api_json(path);
+    }
+    result
+}
+
 pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Value> {
     if let Some(run_id) = ci_log_id(body, &["run_id", "run"]) {
         return Ok(run_id);
@@ -7847,7 +7859,7 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
         }));
     }
     let sha = if sha.len() < 40 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
-        let commit = ci_status_gh_api_json(&format!("repos/{}/commits/{}", repo, sha))
+        let commit = ci_status_gh_api_json_retrying_timeout(&format!("repos/{}/commits/{}", repo, sha))
             .map_err(|reason| {
                 json!({
                     "error": format!("could not resolve sha {} in {}: {}", sha, repo, reason),
@@ -7862,7 +7874,7 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
     } else {
         sha
     };
-    let parsed = ci_status_gh_api_json(&format!(
+    let parsed = ci_status_gh_api_json_retrying_timeout(&format!(
         "repos/{}/actions/runs?head_sha={}&per_page=20",
         repo, sha
     ))
