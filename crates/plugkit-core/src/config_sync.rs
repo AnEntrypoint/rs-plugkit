@@ -11,6 +11,7 @@ const BACKOFF_BASE_MS: u64 = 60 * 1000;
 const BACKOFF_MAX_MS: u64 = 60 * 60 * 1000;
 
 const LOCK_STALE_MS: u64 = 10 * 60 * 1000;
+const LIVE_OWNER_STALE_MS: u64 = 2 * 60 * 1000;
 
 const SHARED_PROBE_POLL_MS: u64 = 250;
 
@@ -500,7 +501,7 @@ fn try_lock_at(lock_path: &str, mkdir_dir: &str) -> LockProbe {
         return LockProbe::Failed("cache root is not representable".to_string());
     };
     let code = format!(
-        "const fs=require('fs');const p={p};const staleMs={LOCK_STALE_MS};\
+        "const fs=require('fs');const p={p};const staleMs={LOCK_STALE_MS};const liveStaleMs={LIVE_OWNER_STALE_MS};\
              const parentDir={parent_p};\
              try{{fs.mkdirSync(parentDir,{{recursive:true}});}}catch(e0){{}}\
              process.stdout.write((function(){{\
@@ -519,7 +520,7 @@ fn try_lock_at(lock_path: &str, mkdir_dir: &str) -> LockProbe {
              let first=acquire();if(first!=='busy'){{return first;}}\
              let st=null;try{{st=fs.statSync(p);}}catch(e2){{return e2.code==='ENOENT'?'busy':'failed:stat:'+e2.code;}}\
              let observed=null;try{{observed=fs.readFileSync(p+'/owner','utf8');}}catch(e5){{observed=null;}}\
-             if(ownerAlive()!==false&&Date.now()-st.mtimeMs<=staleMs){{return 'busy';}}\
+             const alive=ownerAlive();const bound=alive===true?liveStaleMs:staleMs;if(alive!==false&&Date.now()-st.mtimeMs<=bound){{return 'busy';}}\
              const aside=p+'.stale-'+process.pid+'-'+Date.now();\
              try{{fs.renameSync(p,aside);}}catch(e3){{return 'failed:stale-rename:'+e3.code;}}\
              let moved=null;try{{moved=fs.readFileSync(aside+'/owner','utf8');}}catch(e6){{moved=null;}}\
