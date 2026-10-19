@@ -6923,7 +6923,7 @@ pub(super) fn ci_status_gh_unusable_reason() -> Option<String> {
     let result = ci_status_shell_result(probe);
     let stdout = ci_status_shell_stdout(&result);
     match stdout.lines().next().unwrap_or("").trim() {
-        "gh_ready" => None,
+        "gh_ready" | "" => None,
         "gh_not_installed" => Some(
             "gh CLI is not on PATH -- install it and run `gh auth login`, or supply GITHUB_TOKEN/GH_TOKEN"
                 .to_string(),
