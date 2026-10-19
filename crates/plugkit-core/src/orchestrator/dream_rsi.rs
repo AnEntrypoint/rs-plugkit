@@ -1338,6 +1338,18 @@ pub(crate) fn observe_recorded(
 }
 
 #[cfg(target_arch = "wasm32")]
+const NON_DECISION_VERBS: &[&str] = &[
+    "unknown-add",
+    "unknown-resolve",
+    "unknown-list",
+    "unknown-defer",
+    "mutable-add",
+    "mutable-resolve",
+    "mutable-list",
+    "mutable-defer",
+];
+
+#[cfg(target_arch = "wasm32")]
 fn observe_dispatch(observed: ObservedDispatch<'_>) {
     let ObservedDispatch {
         session_id,
@@ -1352,7 +1364,7 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         failure,
         run_end,
     } = observed;
-    if verb.starts_with("dream-") {
+    if verb.starts_with("dream-") || NON_DECISION_VERBS.contains(&verb) {
         return;
     }
     let failure = failure.for_exit(exit_code);
@@ -1485,7 +1497,11 @@ fn automatic_replay(session_id: Option<&str>) -> Value {
             *dropped.entry("unscored").or_default() += 1;
             continue;
         };
-        let cost = observation.prd_open_count.unwrap_or(0)
+        let Some(prd_open) = observation.prd_open_count else {
+            *dropped.entry("prd_count_unknown").or_default() += 1;
+            continue;
+        };
+        let cost = prd_open
             + observation.mutable_open_count.unwrap_or(0)
             + 1;
         let replay_score = quality - DEFAULT_CYCLE_BETA1 * cost as f64;
