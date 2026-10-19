@@ -7647,10 +7647,16 @@ pub(super) fn ci_log_second_prefix(stamp: Option<&str>) -> String {
 }
 
 pub(super) fn ci_log_steps(repo: &str, run_id: u64) -> Result<Vec<CiLogStep>, String> {
-    let parsed = ci_status_gh_api_json(&format!(
+    let parsed = match ci_status_gh_api_json(&format!(
         "repos/{}/actions/runs/{}/jobs?per_page=100",
         repo, run_id
-    ))?;
+    )) {
+        Ok(parsed) => parsed,
+        Err(reason) if reason.contains("HTTP 404") => {
+            return Err(format!("run {} not found in {}", run_id, repo))
+        }
+        Err(reason) => return Err(reason),
+    };
     let jobs = parsed
         .get("jobs")
         .and_then(Value::as_array)
