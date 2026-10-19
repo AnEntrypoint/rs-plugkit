@@ -4372,9 +4372,11 @@ fn publish_codesearch_artifact(
                 .and_then(|stdout| serde_json::from_str::<Value>(stdout).ok())
         });
     let Some(outcome) = outcome else {
+        let _ = crate::wasm_dispatch::host_remove_file_never_directory(&temporary_path);
         return Err("artifact atomic publish failed");
     };
     if outcome.get("ok").and_then(Value::as_bool) != Some(true) {
+        let _ = crate::wasm_dispatch::host_remove_file_never_directory(&temporary_path);
         return Err("artifact atomic publish failed");
     }
     let sha256 = outcome
