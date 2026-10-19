@@ -4553,11 +4553,19 @@ pub(super) fn pull_and_repush_remote_moved(
             remote_sha_before,
         } => {
             let mut retry_body = body.clone();
+            let caller_named_rev = body
+                .get("rev")
+                .or_else(|| body.get("source_ref"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .is_some_and(|v| !v.is_empty());
             if let Some(map) = retry_body.as_object_mut() {
-                map.insert(
-                    "rev".to_string(),
-                    json!(exec_git_in(cwd, "rev-parse HEAD").trim().to_string()),
-                );
+                if !caller_named_rev {
+                    map.insert(
+                        "rev".to_string(),
+                        json!(exec_git_in(cwd, "rev-parse HEAD").trim().to_string()),
+                    );
+                }
                 map.remove("recover_remote_moved");
                 map.remove("pull_first");
             }
