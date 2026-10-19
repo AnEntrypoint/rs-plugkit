@@ -3142,8 +3142,8 @@ pub(super) fn patch_commit_paths(patch: &str) -> Vec<String> {
 }
 
 pub(super) fn git_commit_hunk_scoped(body: &Value) -> Option<u64> {
-    let patch = body.get("patch");
-    let hunks = body.get("hunks");
+    let patch = body.get("patch").filter(|v| !v.is_null());
+    let hunks = body.get("hunks").filter(|v| !v.is_null());
     if patch.is_none() && hunks.is_none() {
         return None;
     }
@@ -3151,7 +3151,7 @@ pub(super) fn git_commit_hunk_scoped(body: &Value) -> Option<u64> {
     if patch.is_some() && hunks.is_some() {
         return refuse("pass either patch (a unified diff against HEAD) or hunks ({path: [hunk numbers]}), not both");
     }
-    if ["paths", "files", "add_all", "amend", "allow_empty"].iter().any(|k| body.get(*k).is_some()) {
+    if ["paths", "files", "add_all", "amend", "allow_empty"].iter().any(|k| body.get(*k).is_some_and(|v| !matches!(v, Value::Null | Value::Bool(false)))) {
         return refuse("a hunk-scoped commit (patch or hunks) names its content itself; paths, files, add_all, amend and allow_empty do not combine with it");
     }
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
