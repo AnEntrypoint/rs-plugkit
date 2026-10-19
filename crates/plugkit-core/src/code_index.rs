@@ -743,6 +743,11 @@ pub(crate) fn load_repo_gitignore(root: &str) -> Option<ignore::gitignore::Gitig
     built
 }
 
+pub(crate) fn load_codesearchignore(root: &str) -> Option<ignore::gitignore::Gitignore> {
+    let custom_content = host_read(&ignore_file_path(root, ".codesearchignore"));
+    build_repo_gitignore(root, None, custom_content.as_deref())
+}
+
 pub(crate) fn gitignore_excludes(
     gi: &Option<ignore::gitignore::Gitignore>,
     rel_path: &str,
@@ -4324,6 +4329,8 @@ pub const LITERAL_SCAN_MAX_FILES: usize = 50_000;
 
 const LITERAL_SCAN_MAX_LINE_BYTES: usize = 512;
 
+const LITERAL_SCAN_MINIFIED_LINE_BYTES: usize = 300;
+
 const LITERAL_SCAN_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 const INLINE_CODESEARCH_MATCH_LIMIT: usize = 100;
@@ -5232,6 +5239,10 @@ fn scan_uncovered_files(
         result.lines_scanned += content.lines().count();
         let mut this_file_matched = false;
         let mut this_file_lines = 0usize;
+        let minified_file = content
+            .lines()
+            .any(|l| l.len() > LITERAL_SCAN_MINIFIED_LINE_BYTES);
+        let mut this_file_hits = 0usize;
         for (idx, raw_line) in content.split_inclusive('\n').enumerate() {
             let line = raw_line.trim_end_matches(['\n', '\r']);
             let found = matcher.find_all(line);
@@ -5255,10 +5266,11 @@ fn scan_uncovered_files(
                     .push(compact_match_line(path, idx + 1, line));
                 continue;
             }
-            if result.matches.len() >= match_cap {
+            if result.matches.len() >= match_cap || (minified_file && this_file_hits >= 1) {
                 result.matches_truncated = true;
                 continue;
             }
+            this_file_hits += 1;
             let (start, end) = found[0];
             let text_truncated = line.len() > LITERAL_SCAN_MAX_LINE_BYTES;
             let shown: String = if text_truncated {
