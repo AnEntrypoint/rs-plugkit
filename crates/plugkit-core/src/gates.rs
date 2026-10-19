@@ -692,6 +692,79 @@ fn substitutions_invoke_git(
         .any(|inner| text_invokes_git(&inner, is_git_token, depth + 1))
 }
 
+fn is_drive_path(token: &str) -> bool {
+    let b = token.as_bytes();
+    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
+    let msys = b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b'/';
+    drive || msys
+}
+
+fn closing_quote(chars: &[char], open: usize) -> Option<usize> {
+    let quote = chars[open];
+    let mut j = open + 1;
+    while j < chars.len() {
+        if quote == '"' && chars[j] == '\\' && chars.get(j + 1) == Some(&'"') {
+            j += 2;
+            continue;
+        }
+        if chars[j] == quote {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+fn push_word(segments: &mut Vec<Vec<String>>, word: &mut String, in_word: &mut bool) {
+    if *in_word {
+        if let Some(segment) = segments.last_mut() {
+            segment.push(std::mem::take(word));
+        }
+    }
+    word.clear();
+    *in_word = false;
+}
+
+fn split_words(text: &str) -> Vec<Vec<String>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut segments: Vec<Vec<String>> = vec![Vec::new()];
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' || c == '"' {
+            if let Some(end) = closing_quote(&chars, i) {
+                let mut j = i + 1;
+                while j < end {
+                    if c == '"' && chars[j] == '\\' && chars.get(j + 1) == Some(&'"') {
+                        j += 1;
+                    }
+                    word.push(chars[j]);
+                    j += 1;
+                }
+                in_word = true;
+                i = end + 1;
+                continue;
+            }
+        }
+        match c {
+            ' ' | '\t' | '\r' => push_word(&mut segments, &mut word, &mut in_word),
+            '\n' | ';' | '|' | '&' => {
+                push_word(&mut segments, &mut word, &mut in_word);
+                segments.push(Vec::new());
+            }
+            _ => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+        i += 1;
+    }
+    push_word(&mut segments, &mut word, &mut in_word);
+    segments
+}
+
 fn text_invokes_git(text: &str, is_git_token: &dyn Fn(&str) -> bool, depth: usize) -> bool {
     if depth > MAX_UNWRAP_DEPTH {
         return true;
@@ -703,15 +776,15 @@ fn text_invokes_git(text: &str, is_git_token: &dyn Fn(&str) -> bool, depth: usiz
     let script_names_git = scripts.iter().any(|&(script, _)| contains_git_word(script));
     quoted_substitution
         || script_names_git
-        || code
-            .split([';', '\n', '|', '&'])
+        || split_words(&code)
+            .iter()
             .any(|segment| segment_invokes_git(segment, is_git_token, depth))
         || substitutions_invoke_git(&code, is_git_token, depth)
 }
 
-fn segment_invokes_git(segment: &str, is_git_token: &dyn Fn(&str) -> bool, depth: usize) -> bool {
+fn segment_invokes_git(segment: &[String], is_git_token: &dyn Fn(&str) -> bool, depth: usize) -> bool {
     let tokens: Vec<&str> = segment
-        .split_whitespace()
+        .iter()
         .map(|t| t.trim_matches(|c: char| matches!(c, '(' | '{' | '!' | '"' | '\'')))
         .collect();
     let mut wrapper: &str = "";
@@ -759,6 +832,11 @@ fn segment_invokes_git(segment: &str, is_git_token: &dyn Fn(&str) -> bool, depth
         }
         if is_wrapper_prefix(t) {
             continue;
+        }
+        if is_drive_path(t)
+            && (i - 1..tokens.len()).any(|j| is_git_token(tokens[i - 1..=j].join(" ").as_str()))
+        {
+            return true;
         }
         return is_git_token(t);
     }
