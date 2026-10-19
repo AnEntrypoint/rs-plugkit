@@ -3666,6 +3666,17 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 ));
             }
         }
+        if !add_all && paths.is_empty() && !allow_whole_index && !merge_pending && !commits_session_staging && !staged_before.is_empty() {
+            return Ok(err_json(
+                "git_commit",
+                json!({
+                    "error": format!("git_commit with no paths would take the whole staged index ({} path(s)); pass paths to commit them explicitly, or allow_whole_index: true to accept the whole index", staged_before.len()),
+                    "error_code": "whole_index_refused",
+                    "staged_count": staged_before.len(),
+                    "staged_paths": staged_before,
+                }),
+            ));
+        }
         let head_before_probe = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
         let dedup_key = git_commit_dedup_key(cwd, &head_before_probe, message, &paths, add_all, amend);
         if let Some(prior) = git_commit_dedup_lookup(&dedup_key, cwd) {
@@ -5137,6 +5148,20 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         .filter(|e| !e.is_empty())
         .map(String::from)
         .collect();
+    if !scoped && !allow_whole_index && !staged_before.is_empty() {
+        let session = commit_session_id(body);
+        if !index_equals_session_staging(cwd_ref, &session, &staged_before) {
+            return err_json(
+                "git_finalize",
+                json!({
+                    "error": format!("git_finalize with no paths would take the whole staged index ({} path(s)); pass paths to commit them explicitly, or allow_whole_index: true to accept the whole index", staged_before.len()),
+                    "error_code": "whole_index_refused",
+                    "staged_count": staged_before.len(),
+                    "staged_paths": staged_before,
+                }),
+            );
+        }
+    }
     if !scoped && !allow_whole_index {
         let sweep = blanket_stage_would_take(cwd_ref);
         if !sweep.is_empty() {
