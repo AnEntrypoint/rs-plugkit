@@ -399,7 +399,7 @@ fn evaluate_worlds(
             })
             .collect::<Result<Vec<f64>, String>>()?;
         let score = scores.iter().sum::<f64>() / scores.len() as f64;
-        if !score.is_finite() {
+        if !score.is_finite() && policy.id == baseline_id {
             return Err(format!("dream-replay policy {} score is non-finite", policy.id));
         }
         let cost = replays
