@@ -4,6 +4,7 @@ use crate::wasm_dispatch::{
     host_cas_write, host_fs_readdir, host_now_ms, host_read, host_remove_file_never_directory,
     host_stat, unpack_to_value_pub,
 };
+use crate::wasm_dispatch::host_abi::host_read_via_exec;
 use serde_json::{json, Value};
 
 const MAX_ENTRIES: usize = 5000;
@@ -315,6 +316,22 @@ pub fn subagent_dispatches_since(
 
 pub fn lookup(cwd: &str, dispatch_id: &str) -> Result<Option<Value>, String> {
     Ok(read_entries(cwd)?
+        .into_iter()
+        .find(|e| e.get("dispatch_id").and_then(|v| v.as_str()) == Some(dispatch_id)))
+}
+
+pub fn lookup_outside_root(cwd: &str, dispatch_id: &str) -> Result<Option<Value>, String> {
+    let path = ledger_path(cwd);
+    let raw = host_read_via_exec(&path).ok_or_else(|| ledger_unavailable(&path))?;
+    let entries = if raw.trim().is_empty() {
+        Vec::new()
+    } else {
+        match serde_json::from_str::<Value>(&raw) {
+            Ok(Value::Array(a)) => a,
+            _ => return Err(ledger_unavailable(&path)),
+        }
+    };
+    Ok(entries
         .into_iter()
         .find(|e| e.get("dispatch_id").and_then(|v| v.as_str()) == Some(dispatch_id)))
 }

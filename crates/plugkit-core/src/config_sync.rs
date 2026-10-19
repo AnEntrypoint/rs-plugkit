@@ -189,7 +189,7 @@ fn probe_decision(rec: &RemoteRecord, now: u64, forced: bool) -> ProbeDecision {
         };
     }
     let interval = if rec.change_interval_ms > 0 {
-        rec.change_interval_ms
+        rec.change_interval_ms.min(UNMEASURED_REF_INTERVAL_MS)
     } else {
         UNMEASURED_REF_INTERVAL_MS
     };
