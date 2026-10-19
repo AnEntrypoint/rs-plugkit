@@ -3,8 +3,6 @@ use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const STALE_FETCH_MS: u64 = 24 * 60 * 60 * 1000;
-const STALE_COMPLETE_REASON: &str = "stale_tree: results may miss remote symbols, see stale_tree.note";
-
 fn scope_dir(body: &Value) -> String {
     let root = body_cwd(body).unwrap_or(".").trim_end_matches(['/', '\\']).to_string();
     let named = body
@@ -72,11 +70,11 @@ pub(super) fn tree_staleness(body: &Value) -> Option<Value> {
         return None;
     }
     let note = if behind > 0 && ahead > 0 {
-        format!("checkout {dir} has diverged from its upstream: {ahead} commit(s) ahead and {behind} behind as of the last fetch, so these results miss symbols on the remote; a plain git_pull cannot fast-forward it, so rebase or merge onto the upstream tip {} first", short(upstream))
+        format!("checkout {dir} has diverged from its upstream as of the last fetch: {ahead} ahead, {behind} behind; results cover the local checkout and omit remote-only symbols. Reconcile onto upstream tip {} when those matter", short(upstream))
     } else if behind > 0 {
-        format!("checkout {dir} is {behind} commit(s) behind its upstream as of the last fetch, so these results miss symbols on the remote; git_pull, then re-run")
+        format!("checkout {dir} is {behind} commit(s) behind its upstream as of the last fetch; results cover the local checkout and omit remote-only symbols")
     } else {
-        format!("upstream of {dir} not fetched for over 24 h, so a behind count of 0 is unproven; git_pull, then re-run")
+        format!("upstream of {dir} not fetched for over 24 h, so a behind count of 0 is unproven; results cover the local checkout")
     };
     let action = if behind > 0 && ahead > 0 { "merge_upstream" } else { "git_pull" };
     Some(json!({
@@ -101,21 +99,7 @@ pub(super) fn stamp_tree_staleness_packed(body: &Value, packed: u64) -> u64 {
     };
     let zero_hits = map.get("total_matches").and_then(Value::as_u64) == Some(0)
         || map.get("data").and_then(|d| d.get("match_count")).and_then(Value::as_u64) == Some(0);
-    mark_incomplete(map, STALE_COMPLETE_REASON);
-    if let Some(data) = map.get_mut("data").and_then(Value::as_object_mut) {
-        mark_incomplete(data, STALE_COMPLETE_REASON);
-    }
     map.insert("unproven_zero".to_string(), json!(zero_hits));
     map.insert("stale_tree".to_string(), stale);
     pack(v.to_string())
-}
-
-fn mark_incomplete(map: &mut serde_json::Map<String, Value>, reason: &str) {
-    for key in ["complete", "exhaustive"] {
-        if map.contains_key(key) {
-            map.insert(key.to_string(), json!(false));
-        }
-    }
-    map.insert("complete".to_string(), json!(false));
-    map.insert("complete_reason".to_string(), json!(reason));
 }
