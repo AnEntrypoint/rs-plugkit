@@ -570,11 +570,7 @@ impl RuleRecordingWalk<'_> {
     fn descend(&mut self, dir: &str) {
         let children_of_granted_root = self.granted_root.as_deref() == Some(dir);
         for entry in list_dir(dir) {
-            if self.files.len() >= self.max_files {
-                self.reached_cap = true;
-                return;
-            }
-            if self.reached_deadline {
+            if self.reached_cap || self.reached_deadline {
                 return;
             }
             if unsafe { host_now_ms() } >= self.deadline_ms {
@@ -603,7 +599,13 @@ impl RuleRecordingWalk<'_> {
                     files: None,
                 }),
                 (None, true) => self.descend(&next),
-                (None, false) => self.files.push(next),
+                (None, false) => {
+                    if self.files.len() >= self.max_files {
+                        self.reached_cap = true;
+                        return;
+                    }
+                    self.files.push(next);
+                }
             }
         }
     }
