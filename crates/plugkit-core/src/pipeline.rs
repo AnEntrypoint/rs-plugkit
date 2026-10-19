@@ -187,7 +187,7 @@ pub fn build_pending_step(text: &str, namespace: &str, project_path: Option<&str
         Ok(t) => t,
         Err(e) => {
             delete_state(&step_id);
-            return json!({ "ok": false, "error": format!("pipeline token mint failed: {}", e) });
+            return json!({ "ok": false, "error_code": "token_mint_failed", "error": format!("pipeline token mint failed: {}", e) });
         }
     };
     let _ = mark_turn_pending(&step_id, deadline_ms);
@@ -272,7 +272,7 @@ pub fn handle_continue(body: &Value) -> Value {
 
     let token = match body.get("token").and_then(|v| v.as_str()) {
         Some(t) => t,
-        None => return json!({ "ok": false, "error": "missing token" }),
+        None => return json!({ "ok": false, "error_code": "missing_token", "error": "missing token" }),
     };
     let step_id = match body.get("step_id").and_then(|v| v.as_str()) {
         Some(s) => s,
@@ -304,8 +304,8 @@ pub fn handle_continue(body: &Value) -> Value {
         .unwrap_or(0);
     match verify_token(token, step_id, kv_key, deadline_ms) {
         Ok(true) => {}
-        Ok(false) => return json!({ "ok": false, "error": "invalid_token" }),
-        Err(e) => return json!({ "ok": false, "error": format!("token verify failed: {}", e) }),
+        Ok(false) => return json!({ "ok": false, "error_code": "invalid_token", "error": "invalid_token" }),
+        Err(e) => return json!({ "ok": false, "error_code": "token_verify_failed", "error": format!("token verify failed: {}", e) }),
     }
 
     let now = unsafe { host_now_ms() } as u64;
