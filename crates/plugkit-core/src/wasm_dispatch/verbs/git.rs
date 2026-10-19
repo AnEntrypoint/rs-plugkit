@@ -1709,6 +1709,26 @@ pub(super) fn git_push(body: &Value) -> u64 {
             push_succeeded = ok_now;
         }
     }
+    if !push_succeeded && push_output_is_host_timeout(&push_out) {
+        return pack(json!({
+            "ok": false,
+            "verb": "git_push",
+            "gate_denied": true,
+            "remote_moved": false,
+            "transport_hang": true,
+            "repo": repo,
+            "branch": branch,
+            "source_ref": source_ref,
+            "source_sha": local_source_before,
+            "preserved_dirty_worktree": preserved_dirty_worktree,
+            "reason": format!(
+                "push of source ref '{}' to {} was killed by the host git timeout before the remote answered; this is a transport hang, not evidence that the remote moved. Output:\\n{}",
+                source_ref, branch, push_out
+            ),
+            "next_dispatch": "instruction",
+            "next_action_hint": "re-dispatch the same git_push; no git_pull is needed",
+        }).to_string());
+    }
     let mut attempts = 0u32;
     let mut rebased = false;
     if !push_succeeded && explicit_source_ref.is_some() {
