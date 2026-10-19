@@ -1226,12 +1226,13 @@ pub(super) fn codesearch_exhaustive(
     let combine = match explicit_combine {
         Some(c) => Some(c),
         None if verbatim_phrase_requested => Some("phrase"),
+        None if !regex && !filenames => Some("and"),
         None => None,
     };
     if let Some(c) = combine {
         if !["or", "and", "phrase"].contains(&c) {
             return err("codesearch", &format!(
-                "combine \"{c}\" is not a term combination -- valid values are \"phrase\" (default: a multi-word query is matched verbatim as one string, spaces included), \"and\" (a line must carry every term) and \"or\" (a multi-word query is split into terms and a line needs any of them, ranked by how many it carries -- lines carrying fewer terms rank strictly below lines carrying all of them)"
+                "combine \"{c}\" is not a term combination -- valid values are \"and\" (default: a line must carry every term), \"phrase\" (a multi-word query is matched verbatim as one string, spaces included) and \"or\" (a multi-word query is split into terms and a line needs any of them, ranked by how many it carries -- lines carrying fewer terms rank strictly below lines carrying all of them)"
             ));
         }
     }
