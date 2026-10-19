@@ -653,7 +653,8 @@ fn readdir_entries(path: &str) -> Result<Vec<Value>, String> {
     let v = unpack_to_value_pub(packed);
     match v {
         Value::Array(arr) => Ok(arr),
-        _ => Err(format!("directory listing failed for {path}: {v}")),
+        _ => crate::wasm_dispatch::host_abi::host_readdir_via_exec(path)
+            .ok_or_else(|| format!("directory listing failed for {path}: {v}")),
     }
 }
 
