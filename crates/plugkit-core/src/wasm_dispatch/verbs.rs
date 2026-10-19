@@ -3388,7 +3388,14 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "cdp" => err_coded("cdp", ERR_CODE_RETIRED_VERB, "verb retired: the standalone cdp verb is removed in this build; dispatch verb crawl (or chrome) with a plain-text body whose first line is engine=cdp, then one step per line: sessionId=<name>, a URL or url=<url>, wait <ms>, eval=<js>, cdp <Domain.method> with its JSON params on the next line, events <Domain.event> [where <field>~<value>] [limit=N]. A session still answered by an older runner build serves cdp; a runner newer than that one retires it"),
         "discipline" => discipline(&body),
         "" => err_coded("", ERR_CODE_INVALID_ARGS, "verb required"),
-        _ => err_coded(&verb, ERR_CODE_UNKNOWN_VERB, "unknown verb: this runner build does not register it; check the verb spelling, or a runner/plugin version skew (a second older or newer agentplug-runner serving this project) and run the dispatch verb instruction or docs/verbs.md for the registered set"),
+        _ => {
+            let named = if verb == "gm" {
+                body.get("verb").and_then(|v| v.as_str()).unwrap_or("gm").to_string()
+            } else {
+                verb.to_string()
+            };
+            err_coded(&named, ERR_CODE_UNKNOWN_VERB, "unknown verb: this runner build does not register it; check the verb spelling, or a runner/plugin version skew (a second older or newer agentplug-runner serving this project) and run the dispatch verb instruction or docs/verbs.md for the registered set")
+        }
     };
     #[cfg(target_arch = "wasm32")]
     {
