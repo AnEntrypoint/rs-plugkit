@@ -515,6 +515,7 @@ fn scan_node_modules(root: &str, max_files: usize) -> NodeModulesScan {
             scan.truncated = true;
             break;
         }
+        advisory_findings(&pkg_dir, &mut scan.findings);
         let mut r = PackageWalkResult {
             max_mtime: 0.0,
             total_size: 0,
@@ -569,6 +570,69 @@ fn scan_node_modules(root: &str, max_files: usize) -> NodeModulesScan {
 }
 
 const SYMLINK_ESCAPES_LISTED: usize = 20;
+
+struct Advisory {
+    package: &'static str,
+    below: (u64, u64, u64),
+    id: &'static str,
+    title: &'static str,
+}
+
+const KNOWN_ADVISORIES: &[Advisory] = &[
+    Advisory {
+        package: "lodash",
+        below: (4, 17, 21),
+        id: "GHSA-35jh-r3h4-6jhm",
+        title: "command injection in lodash template",
+    },
+    Advisory {
+        package: "minimist",
+        below: (1, 2, 6),
+        id: "GHSA-xvch-5gv4-984h",
+        title: "prototype pollution in minimist",
+    },
+];
+
+fn parse_version_triple(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version.trim_start_matches('v').split(['-', '+']).next()?;
+    let mut parts = core.split('.');
+    let mut next = || parts.next().map_or(Some(0), |p| p.parse::<u64>().ok());
+    Some((next()?, next()?, next()?))
+}
+
+fn advisory_findings(package_dir: &str, findings: &mut Vec<FileFinding>) {
+    let path = format!("{package_dir}/package.json");
+    let Some(text) = crate::wasm_dispatch::host_read(&path) else {
+        return;
+    };
+    let Ok(manifest) = serde_json::from_str::<Value>(&text) else {
+        return;
+    };
+    let name = manifest.get("name").and_then(Value::as_str);
+    let version = manifest.get("version").and_then(Value::as_str);
+    let (Some(name), Some(version)) = (name, version) else {
+        return;
+    };
+    let Some(installed) = parse_version_triple(version) else {
+        return;
+    };
+    for advisory in KNOWN_ADVISORIES
+        .iter()
+        .filter(|a| a.package == name && installed < a.below)
+    {
+        let (major, minor, patch) = advisory.below;
+        findings.push(FileFinding {
+            path: path.clone(),
+            severity: "fail",
+            ratio: None,
+            escape_hits: Vec::new(),
+            note: Some(format!(
+                "{name} {version} is below {major}.{minor}.{patch} ({}: {})",
+                advisory.id, advisory.title
+            )),
+        });
+    }
+}
 
 pub fn scan_deps(body: &Value) -> Value {
     let requested_root = body
