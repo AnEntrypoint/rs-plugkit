@@ -1,0 +1,2 @@
+{"dispatch_id":"1792360005899-2049-fa51e2bb558454b9","verb":"git_show","fingerprint":"a0e7d45d26f6323e","exit_code":0,"gate_drift":false,"quality":1.0,"ts":1792360005942,"reply_sha256":"fb7fe181789fc0e45398c744939fbb6b6d0c24411cf746bb84c4e655d4a73e94","failure_class":"ok"}
+{"dispatch_id":"1792360006626-2051-a33980abeaedf1ed","verb":"git_remote","fingerprint":"90116a098ca4239d","exit_code":0,"gate_drift":false,"quality":0.5,"ts":1792360006671,"reply_sha256":"08cccb686e564dbec2c025acbb28174b90db8fd8a6326623c4c6235eae05d641","failure_class":"ok"}

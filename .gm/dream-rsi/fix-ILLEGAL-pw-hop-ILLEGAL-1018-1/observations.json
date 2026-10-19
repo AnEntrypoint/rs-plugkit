@@ -1,0 +1,5 @@
+{"dispatch_id":"d1","verb":"codesearch","exit_code":0,"gate_drift":false,"ts":1}
+{"dispatch_id":"d2","verb":"codesearch","exit_code":"oops","gate_drift":true,"ts":2}
+{"dispatch_id":"1792328755820-500-90e701ad117a900e","verb":"fs_write","fingerprint":"8753e53c7e7363a1","exit_code":0,"gate_drift":false,"prd_open_count":3,"mutable_open_count":0,"quality":1.0,"ts":1792328755826,"reply_sha256":"d3e1326d984696717d1d3d9bb3098a9616088cd2ed022f50b413b043d837e84e"}
+{"dispatch_id":"1792328813018-500-bb348e355ce25b2a","verb":"git_log","fingerprint":"2fd4f8a739a1731e","exit_code":0,"gate_drift":false,"prd_open_count":3,"mutable_open_count":0,"quality":1.0,"ts":1792328813025,"reply_sha256":"224f9426352ba6b7bfbd1069480e8d37b3981d01a2591261e81c3d00ce286962"}
+{"dispatch_id":"1792328899688-500-41ea40c6debe7df8","verb":"prd-add","fingerprint":"6c1d5f23e2afe31d","exit_code":0,"gate_drift":false,"prd_open_count":4,"mutable_open_count":0,"quality":1.0,"ts":1792328899695,"reply_sha256":"50ba2f96ef4b95e4e150e65d3de004a03274148492bf2d6922499f54455f5839"}

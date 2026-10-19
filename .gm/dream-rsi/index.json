@@ -1,0 +1,1 @@
+{"fields":["kind","source","owner_session_id","ts"],"files":{"active_strategy":"active-strategy.json","cycle_result":"cycle-result.json","observations":"observations.json","replay_result":"replay-result.json"},"record_kinds":{"cycle_result":"cycle-result","replay_result":"replay-result"},"schema_version":1}
