@@ -2571,6 +2571,10 @@ pub(super) fn codesearch_identifier(
             .unwrap_or(lines.len() as u64);
         map.insert("files_scanned".to_string(), json!(scan_files_scanned));
         map.insert("count".to_string(), json!(found));
+        map.insert(
+            "count_basis".to_string(),
+            json!("distinct path:line hits of definitions plus references; the case-insensitive substring pass sets the set, so a case variant (CODESEARCH) counts and the literal case-sensitive count is lower"),
+        );
     }
     Some(Ok(report))
 }
