@@ -5928,7 +5928,9 @@ fn union_append_only_log_conflicts(cwd: Option<&str>, conflicts: &[String], outp
 }
 
 fn pull_blocked_by_dirty_paths(cwd: Option<&str>, remote: &str, dirty: &[String]) -> bool {
-    let staged = exec_git_in(cwd, "diff --cached --name-only");
+    if !exec_git_in(cwd, "diff --cached --name-only").trim().is_empty() {
+        return true;
+    }
     let fetched = git_call_argv(&["fetch", remote], cwd);
     if fetched.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) != 0 {
         return true;
@@ -5943,7 +5945,7 @@ fn pull_blocked_by_dirty_paths(cwd: Option<&str>, remote: &str, dirty: &[String]
         .unwrap_or("")
         .lines()
         .map(str::trim)
-        .any(|path| dirty.iter().any(|d| d == path) || staged.lines().any(|s| s.trim() == path))
+        .any(|path| dirty.iter().any(|d| d == path))
 }
 
 pub(super) fn git_pull(body: &Value) -> u64 {
