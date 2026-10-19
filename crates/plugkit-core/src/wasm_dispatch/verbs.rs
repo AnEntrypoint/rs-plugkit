@@ -889,7 +889,13 @@ fn fs_read_line_range(
     let Some((start_key, end_key, end_key_is_count)) = FS_READ_RANGE_PAIRS
         .iter()
         .copied()
-        .find(|(first, second, _)| present(*first) || present(*second))
+        .find(|(first, _, _)| present(*first))
+        .or_else(|| {
+            FS_READ_RANGE_PAIRS
+                .iter()
+                .copied()
+                .find(|(_, second, _)| present(*second))
+        })
     else {
         return Ok(None);
     };
