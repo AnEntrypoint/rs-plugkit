@@ -629,15 +629,80 @@ fn rest_of(tokens: &[&str], from: usize) -> String {
     tokens.get(from..).unwrap_or_default().join(" ")
 }
 
+const INTERPRETER_PREFIXES: &[&str] = &[
+    "node", "deno", "bun", "python", "perl", "ruby", "php", "lua",
+];
+
+const INLINE_SCRIPT_FLAGS: &[&str] = &["-c", "-e", "-E", "-p", "-r", "--eval", "--print"];
+
+fn is_interpreter(token: &str) -> bool {
+    let base = token.rsplit(['/', '\\']).next().unwrap_or(token).to_ascii_lowercase();
+    let name = base.strip_suffix(".exe").unwrap_or(&base);
+    INTERPRETER_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+}
+
+fn is_inline_script_arg(before: &str) -> bool {
+    let mut words = before.split_whitespace().rev();
+    let flag_is_inline = words.next().is_some_and(|flag| INLINE_SCRIPT_FLAGS.contains(&flag));
+    flag_is_inline && words.find(|word| !word.starts_with('-')).is_some_and(is_interpreter)
+}
+
+fn split_inline_scripts(text: &str) -> (String, Vec<(&str, char)>) {
+    let mut code = String::with_capacity(text.len());
+    let mut scripts = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find(['\'', '"']) {
+        let quote = char::from(rest.as_bytes()[open]);
+        let Some(len) = rest[open + 1..].find(quote) else {
+            break;
+        };
+        let span_end = open + len + 2;
+        let before = &rest[..open];
+        code.push_str(before);
+        if is_inline_script_arg(before) {
+            scripts.push((&rest[open + 1..open + 1 + len], quote));
+            code.push(' ');
+        } else {
+            code.push_str(&rest[open..span_end]);
+        }
+        rest = &rest[span_end..];
+    }
+    code.push_str(rest);
+    (code, scripts)
+}
+
+fn script_runs_git(script: &str) -> bool {
+    let bytes = script.as_bytes();
+    script.match_indices("git").any(|(at, _)| {
+        let before = at.checked_sub(1).map(|i| bytes[i]);
+        let after = bytes.get(at + 3).copied();
+        matches!(before, Some(b'\'' | b'"' | b'`' | b'/' | b'\\'))
+            && matches!(after, Some(b'\'' | b'"' | b'`' | b' '))
+    })
+}
+
+fn substitutions_invoke_git(
+    text: &str,
+    is_git_token: &dyn Fn(&str) -> bool,
+    depth: usize,
+) -> bool {
+    extract_substitution_bodies(text)
+        .into_iter()
+        .any(|inner| text_invokes_git(&inner, is_git_token, depth + 1))
+}
+
 fn text_invokes_git(text: &str, is_git_token: &dyn Fn(&str) -> bool, depth: usize) -> bool {
     if depth > MAX_UNWRAP_DEPTH {
         return true;
     }
-    text.split([';', '\n', '|', '&'])
+    let (code, scripts) = split_inline_scripts(text);
+    scripts.iter().any(|&(script, quote)| {
+        script_runs_git(script)
+            || (quote == '"' && substitutions_invoke_git(script, is_git_token, depth))
+    }) || code
+        .split([';', '\n', '|', '&'])
         .any(|segment| segment_invokes_git(segment, is_git_token, depth))
-        || extract_substitution_bodies(text)
-            .into_iter()
-            .any(|inner| text_invokes_git(&inner, is_git_token, depth + 1))
+        || substitutions_invoke_git(&code, is_git_token, depth)
 }
 
 fn segment_invokes_git(segment: &str, is_git_token: &dyn Fn(&str) -> bool, depth: usize) -> bool {
