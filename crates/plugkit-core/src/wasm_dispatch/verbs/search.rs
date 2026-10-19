@@ -2093,6 +2093,14 @@ pub(super) fn grep(body: &Value) -> u64 {
         .unwrap_or(false);
     let want_comments = mode == "comments" || comments_flag;
     if let Some(refusal) = refuse_unknown_fields("grep", body, GREP_ACCEPTED_FIELDS) { return refusal; }
+    if comments_flag && !mode.is_empty() && mode != "comments" {
+        return err(
+            "grep",
+            &format!(
+                "comments:true and mode \"{mode}\" contradict each other -- pass mode \"comments\" or drop comments:true, not both"
+            ),
+        );
+    }
     let (mode_regex, mode_output) = if comments_flag {
         (None, None)
     } else {
