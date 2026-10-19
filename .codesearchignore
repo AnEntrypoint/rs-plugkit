@@ -3,3 +3,5 @@
 target/
 weights/
 vendor/
+# Stray nested git worktree copy of the crates (find11).
+wt-find11-tmp/
