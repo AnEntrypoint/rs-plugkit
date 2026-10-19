@@ -791,6 +791,31 @@ fn write_live_count(session_id: &str, count: usize) {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn recover_observations_tail(path: &str) -> Option<String> {
+    let Some(raw) = crate::pkfs::read_to_string(path) else {
+        return Some(String::new());
+    };
+    if raw.is_empty() || raw.ends_with('\n') {
+        return Some(raw);
+    }
+    let keep = raw.rfind('\n').map_or(0, |i| i + 1);
+    let tail = &raw[keep..];
+    let tail_parses = serde_json::from_str::<Value>(tail.trim()).is_ok();
+    if !tail_parses && !crate::pkfs::append(&format!("{path}.torn"), &format!("{tail}\n")) {
+        return None;
+    }
+    let body = if tail_parses {
+        format!("{raw}\n")
+    } else {
+        raw[..keep].to_owned()
+    };
+    match crate::pkfs::cas_write(path, &raw, &body) {
+        crate::pkfs::CasWriteOutcome::Swapped => Some(body),
+        _ => None,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 fn rotate_observations_if_full(session_id: &str, path: &str, ts: i64) {
     if read_live_count(session_id).is_some_and(|count| count < OBSERVATIONS_LIVE_CAP) {
         return;
@@ -837,7 +862,7 @@ fn session_history(session_id: &str) -> (Vec<ObservationRecord>, usize) {
             absorb(&raw);
         }
     }
-    if let Some(raw) = crate::pkfs::read_to_string(&format!(".gm/dream-rsi/{session_id}/observations.json")) {
+    if let Some(raw) = recover_observations_tail(&format!(".gm/dream-rsi/{session_id}/observations.json")) {
         absorb(&raw);
     }
     (records, rejected)
@@ -1328,6 +1353,9 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
     let path = format!(".gm/dream-rsi/{session_id}/observations.json");
     let ts = super::state::now_ms() as i64;
     rotate_observations_if_full(session_id, &path, ts);
+    if recover_observations_tail(&path).is_none() {
+        return;
+    }
     let (prd_open_count, mutable_open_count) = super::instructions::open_row_counts();
     let record = ObservationRecord {
         dispatch_id: Some(dispatch_id.to_string()),
@@ -2683,7 +2711,7 @@ pub(super) fn handle(content: &str) -> (String, String, i32) {
 fn observations_for_result() -> Result<(Vec<ObservationRecord>, usize), String> {
     let session = session_id()?;
     let path = format!(".gm/dream-rsi/{session}/observations.json");
-    let raw = crate::pkfs::read_to_string(&path).unwrap_or_default();
+    let raw = recover_observations_tail(&path).unwrap_or_default();
     Ok(read_observations(&raw))
 }
 
