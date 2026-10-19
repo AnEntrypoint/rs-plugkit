@@ -4271,7 +4271,7 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
             json!(universe.git_untracked_files),
         );
     }
-    insert_nested_worktree_fields(&mut out, universe.git_nested_worktrees, universe.git_nested_untracked_failed);
+    insert_nested_worktree_fields(&mut out, universe.git_nested_worktrees, &universe.git_nested_failed_paths);
     if corpus_blind_spot {
         out.insert(
             "corpus_blind_spot".to_string(),
@@ -4908,19 +4908,27 @@ where
     out
 }
 
-fn insert_nested_worktree_fields(out: &mut serde_json::Map<String, Value>, nested_worktrees: usize, untracked_failed: bool) {
+fn insert_nested_worktree_fields(out: &mut serde_json::Map<String, Value>, nested_worktrees: usize, failed_paths: &[String]) {
+    let untracked_failed = !failed_paths.is_empty();
     if nested_worktrees == 0 && !untracked_failed {
         return;
     }
     out.insert("nested_worktrees".to_string(), json!(nested_worktrees));
     if untracked_failed {
         out.insert("nested_worktrees_unlisted".to_string(), json!(true));
+        let named = failed_paths.iter().take(NESTED_UNLISTED_PATHS_REPORT_CAP).map(String::as_str).collect::<Vec<_>>().join(", ");
         out.insert(
             "nested_worktrees_note".to_string(),
-            json!(crate::scan_universe::NESTED_WORKTREE_BLIND_SPOT_NOTE),
+            json!(format!("{}; unlisted nested worktree(s): {}", crate::scan_universe::NESTED_WORKTREE_BLIND_SPOT_NOTE, named)),
+        );
+        out.insert(
+            "nested_worktrees_unlisted_paths".to_string(),
+            json!(failed_paths.iter().take(NESTED_UNLISTED_PATHS_REPORT_CAP).collect::<Vec<_>>()),
         );
     }
 }
+
+const NESTED_UNLISTED_PATHS_REPORT_CAP: usize = 20;
 
 fn insert_excluded_by_rule(
     out: &mut serde_json::Map<String, Value>,
@@ -5945,7 +5953,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             json!(universe.git_untracked_files),
         );
     }
-    insert_nested_worktree_fields(&mut out, universe.git_nested_worktrees, universe.git_nested_untracked_failed);
+    insert_nested_worktree_fields(&mut out, universe.git_nested_worktrees, &universe.git_nested_failed_paths);
     if corpus_blind_spot {
         out.insert(
             "corpus_blind_spot".to_string(),
