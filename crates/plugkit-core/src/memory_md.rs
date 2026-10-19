@@ -174,6 +174,7 @@ fn remove_temps(chunk: &[(String, String)]) {
 }
 
 fn atomic_write(path: &str, content: &str) -> bool {
+    crate::dispatch_ledger::sweep_stale_tmp_beside(path, unsafe { crate::wasm_dispatch::host_now_ms() });
     let tmp = tmp_path_for(path);
     if !crate::wasm_dispatch::host_write(&tmp, content) {
         let _ = crate::wasm_dispatch::host_remove_file_never_directory(&tmp);
@@ -1191,6 +1192,7 @@ fn atomic_write_batch(files: &[(String, String)]) -> usize {
     }
     let mut pairs: Vec<(String, String)> = Vec::with_capacity(files.len());
     for (path, content) in files {
+        crate::dispatch_ledger::sweep_stale_tmp_beside(path, unsafe { crate::wasm_dispatch::host_now_ms() });
         let tmp = format!("{}.tmp-{}", path, pairs.len());
         if crate::wasm_dispatch::host_write(&tmp, content) {
             pairs.push((tmp, path.clone()));

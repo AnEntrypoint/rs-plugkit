@@ -40,14 +40,26 @@ fn spool_dir(cwd: &str) -> String {
 }
 
 fn sweep_stale_spool_tmp(cwd: &str, now: u64) {
-    let dir = spool_dir(cwd);
+    sweep_stale_tmp_entries(&spool_dir(cwd), now, |name| name.contains(SPOOL_TMP_MARKER));
+}
+
+pub fn sweep_stale_tmp_beside(path: &str, now: u64) {
+    let (dir, base) = match path.rfind(['/', '\\']) {
+        Some(at) => (&path[..at], &path[at + 1..]),
+        None => (".", path),
+    };
+    let prefix = format!("{base}{SPOOL_TMP_MARKER}");
+    sweep_stale_tmp_entries(dir, now, |name| name.starts_with(&prefix));
+}
+
+fn sweep_stale_tmp_entries(dir: &str, now: u64, owns: impl Fn(&str) -> bool) {
     let Value::Array(entries) =
         unpack_to_value_pub(unsafe { host_fs_readdir(dir.as_ptr(), dir.len() as u32) })
     else {
         return;
     };
     for name in entries.iter().filter_map(Value::as_str) {
-        if !name.contains(SPOOL_TMP_MARKER) {
+        if !owns(name) {
             continue;
         }
         let path = format!("{dir}/{name}");
