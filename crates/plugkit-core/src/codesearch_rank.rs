@@ -541,6 +541,14 @@ pub fn compact_dual(query: &str, raw: &Value, opts: &RankOptions) -> Value {
     if let Some(degraded) = raw.get("degraded").filter(|v| v.as_bool() == Some(true)) {
         out.insert("degraded".into(), degraded.clone());
     }
+    for key in ["guest_elapsed_ms", "stage_ms"] {
+        if let Some(value) = raw.get(key) {
+            out.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(embed_ms) = raw.get("stage_ms").and_then(|s| s.get("embed_query")) {
+        out.insert("embed_ms".into(), embed_ms.clone());
+    }
     Value::Object(out)
 }
 
