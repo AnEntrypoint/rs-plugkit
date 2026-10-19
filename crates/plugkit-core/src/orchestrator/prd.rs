@@ -2665,6 +2665,22 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         && witness_dispatch_id.is_none()
         && deviation_refuses("prd-resolve-unbound-witness")
     {
+        let row_store_for_lookup = row_store::Store::prd();
+        let folder_blocks = match row_store::read_blocks(&row_store_for_lookup) {
+            Ok(read) => read.blocks,
+            Err((message, code)) => return (String::new(), message, code),
+        };
+        let row_present = folder_blocks
+            .iter()
+            .filter_map(Value::as_mapping)
+            .any(|map| mapping_text(map, "id").as_deref() == Some(id_target.as_str()));
+        if !row_present {
+            return (
+                String::new(),
+                format!("prd-resolve refused: no PRD row {} in {}", id_target, row_store_for_lookup.dir),
+                1,
+            );
+        }
         let body = serde_json::json!({
             "error": format!(
                 "prd-resolve refused: witness for {} is unbound -- pass witness_dispatch_id, or all of witness_exit_code, witness_output_sha256, witness_output_path and witness_ts",
