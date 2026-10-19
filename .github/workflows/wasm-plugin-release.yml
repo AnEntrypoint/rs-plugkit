@@ -246,4 +246,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.publisher_token }}
         shell: bash
-        run: gh api repos/AnEntrypoint/gm/dispatches -f event_type=submodule-released || echo "::warning::gm dispatch failed; bump-pins will pick this up on its next schedule"
+        run: |
+          for attempt in 1 2 3; do
+            gh api repos/AnEntrypoint/gm/dispatches -f event_type=submodule-released && exit 0
+            sleep $((attempt * 10))
+          done
+          gh workflow run bump-pins.yml --repo AnEntrypoint/gm --ref main && exit 0
+          echo "::error::gm dispatch and bump-pins fallback both failed"
+          exit 1
