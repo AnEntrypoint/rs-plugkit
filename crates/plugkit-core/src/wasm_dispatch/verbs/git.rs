@@ -3612,6 +3612,18 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 .map(String::from)
                 .collect()
         };
+        let left_staged: Vec<String> = if add_all || paths.is_empty() {
+            Vec::new()
+        } else {
+            staged_before
+                .iter()
+                .filter(|p| !paths.iter().any(|r| pathspec_covers_path(r, p)))
+                .cloned()
+                .collect()
+        };
+        if !left_staged.is_empty() && !allow_whole_index {
+            return Ok(err_json("git_commit", unrequested_stage_refusal("git_commit", &paths, &left_staged)));
+        }
         if merge_pending && !add_all && paths.is_empty() && !allow_whole_index {
             let incoming: Vec<String> = git_step_replayed_by_call_order(
                 plan,
@@ -3902,6 +3914,9 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         }
         if !scan.waived.is_empty() {
             payload["dangling_waived"] = json!(scan.waived);
+        }
+        if !left_staged.is_empty() {
+            payload["staged_left_uncommitted"] = json!(left_staged);
         }
         if !allow_whole_index && !add_all && paths.is_empty() && !staged_before.is_empty() {
             payload["whole_index_commit"] = json!(true);
