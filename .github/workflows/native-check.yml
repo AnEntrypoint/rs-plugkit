@@ -54,7 +54,6 @@ jobs:
     name: unit tests (ubuntu-latest)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: default-features
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
@@ -62,6 +61,6 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7
         with:
-          key: native-check-default
+          key: native-check-unit
       - name: cargo test native host target, pure-logic unit tests
         run: cargo test -p rs-plugkit
