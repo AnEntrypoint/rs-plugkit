@@ -466,6 +466,23 @@ pub fn host_read(path: &str) -> Option<String> {
     }
 }
 
+pub fn host_read_via_exec(path: &str) -> Option<String> {
+    let target = serde_json::to_string(path).ok()?;
+    let code = format!(
+        "const fs=require('fs');const f={target};let t='';try{{t=fs.readFileSync(f,'utf8');}}catch(e){{if(e.code!=='ENOENT'){{process.stdout.write(JSON.stringify({{ok:false}}));process.exit(0);}}}}process.stdout.write(JSON.stringify({{ok:true,raw:t}}));"
+    );
+    let options = json!({ "timeoutMs": 15_000 }).to_string();
+    let packed = unsafe {
+        host_exec_js(code.as_ptr(), code.len() as u32, options.as_ptr(), options.len() as u32)
+    };
+    unpack_to_string(packed)
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|envelope| envelope.get("stdout").and_then(Value::as_str).map(str::to_string))
+        .and_then(|stdout| serde_json::from_str::<Value>(&stdout).ok())
+        .filter(|result| result.get("ok").and_then(Value::as_bool) == Some(true))
+        .map(|result| result.get("raw").and_then(Value::as_str).unwrap_or("").to_string())
+}
+
 pub fn host_write(path: &str, data: &str) -> bool {
     let rc = unsafe {
         host_fs_write(
