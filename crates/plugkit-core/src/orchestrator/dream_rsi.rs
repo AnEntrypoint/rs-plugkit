@@ -2710,7 +2710,7 @@ fn derive_part_b(
                 || walk
                     .verified_by
                     .as_deref()
-                    .map_or(true, |verifier| verifier == walk.session.as_str())
+                    .map_or(false, |verifier| verifier == walk.session.as_str())
         })
         .map(|walk| walk.node.as_str())
         .collect();
