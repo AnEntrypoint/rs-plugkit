@@ -71,9 +71,9 @@ pub(super) fn tree_staleness(body: &Value) -> Option<Value> {
         return None;
     }
     let note = if behind > 0 {
-        format!("checkout {dir} is {behind} commit(s) behind its upstream as of the last fetch, so these results miss symbols on the remote; git_pull, then re-run")
+        format!("checkout {dir} is {behind} commit(s) behind its upstream as of the last fetch, so these results miss symbols on the remote")
     } else {
-        format!("upstream of {dir} not fetched for over 24 h, so a behind count of 0 is unproven; git_pull to refresh")
+        format!("upstream of {dir} not fetched for over 24 h, so a behind count of 0 is unproven")
     };
     Some(json!({
         "behind": behind,
