@@ -60,6 +60,48 @@ pub(super) fn git_commit_dedup_record(key: &str, sha_full: &str, sha: &str, summ
     git_async_kv_put(GIT_COMMIT_DEDUP_NS, key, &record);
 }
 
+pub(super) const GIT_COMMIT_LOCK_NS: &str = "git_commit_lock";
+pub(super) const GIT_COMMIT_LOCK_TTL_MS: u64 = 120_000;
+pub(super) const GIT_COMMIT_LOCK_WAIT_MS: u64 = 15_000;
+pub(super) const GIT_COMMIT_LOCK_POLL_MS: u64 = 50;
+
+pub(super) fn git_commit_lock_key(cwd: Option<&str>) -> String {
+    format!("repo:{}", cwd.unwrap_or(""))
+}
+
+fn git_commit_lock_holder(key: &str) -> Option<(String, u64)> {
+    let raw = super::host_abi::host_kv_read(GIT_COMMIT_LOCK_NS, key)?;
+    let (holder, ts) = raw.rsplit_once('|')?;
+    Some((holder.to_string(), ts.parse::<u64>().ok()?))
+}
+
+pub(super) fn git_commit_lock_acquire(key: &str, owner: &str) -> bool {
+    let started = unsafe { host_now_ms() };
+    loop {
+        let now = unsafe { host_now_ms() };
+        let free = match git_commit_lock_holder(key) {
+            None => true,
+            Some((holder, ts)) => holder == owner || now.saturating_sub(ts) > GIT_COMMIT_LOCK_TTL_MS,
+        };
+        if free {
+            git_async_kv_put(GIT_COMMIT_LOCK_NS, key, &format!("{}|{}", owner, now));
+            return true;
+        }
+        if now.saturating_sub(started) >= GIT_COMMIT_LOCK_WAIT_MS {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(GIT_COMMIT_LOCK_POLL_MS));
+    }
+}
+
+pub(super) fn git_commit_lock_release(key: &str, owner: &str) {
+    if let Some((holder, _)) = git_commit_lock_holder(key) {
+        if holder == owner {
+            git_async_kv_delete(GIT_COMMIT_LOCK_NS, key);
+        }
+    }
+}
+
 fn git_session_commits_key() -> String {
     crate::wasm_dispatch::current_dispatch_session_id().unwrap_or_default()
 }
@@ -3643,11 +3685,23 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         let bundled_message = bundle_prd_commit_comments(message, &commit_notes);
         let identity = commit_identity(body);
         let commit_pathspec: Vec<String> = scoped_paths.iter().filter(|p| !index_removed_paths.contains(p)).cloned().collect();
+        let commit_lock = git_commit_lock_key(cwd);
+        if !git_commit_lock_acquire(&commit_lock, &plan.id) {
+            return Ok(err_json(
+                "git_commit",
+                json!({
+                    "error": "another git_commit to this repo held the per-repo commit lock past the wait budget; re-dispatch git_commit",
+                    "error_code": "commit_lock_timeout",
+                    "next_dispatch_hint": "git_commit",
+                }),
+            ));
+        }
         let r = git_step_replayed_by_call_order(
             plan,
             &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, &commit_pathspec, &identity)),
             cwd,
         )?;
+        git_commit_lock_release(&commit_lock, &plan.id);
         write_steps.push(r.clone());
         let prd_own_rows = own_rows_filter.as_ref().map(|f| f.own_rows.clone());
         if let Some(filter) = own_rows_filter.as_mut() {
@@ -3663,7 +3717,8 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 ));
             }
             if git_commit_failed_for_missing_identity(sout, serr) {
-                return Ok(err("git_commit", MISSING_COMMIT_IDENTITY));
+                let git_said = if serr.trim().is_empty() { sout.trim() } else { serr.trim() };
+                return Ok(err("git_commit", &format!("{} git said: {}", MISSING_COMMIT_IDENTITY, git_said)));
             }
             return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
         }
