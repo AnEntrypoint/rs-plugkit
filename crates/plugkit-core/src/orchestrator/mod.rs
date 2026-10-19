@@ -154,7 +154,7 @@ fn git_project_root_once() -> RootProbe {
 const RESOLVE_MAX_ATTEMPTS: u32 = 5;
 const RESOLVE_BACKOFF_BASE_MS: u64 = 20;
 
-fn sleep_ms(ms: u64) {
+pub(crate) fn sleep_ms(ms: u64) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         std::thread::sleep(std::time::Duration::from_millis(ms));

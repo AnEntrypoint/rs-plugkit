@@ -135,7 +135,7 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 - A failure backoff caps at `PROBE_BACKOFF_MAX_MS` (1 h).
 - A project whose checkout is behind a freshly recorded tip never probes; it materializes to that tip.
 - `IN_MEMORY_REMOTE_RECORDS` is the in-memory twin of the disk record; without it a failed disk write re-runs `git ls-remote` on every dispatch.
-- `global_remote_tip_with` adopts the lock holder's recorded answer and never sleeps; a forced caller that cannot hold the lock never learns the tip and never reports success.
+- `global_remote_tip_with` adopts the lock holder's recorded answer, polling it every `SHARED_PROBE_POLL_MS` (250 ms) for at most `SHARED_PROBE_WAIT_MS` (5 s) through `orchestrator::sleep_ms`; after that it returns `GlobalTip::Held(reason)`, a named timeout that serves the checkout without counting a failure. A forced caller that cannot hold the lock never learns the tip and never reports success.
 - `ensure_current` skips the debounce for a forced refresh and when the clock is not sane (last probe zero or in the future).
 - A recorded Skip sha equal to the checkout returns without probe or fetch; a different sha falls through to materialize.
 
