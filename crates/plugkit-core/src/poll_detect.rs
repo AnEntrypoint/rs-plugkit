@@ -13,14 +13,8 @@ fn log_warn(msg: &str) {
     }
 }
 
-fn home_dir() -> String {
-    if let Ok(s) = std::env::var("HOME") {
-        return s;
-    }
-    if let Ok(s) = std::env::var("USERPROFILE") {
-        return s;
-    }
-    ".".to_string()
+fn home_dir() -> Option<String> {
+    std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()
 }
 
 fn ms_to_ymd(ms: u64) -> (i64, u32, u32) {
@@ -330,9 +324,13 @@ pub fn scan_turn_entry(_cwd: &str) {
         return;
     }
 
+    let Some(home) = home_dir() else {
+        log_warn("poll_detect: HOME and USERPROFILE unset; turn scan skipped");
+        return;
+    };
     let date = today_str(now);
-    let primary = format!("{}/.gm-log/{}/hook.jsonl", home_dir(), date);
-    let fallback = format!("{}/.claude/gm-log/{}/hook.jsonl", home_dir(), date);
+    let primary = format!("{}/.gm-log/{}/hook.jsonl", home, date);
+    let fallback = format!("{}/.claude/gm-log/{}/hook.jsonl", home, date);
     let content = match host_read(&primary).or_else(|| host_read(&fallback)) {
         Some(s) => s,
         None => {
