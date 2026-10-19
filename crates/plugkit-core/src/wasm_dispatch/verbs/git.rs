@@ -1200,6 +1200,7 @@ fn bin_drift_check_js(base: &str, repo: &str, rev: &str, include: &[String], fro
         else fs.copyFileSync(from, to);
       }} else fs.rmSync(to, {{ force: true }});
     }}
+    fs.rmSync(path.join(head, 'node_modules'), {{ recursive: true, force: true }});
     fs.symlinkSync(path.join(repoDir, 'node_modules'), path.join(head, 'node_modules'), 'junction');
     const env = {{ ...process.env, GM_MCP_BUILD_INCLUDE: include.join(',') }};
     const r = cp.spawnSync(process.execPath, [path.join(head, 'scripts', 'check-bin-drift.mjs')], {{ cwd: head, env, encoding: 'utf8', windowsHide: true, timeout: 120000 }});
