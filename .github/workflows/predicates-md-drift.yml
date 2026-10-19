@@ -5,10 +5,16 @@ on:
   push:
     branches: [main]
     paths:
-      - "crates/plugkit-core/src/orchestrator/predicate_registry.rs"
+      - ".github/workflows/predicates-md-drift.yml"
+      - "crates/plugkit-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
   pull_request:
     paths:
-      - "crates/plugkit-core/src/orchestrator/predicate_registry.rs"
+      - ".github/workflows/predicates-md-drift.yml"
+      - "crates/plugkit-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
 
 jobs:
   check-drift:
@@ -20,6 +26,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: AnEntrypoint/gm-config
+          ref: main
           path: gm-config
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
         with:
