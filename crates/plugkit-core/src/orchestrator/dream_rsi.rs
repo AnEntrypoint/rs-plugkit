@@ -1495,7 +1495,7 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         gate_id: gate_id.map(str::to_owned),
         predicate: predicate.map(str::to_owned),
         first_error_line: first_error_line.map(str::to_owned),
-        prd_open_count: Some(prd_open_count),
+        prd_open_count,
         mutable_open_count: Some(mutable_open_count),
         quality: Some(outcome_score(exit_code, failure.no_match(), output_bytes)),
         ts: Some(ts),
