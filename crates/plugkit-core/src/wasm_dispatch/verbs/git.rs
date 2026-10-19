@@ -3723,13 +3723,18 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                         pathspec_matches_nothing_refusal("git_commit", &paths, &unmatched),
                     ));
                 }
+                let scoped_serr = scoped_r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+                let scoped_sout = scoped_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+                let git_said = if scoped_serr.trim().is_empty() { scoped_sout.trim() } else { scoped_serr.trim() };
+                let git_clause = if git_said.is_empty() { String::new() } else { format!("; git said: {}", git_said) };
                 return Ok(err_json(
                     "git_commit",
                     json!({
-                        "error": format!("nothing to commit in the requested pathspec(s): {} -- the whole repo has other dirty paths, so this refusal is scoped to what you named", paths.join(", ")),
+                        "error": format!("nothing to commit in the requested pathspec(s): {} -- the whole repo has other dirty paths, so this refusal is scoped to what you named{}", paths.join(", "), git_clause),
                         "error_code": "nothing_to_commit_for_paths",
                         "requested_paths": paths,
                         "next_dispatch": "git_commit",
+                        "git_stderr": scoped_serr.trim(),
                     }),
                 ));
             }
