@@ -7881,8 +7881,12 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or(sha)
-    } else {
+    } else if is_full_sha(&sha) {
         sha
+    } else {
+        ci_status_resolve_sha(body, body_cwd(body))
+            .map(|resolution| resolution.sha)
+            .map_err(unpack_to_value)?
     };
     let parsed = ci_status_gh_api_json_retrying_timeout(&format!(
         "repos/{}/actions/runs?head_sha={}&per_page=20",
