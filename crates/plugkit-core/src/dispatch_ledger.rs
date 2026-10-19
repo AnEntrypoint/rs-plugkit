@@ -206,6 +206,22 @@ fn ledger_unavailable(path: &str) -> String {
     )
 }
 
+pub fn read_entries(cwd: &str) -> Result<Vec<Value>, String> {
+    let path = ledger_path(cwd);
+    let raw = match host_read(&path) {
+        Some(text) => text,
+        None if host_stat(&path).is_none() => return Ok(vec![]),
+        None => return Err(ledger_unavailable(&path)),
+    };
+    if raw.trim().is_empty() {
+        return Ok(vec![]);
+    }
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Array(a)) => Ok(a),
+        _ => Err(ledger_unavailable(&path)),
+    }
+}
+
 fn new_dispatch_id(verb: &str, fingerprint: &str, ts: u64, seq: u64) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -244,14 +260,10 @@ pub fn subagent_running_count(
     parent_session: &str,
     now_ms: u64,
     window_ms: u64,
-) -> usize {
+) -> Result<usize, String> {
     let prefix = format!("{}-", parent_session);
     let since_ms = now_ms.saturating_sub(window_ms);
-    let raw = host_read(&ledger_path(cwd)).unwrap_or_default();
-    serde_json::from_str::<Value>(&raw)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
+    Ok(read_entries(cwd)?
         .iter()
         .filter(|e| {
             e.get("session_id")
@@ -259,16 +271,16 @@ pub fn subagent_running_count(
                 .is_some_and(|s| s.starts_with(&prefix) && s.contains("-sub"))
                 && e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0) >= since_ms
         })
-        .count()
+        .count())
 }
 
-pub fn subagent_dispatches_since(cwd: &str, parent_session: &str, since_ms: u64) -> usize {
+pub fn subagent_dispatches_since(
+    cwd: &str,
+    parent_session: &str,
+    since_ms: u64,
+) -> Result<usize, String> {
     let prefix = format!("{}-", parent_session);
-    let raw = host_read(&ledger_path(cwd)).unwrap_or_default();
-    serde_json::from_str::<Value>(&raw)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
+    Ok(read_entries(cwd)?
         .iter()
         .filter(|e| {
             e.get("session_id")
@@ -276,24 +288,16 @@ pub fn subagent_dispatches_since(cwd: &str, parent_session: &str, since_ms: u64)
                 .is_some_and(|s| s.starts_with(&prefix))
                 && e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0) >= since_ms
         })
-        .count()
+        .count())
 }
 
-pub fn lookup(cwd: &str, dispatch_id: &str) -> Option<Value> {
-    let path = ledger_path(cwd);
-    let raw = host_read(&path).unwrap_or_default();
-    if raw.trim().is_empty() {
-        return None;
-    }
-    let list = match serde_json::from_str::<Value>(&raw) {
-        Ok(Value::Array(a)) => a,
-        _ => return None,
-    };
-    list.into_iter()
-        .find(|e| e.get("dispatch_id").and_then(|v| v.as_str()) == Some(dispatch_id))
+pub fn lookup(cwd: &str, dispatch_id: &str) -> Result<Option<Value>, String> {
+    Ok(read_entries(cwd)?
+        .into_iter()
+        .find(|e| e.get("dispatch_id").and_then(|v| v.as_str()) == Some(dispatch_id)))
 }
 
-pub fn submodule_holding(cwd: &str, dispatch_id: &str) -> Option<String> {
+pub fn submodule_holding(cwd: &str, dispatch_id: &str) -> Result<Option<String>, String> {
     let project = if cwd.is_empty() {
         crate::wasm_dispatch::host_cwd_string().unwrap_or_default()
     } else {
@@ -317,21 +321,19 @@ pub fn submodule_holding(cwd: &str, dispatch_id: &str) -> Option<String> {
             std::iter::once(sub.clone()).chain(crate::scan_universe::nested_worktree_dirs(sub))
         })
         .chain(crate::scan_universe::nested_worktree_dirs(root));
-    candidates
-        .into_iter()
-        .find(|sub_cwd| lookup(sub_cwd, dispatch_id).is_some())
-        .map(|sub_cwd| ledger_path(&sub_cwd))
+    for sub_cwd in candidates {
+        if lookup(&sub_cwd, dispatch_id)?.is_some() {
+            return Ok(Some(ledger_path(&sub_cwd)));
+        }
+    }
+    Ok(None)
 }
 
-pub fn window(cwd: &str) -> Option<(usize, u64)> {
-    let raw = host_read(&ledger_path(cwd))?;
-    let list = match serde_json::from_str::<Value>(&raw) {
-        Ok(Value::Array(a)) => a,
-        _ => return None,
-    };
+pub fn window(cwd: &str) -> Result<Option<(usize, u64)>, String> {
+    let list = read_entries(cwd)?;
     let oldest = list
         .iter()
         .filter_map(|e| e.get("ts").and_then(|v| v.as_u64()))
-        .min()?;
-    Some((list.len(), oldest))
+        .min();
+    Ok(oldest.map(|oldest| (list.len(), oldest)))
 }

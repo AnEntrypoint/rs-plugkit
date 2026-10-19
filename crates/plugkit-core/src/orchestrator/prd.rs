@@ -1387,6 +1387,23 @@ fn spool_out_completed_ms(out_dir: &str, name: &str) -> Option<u64> {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[cfg(target_arch = "wasm32")]
+fn ledger_unreadable_refusal(cwd: &str, detail: &str) -> (String, String, i32) {
+    let searched = crate::dispatch_ledger::ledger_path(cwd);
+    let message = format!(
+        "prd-resolve refused: the dispatch ledger {} cannot be read ({}); a witness cannot be verified against it until the ledger is repaired",
+        searched, detail
+    );
+    let body = serde_json::json!({
+        "error": message,
+        "ledger_searched": searched,
+        "deviation_kind": "prd-resolve-ledger-unreadable",
+        "deviation_severity": "deny",
+    })
+    .to_string();
+    (body, message, 1)
+}
+
 pub fn dispatch_in_spool_out(cwd: &str, dispatch_id: &str) -> bool {
     let Some(id_ts) = dispatch_id
         .split('-')
@@ -2497,30 +2514,39 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     #[cfg(target_arch = "wasm32")]
     let (dispatch_verified, evidence_in_ledger, bound_in_project, verified_via) = {
         let cwd = resolve_cwd.as_deref().unwrap_or("");
-        let known_via = |dispatch_id: &str| -> Option<&'static str> {
-            if crate::dispatch_ledger::lookup(cwd, dispatch_id).is_some() {
-                Some("ledger")
+        let known_via = |dispatch_id: &str| -> Result<Option<&'static str>, String> {
+            if crate::dispatch_ledger::lookup(cwd, dispatch_id)?.is_some() {
+                Ok(Some("ledger"))
             } else if dispatch_in_spool_out(cwd, dispatch_id) {
-                Some("spool_out")
-            } else if crate::dispatch_ledger::submodule_holding(cwd, dispatch_id).is_some() {
-                Some("nested_ledger")
+                Ok(Some("spool_out"))
+            } else if crate::dispatch_ledger::submodule_holding(cwd, dispatch_id)?.is_some() {
+                Ok(Some("nested_ledger"))
             } else {
-                None
+                Ok(None)
             }
         };
-        let evidence_in_ledger = evidence_dispatch_id
-            .as_deref()
-            .map(|id| known_via(id).is_some());
+        let evidence_in_ledger = match evidence_dispatch_id.as_deref() {
+            None => None,
+            Some(id) => match known_via(id) {
+                Ok(via) => Some(via.is_some()),
+                Err(e) => return ledger_unreadable_refusal(cwd, &e),
+            },
+        };
         let dispatch_verified = match witness_dispatch_id.as_deref() {
             None => false,
-            Some(dispatch_id) if known_via(dispatch_id).is_some() => true,
-            Some(_) if witness_binding.is_some() => false,
-            Some(dispatch_id) => {
+            Some(dispatch_id) => match known_via(dispatch_id) {
+                Err(e) => return ledger_unreadable_refusal(cwd, &e),
+                Ok(Some(_)) => true,
+                Ok(None) if witness_binding.is_some() => false,
+                Ok(None) => {
                 let id_ts = dispatch_id
                     .split('-')
                     .next()
                     .and_then(|s| s.parse::<u64>().ok());
-                let window = crate::dispatch_ledger::window(cwd);
+                let window = match crate::dispatch_ledger::window(cwd) {
+                    Ok(w) => w,
+                    Err(e) => return ledger_unreadable_refusal(cwd, &e),
+                };
                 let aged_out = matches!(
                     window,
                     Some((len, oldest))
@@ -2576,11 +2602,16 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                         1,
                     );
                 }
-            }
+                }
+            },
         };
-        let bound_in_project = witness_dispatch_id
-            .as_deref()
-            .map(|id| known_via(id).is_some());
+        let bound_in_project = match witness_dispatch_id.as_deref() {
+            None => None,
+            Some(id) => match known_via(id) {
+                Ok(via) => Some(via.is_some()),
+                Err(e) => return ledger_unreadable_refusal(cwd, &e),
+            },
+        };
         let verified_via = match (dispatch_verified, bound_in_project) {
             (true, Some(true)) => witness_dispatch_id.as_deref().and_then(known_via),
             (true, _) => Some("spool_out"),
@@ -2760,6 +2791,8 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 resolve_cwd.as_deref().unwrap_or(""),
                 dispatch_id,
             )
+            .ok()
+            .flatten()
             .and_then(|entry| entry.get("session_id")?.as_str().map(str::to_string));
             let row_session = existing_blocks
                 .iter()

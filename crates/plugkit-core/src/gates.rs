@@ -360,11 +360,16 @@ fn check_fanout_missed(to: &str, body: &Value) {
         .parse()
         .unwrap_or(0);
     let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
-    if crate::dispatch_ledger::subagent_dispatches_since(&cwd, parent, since_ms) == 0 {
-        log_deviation(
+    match crate::dispatch_ledger::subagent_dispatches_since(&cwd, parent, since_ms) {
+        Ok(0) => log_deviation(
             "fanout-missed",
             &format!("node={} parent_session={} since_ms={}", to, parent, since_ms),
-        );
+        ),
+        Ok(_) => {}
+        Err(e) => log_deviation(
+            "fanout-ledger-unreadable",
+            &format!("node={} parent_session={} error={}", to, parent, e),
+        ),
     }
 }
 
@@ -376,9 +381,23 @@ fn concurrency_refusal_at_complete(body: &Value, open_rows: usize) -> Option<Str
         .filter(|s| !s.is_empty());
     let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
     let now = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let running = parent.map_or(0, |p| {
-        crate::dispatch_ledger::subagent_running_count(&cwd, p, now, policy.concurrency_window_ms)
-    });
+    let running = match parent {
+        None => 0,
+        Some(p) => match crate::dispatch_ledger::subagent_running_count(
+            &cwd,
+            p,
+            now,
+            policy.concurrency_window_ms,
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                return Some(format!(
+                    "concurrency-ledger-unreadable: the running subagent count cannot be read ({}); COMPLETE is refused until the dispatch ledger is repaired.",
+                    e
+                ))
+            }
+        },
+    };
     let shortfall = open_rows.saturating_sub(running);
     if shortfall == 0 {
         return None;

@@ -40,23 +40,23 @@ fn head_sha() -> String {
 pub fn write() -> Value {
     let ledger_raw = host_read(LEDGER_PATH).unwrap_or_default();
     let ledger_hash = format!("{:016x}", crate::hash::fnv1a64(ledger_raw.as_bytes()));
-    let dispatch_count = serde_json::from_str::<Value>(&ledger_raw)
-        .ok()
-        .and_then(|v| v.as_array().map(|a| a.len()))
-        .unwrap_or(0);
-    let last_dispatch_id = serde_json::from_str::<Value>(&ledger_raw)
-        .ok()
-        .and_then(|v| v.as_array().and_then(|a| a.last().cloned()))
-        .and_then(|e| {
-            e.get("dispatch_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_default();
+    let (dispatch_count, last_dispatch_id, ledger_error) =
+        match crate::dispatch_ledger::read_entries("") {
+            Ok(list) => (
+                json!(list.len()),
+                list.last()
+                    .and_then(|e| e.get("dispatch_id").and_then(|v| v.as_str()))
+                    .unwrap_or_default()
+                    .to_string(),
+                Value::Null,
+            ),
+            Err(e) => (Value::Null, String::new(), json!(e)),
+        };
     let receipt = json!({
         "completed_prd_ids": completed_prd_ids(),
         "dispatch_count": dispatch_count,
         "last_dispatch_id": last_dispatch_id,
+        "ledger_error": ledger_error,
         "ledger_hash": ledger_hash,
         "ledger_hash_algo": "fnv1a64",
         "head_sha": head_sha(),
