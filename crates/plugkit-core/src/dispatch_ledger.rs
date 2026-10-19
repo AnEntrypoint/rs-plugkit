@@ -63,6 +63,28 @@ pub fn sweep_stale_tmp_under(path: &str, family: &str, now: u64) {
     });
 }
 
+pub fn prune_published_under(path: &str, family: &str, keep: usize) {
+    let (dir, _) = split_dir_and_name(path);
+    let Value::Array(entries) =
+        unpack_to_value_pub(unsafe { host_fs_readdir(dir.as_ptr(), dir.len() as u32) })
+    else {
+        return;
+    };
+    let mut published: Vec<(u64, u64, &str)> = entries
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|name| {
+            let stem = name.strip_prefix(family)?.strip_suffix(".json")?;
+            let (ms, seq) = stem.split_once('-')?;
+            Some((ms.parse().ok()?, seq.parse().ok()?, name))
+        })
+        .collect();
+    published.sort_unstable_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+    for (_, _, name) in published.into_iter().skip(keep) {
+        host_remove_file_never_directory(&format!("{dir}/{name}"));
+    }
+}
+
 fn sweep_stale_tmp_entries(dir: &str, now: u64, owns: impl Fn(&str) -> bool) {
     let Value::Array(entries) =
         unpack_to_value_pub(unsafe { host_fs_readdir(dir.as_ptr(), dir.len() as u32) })

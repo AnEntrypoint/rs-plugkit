@@ -4334,6 +4334,8 @@ const LITERAL_SCAN_MINIFIED_LINE_BYTES: usize = 300;
 const LITERAL_SCAN_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 const INLINE_CODESEARCH_MATCH_LIMIT: usize = 100;
+const CODESEARCH_ARTIFACT_FAMILY: &str = "codesearch-result-";
+const CODESEARCH_ARTIFACT_RETENTION: usize = 50;
 static CODESEARCH_ARTIFACT_SEQUENCE: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -4390,6 +4392,11 @@ fn publish_codesearch_artifact(
         .get("sha256")
         .and_then(Value::as_str)
         .ok_or("artifact digest unavailable")?;
+    crate::dispatch_ledger::prune_published_under(
+        &artifact_path,
+        CODESEARCH_ARTIFACT_FAMILY,
+        CODESEARCH_ARTIFACT_RETENTION,
+    );
     Ok(json!({ "path": relative_path, "sha256": sha256, "match_count": matches.len() }))
 }
 
