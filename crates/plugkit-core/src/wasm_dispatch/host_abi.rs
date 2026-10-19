@@ -454,29 +454,76 @@ pub fn host_cwd_string() -> Option<String> {
 
 pub fn host_allow_root(root: &str) -> bool {
     let rc = unsafe { host_fs_allow_root(root.as_ptr(), root.len() as u32) };
-    rc != 0 || is_installed_package_root(root)
+    rc != 0 || granted_installed_root(root)
 }
 
-fn is_installed_package_root(root: &str) -> bool {
-    let normalized = root.trim().replace('\\', "/");
+fn granted_installed_root(path: &str) -> bool {
+    is_installed_package_root(path, host_cwd_string().as_deref())
+}
+
+fn normalize_absolute_path(raw: &str) -> Option<String> {
+    let normalized = raw.trim().replace('\\', "/");
     let trimmed = normalized.trim_end_matches('/');
     let absolute = trimmed.starts_with('/') || trimmed.as_bytes().get(1) == Some(&b':');
-    if !absolute {
+    if !absolute || trimmed.split('/').any(|s| s == "." || s == "..") {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn path_is_within(path: &str, root: &str) -> bool {
+    let bytes = path.as_bytes();
+    let root_bytes = root.as_bytes();
+    bytes.len() >= root_bytes.len()
+        && bytes[..root_bytes.len()].eq_ignore_ascii_case(root_bytes)
+        && (bytes.len() == root_bytes.len() || bytes[root_bytes.len()] == b'/')
+}
+
+fn segments_end_with_ci(segments: &[&str], tail: &[&str]) -> bool {
+    segments.len() >= tail.len()
+        && segments[segments.len() - tail.len()..]
+            .iter()
+            .zip(tail)
+            .all(|(segment, expected)| segment.eq_ignore_ascii_case(expected))
+}
+
+fn is_global_lib_prefix(prefix: &[&str]) -> bool {
+    match prefix {
+        ["usr"] | ["usr", "local"] | ["opt", "homebrew"] => true,
+        ["opt", node] => node.starts_with("node-"),
+        _ => prefix
+            .split_last()
+            .is_some_and(|(_, parent)| segments_end_with_ci(parent, &[".nvm", "versions", "node"])),
+    }
+}
+
+fn is_global_windows_dir(dir: &[&str]) -> bool {
+    segments_end_with_ci(dir, &["AppData", "Roaming", "npm"])
+        || segments_end_with_ci(dir, &["Program Files", "nodejs"])
+        || segments_end_with_ci(dir, &["Program Files (x86)", "nodejs"])
+}
+
+fn is_installed_package_root(root: &str, project: Option<&str>) -> bool {
+    let Some(path) = normalize_absolute_path(root) else {
+        return false;
+    };
+    if project
+        .and_then(normalize_absolute_path)
+        .is_some_and(|project_root| path_is_within(&path, &project_root))
+    {
         return false;
     }
-    let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
-    if segments.iter().any(|s| *s == "." || *s == "..") {
-        return false;
-    }
-    let global_lib = segments
-        .windows(2)
-        .any(|w| w[0] == "lib" && w[1] == "node_modules");
-    let windows_global = segments.windows(3).any(|w| {
-        w[0].eq_ignore_ascii_case("roaming")
-            && w[1].eq_ignore_ascii_case("npm")
-            && w[2] == "node_modules"
-    });
-    global_lib || windows_global
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    segments.iter().enumerate().any(|(i, segment)| {
+        if *segment != "node_modules" {
+            return false;
+        }
+        let parent = &segments[..i];
+        let under_global_lib = parent
+            .split_last()
+            .is_some_and(|(last, prefix)| *last == "lib" && is_global_lib_prefix(prefix));
+        under_global_lib || is_global_windows_dir(parent)
+    })
 }
 
 pub fn host_read(path: &str) -> Option<String> {
@@ -489,7 +536,7 @@ pub fn host_read(path: &str) -> Option<String> {
 }
 
 pub fn host_read_via_exec(path: &str) -> Option<String> {
-    if !is_installed_package_root(path) {
+    if !granted_installed_root(path) {
         return None;
     }
     let target = serde_json::to_string(path).ok()?;
@@ -501,7 +548,7 @@ pub fn host_read_via_exec(path: &str) -> Option<String> {
 }
 
 pub fn host_readdir_via_exec(path: &str) -> Option<Vec<Value>> {
-    if !is_installed_package_root(path) {
+    if !granted_installed_root(path) {
         return None;
     }
     let target = serde_json::to_string(path).ok()?;
@@ -521,7 +568,7 @@ pub fn host_readdir(path: &str) -> Option<Vec<Value>> {
 }
 
 fn host_stat_via_exec(path: &str) -> Option<Value> {
-    if !is_installed_package_root(path) {
+    if !granted_installed_root(path) {
         return None;
     }
     let target = serde_json::to_string(path).ok()?;
