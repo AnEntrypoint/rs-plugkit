@@ -712,6 +712,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         "truncated": truncated,
         "brief": !want_full,
         "full": want_full,
+        "hint": "pass {\"id\":\"<row id>\"} for one row in full (repeated ids fold to the last); {\"status\":\"pending\"} to filter; {\"status\":\"pending\",\"limit\":<n>} to cap; {\"status\":\"all\",\"limit\":<n>,\"offset\":<n>} to page (next_offset null when done); {\"full\":true} for every full body. .gm/prd/ holds open work only; resolved rows are in .gm/prd-log.jsonl.",
     });
     if truncated {
         reply["hint"] = serde_json::json!("more rows: repeat with offset set to next_offset");
@@ -878,7 +879,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                 "hint": "Pass `id` in prd-add body. No usable text in any of id/slug/prd_id or subject/title/name/task/goal/description/notes -- every one was empty or unslugifiable, so the row was REJECTED. An item-<ms> fallback cannot be referenced by intent in prd-resolve, so it is never admitted. Pass `id` directly, or put the intent in any of subject/title/name/task/goal/description so slug derivation succeeds.",
             }),
         );
-        let err = "PRD item rejected: no usable `id` and no slugifiable text in subject/title/name/task/goal/description/notes. A referenceable handle is mandatory -- every later prd-resolve / recall names the row by id. Pass `id` directly (kebab-case slug derived from intent) or provide a meaningful subject/title/description. Auto `item-<ms>` ids are not admitted because they cannot be referenced by intent.";
+        let err = "PRD item rejected: no usable `id` and no slugifiable text in subject/title/name/task/goal/description/notes. A referenceable handle is mandatory -- every later prd-resolve / recall names the row by id. Pass `id` directly (kebab-case slug derived from intent) or provide a meaningful subject/title/description. Auto `item-<ms>` ids are not admitted because they cannot be referenced by intent. Flat example: prd-add needs {\"id\":\"<kebab-case-slug>\",\"subject\":\"<one-line intent>\",\"description\":\"<what to change and why>\"}, with every field at the top level of the body, not under a nested key.";
         return (String::new(), err.to_string(), 1);
     }
     let id = provided_id
@@ -2380,6 +2381,13 @@ fn prune_receipts(id: &str) {
     }
 }
 
+fn scratch_witness_root(root: &str) -> Option<String> {
+    let root = root.trim().trim_end_matches('/');
+    let inside_tmp = root.strip_prefix("/config/tmp/").is_some_and(|rest| !rest.is_empty());
+    let escapes = root.split('/').any(|segment| segment == "..");
+    (inside_tmp && !escapes).then(|| root.to_string())
+}
+
 pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -2393,6 +2401,9 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let resolution = parsed.5.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
     let commit_sha = parsed.6.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let requested_status = parsed.7.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let scratch_root = serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|v| v.get("witness_root").and_then(|s| s.as_str()).and_then(scratch_witness_root));
     if let Some(sha) = commit_sha.as_deref() {
         if !(7..=40).contains(&sha.len()) || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
             let body = serde_json::json!({
@@ -2548,16 +2559,29 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     #[cfg(target_arch = "wasm32")]
     let (dispatch_verified, evidence_in_ledger, bound_in_project, verified_via) = {
         let cwd = resolve_cwd.as_deref().unwrap_or("");
+        let host_root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
         let known_via = |dispatch_id: &str| -> Result<Option<&'static str>, String> {
-            if crate::dispatch_ledger::lookup(cwd, dispatch_id)?.is_some() {
-                Ok(Some("ledger"))
-            } else if dispatch_in_spool_out(cwd, dispatch_id) {
-                Ok(Some("spool_out"))
-            } else if crate::dispatch_ledger::submodule_holding(cwd, dispatch_id)?.is_some() {
-                Ok(Some("nested_ledger"))
-            } else {
-                Ok(None)
+            let mut roots: Vec<&str> = vec![cwd];
+            if !host_root.is_empty() && host_root.as_str() != cwd {
+                roots.push(host_root.as_str());
             }
+            for root in roots {
+                if crate::dispatch_ledger::lookup(root, dispatch_id)?.is_some() {
+                    return Ok(Some("ledger"));
+                }
+                if dispatch_in_spool_out(root, dispatch_id) {
+                    return Ok(Some("spool_out"));
+                }
+                if crate::dispatch_ledger::submodule_holding(root, dispatch_id)?.is_some() {
+                    return Ok(Some("nested_ledger"));
+                }
+            }
+            if let Some(scratch) = scratch_root.as_deref() {
+                if crate::dispatch_ledger::lookup_outside_root(scratch, dispatch_id)?.is_some() {
+                    return Ok(Some("scratch_ledger"));
+                }
+            }
+            Ok(None)
         };
         let evidence_in_ledger = match evidence_dispatch_id.as_deref() {
             None => None,
@@ -2596,10 +2620,15 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                     false
                 } else {
                     let searched = crate::dispatch_ledger::ledger_path(cwd);
+                    let expected_root = if cwd.is_empty() {
+                        crate::wasm_dispatch::host_cwd_string().unwrap_or_default()
+                    } else {
+                        cwd.to_string()
+                    };
                     let (reason, hint): (&str, String) = if aged_out {
                         ("aged_out", "the ledger keeps only the most recent ledger_retained_entries dispatches of a project; this id is older than its oldest retained entry, so the dispatch ran but aged out of the window. Bind the witness instead: witness_exit_code 0, witness_output_sha256, witness_output_path and witness_ts do not depend on the ledger.".to_string())
                     } else {
-                        ("not_recorded", format!("no dispatch with this id is in the searched ledger {searched} and the id is not older than the ledger's oldest entry, so the cwd may be another project or the id may be invented. Pass the dispatch_id copied from the response of the dispatch that produced the evidence, or bind the witness with witness_exit_code, witness_output_sha256, witness_output_path and witness_ts."))
+                        ("not_recorded", format!("no dispatch with this id is in the ledger {searched}, and the id is not older than the ledger's oldest entry. The expected repo root is {expected_root}: the directory that holds .gm/exec-spool/.dispatch-ledger.json. A parent of the repo holds no such ledger, so pass the repo root as witness_root, or pass the dispatch_id copied from the response of the dispatch that produced the evidence, or bind the witness with witness_exit_code, witness_output_sha256, witness_output_path and witness_ts."))
                     };
                     let body = serde_json::json!({
                         "error": format!(
@@ -2607,6 +2636,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                             dispatch_id, searched, reason
                         ),
                         "ledger_searched": searched,
+                        "expected_root": expected_root,
                         "deviation_kind": kind,
                         "deviation_severity": "deny",
                         "prd_id": id_target,
@@ -2837,13 +2867,13 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     #[cfg(target_arch = "wasm32")]
     if !annotate_only && deviation_refuses("prd-resolve-self-witness") {
         if let Some(dispatch_id) = witness_dispatch_id.as_deref() {
-            let dispatch_session = crate::dispatch_ledger::lookup(
-                resolve_cwd.as_deref().unwrap_or(""),
-                dispatch_id,
-            )
-            .ok()
-            .flatten()
-            .and_then(|entry| entry.get("session_id")?.as_str().map(str::to_string));
+            let cwd = resolve_cwd.as_deref().unwrap_or("");
+            let dispatch_session = crate::dispatch_ledger::lookup(cwd, dispatch_id)
+                .ok()
+                .flatten()
+                .and_then(|entry| entry.get("session_id")?.as_str().map(str::to_string));
+            let resolving_session = body_session_id(&request_object(trimmed))
+                .or_else(crate::orchestrator::state::dispatch_session_id);
             let row_session = existing_blocks
                 .iter()
                 .filter_map(|item| item.as_mapping())
@@ -2854,30 +2884,57 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 .and_then(|map| map.get(&Value::String("session_id".to_string())))
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            if let (Some(dispatch_session), Some(row_session)) = (dispatch_session, row_session) {
-                if dispatch_session == row_session {
-                    let body = serde_json::json!({
-                        "error": format!(
-                            "prd-resolve refused: witness_dispatch_id {} was produced by session {}, the executor session of {} -- a row cannot be witnessed by the session that executed it",
-                            dispatch_id, row_session, id_target
-                        ),
-                        "deviation_kind": "prd-resolve-self-witness",
-                        "deviation_severity": "deny",
-                        "prd_id": id_target,
-                        "field": "witness_dispatch_id",
-                        "witness_dispatch_id": dispatch_id,
-                        "executor_session": row_session,
-                        "dispatch_session": dispatch_session,
-                        "next_verb": "prd-witness-request",
-                        "hint": "The witness must be a live run dispatched under a different session than the row's executor. Dispatch prd-witness-request {id} to record the request and receive a verifier brief, run the witness from that verifier session, and resolve with its dispatch id.",
-                    })
-                    .to_string();
-                    return (
-                        body,
-                        format!("prd-resolve refused: self-witness for {}", id_target),
-                        1,
-                    );
-                }
+            let self_witness = dispatch_session.as_deref().is_some_and(|ds| {
+                resolving_session.as_deref() == Some(ds) || row_session.as_deref() == Some(ds)
+            });
+            let unattributed = dispatch_session.is_none()
+                && (dispatch_in_spool_out(cwd, dispatch_id)
+                    || crate::dispatch_ledger::submodule_holding(cwd, dispatch_id)
+                        .ok()
+                        .flatten()
+                        .is_some());
+            let refusal = if self_witness {
+                Some((
+                    "self_witness",
+                    format!(
+                        "prd-resolve refused: witness_dispatch_id {} was produced by session {}, the session resolving {} or its executor session -- a row cannot be witnessed by the session that resolves or executed it",
+                        dispatch_id,
+                        dispatch_session.as_deref().unwrap_or_default(),
+                        id_target
+                    ),
+                ))
+            } else if unattributed {
+                Some((
+                    "unattributed",
+                    format!(
+                        "prd-resolve refused: witness_dispatch_id {} has no session recorded in the dispatch ledger, so it cannot be shown to come from a session other than the one resolving {}",
+                        dispatch_id, id_target
+                    ),
+                ))
+            } else {
+                None
+            };
+            if let Some((reason, error)) = refusal {
+                let body = serde_json::json!({
+                    "error": error,
+                    "deviation_kind": "prd-resolve-self-witness",
+                    "deviation_severity": "deny",
+                    "prd_id": id_target,
+                    "field": "witness_dispatch_id",
+                    "reason": reason,
+                    "witness_dispatch_id": dispatch_id,
+                    "dispatch_session": dispatch_session,
+                    "executor_session": row_session,
+                    "resolving_session": resolving_session,
+                    "next_verb": "prd-witness-request",
+                    "hint": "The witness must be a live run dispatched under a session other than the one resolving the row and other than its executor. Dispatch prd-witness-request {id} to record the request and receive a verifier brief, run the witness from that verifier session, and resolve with its dispatch id.",
+                })
+                .to_string();
+                return (
+                    body,
+                    format!("prd-resolve refused: self-witness for {}", id_target),
+                    1,
+                );
             }
         }
     }
@@ -3076,6 +3133,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 "witness_binding": witness_binding.as_ref().map(VerifiedWitness::to_json),
                 "witness_dispatch_id_verified": dispatch_verified,
                 "witness_dispatch_id_verified_via": verified_via,
+                "witness_root": (if verified_via == Some("scratch_ledger") { scratch_root.clone() } else { None }),
                 "witness_dispatch_id_field": "witness_dispatch_id",
                 "witness_dispatch_id_in_evidence": witness_dispatch_id,
                 "witness_dispatch_id_in_ledger": bound_in_project,

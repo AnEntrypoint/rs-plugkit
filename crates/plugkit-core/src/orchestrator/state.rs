@@ -201,10 +201,12 @@ pub fn set_phase_with_session_with_graph(
     let mut s = read_state_with_graph(g);
     let from = s.phase.as_str().to_string();
     let to = phase.as_str().to_string();
-    if from != to {
+    let walk_session = session_id.clone().or_else(dispatch_session_id);
+    let transitioned = from != to;
+    if transitioned {
         s.phase_history.push(PhaseTransitionEntry {
-            from,
-            to,
+            from: from.clone(),
+            to: to.clone(),
             ts_ms: now_ms(),
         });
     }
@@ -217,7 +219,29 @@ pub fn set_phase_with_session_with_graph(
     }
     s.updated_at_ms = now_ms();
     write_state(&s)?;
+    if transitioned {
+        let walk_session = walk_session.unwrap_or_else(|| "none".to_string());
+        write_lean_walk_evidence(&to, &from, &walk_session);
+    }
     Ok(s)
+}
+
+fn write_lean_walk_evidence(node: &str, from: &str, session: &str) {
+    let record = json!({
+        "node": node,
+        "session": session,
+        "from": from,
+        "applied": true,
+        "witness": format!("transition {from}->{node}"),
+        "dispatch_ids": [],
+        "ts_ms": now_ms(),
+    });
+    let path = gm_dir()
+        .join("lean-walk")
+        .join(format!("{node}.{session}.json"))
+        .to_string_lossy()
+        .to_string();
+    let _ = pkfs::write(&path, &record.to_string());
 }
 
 pub fn revert_last_transition() -> Result<TurnState, std::io::Error> {

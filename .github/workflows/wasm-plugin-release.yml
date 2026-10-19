@@ -176,7 +176,7 @@ jobs:
               sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$ver\"/}" "$MANIFEST"
             fi
             git add "$MANIFEST"
-            git commit -m "chore: auto-bump version to $ver [skip ci]"
+            git commit -m "chore: auto-bump version to $ver"
             if git push origin HEAD:main; then
               echo "version=$ver" >> "$GITHUB_OUTPUT"
               echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"

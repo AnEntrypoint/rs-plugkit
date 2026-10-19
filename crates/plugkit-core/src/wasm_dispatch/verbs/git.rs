@@ -60,6 +60,48 @@ pub(super) fn git_commit_dedup_record(key: &str, sha_full: &str, sha: &str, summ
     git_async_kv_put(GIT_COMMIT_DEDUP_NS, key, &record);
 }
 
+pub(super) const GIT_COMMIT_LOCK_NS: &str = "git_commit_lock";
+pub(super) const GIT_COMMIT_LOCK_TTL_MS: u64 = 120_000;
+pub(super) const GIT_COMMIT_LOCK_WAIT_MS: u64 = 15_000;
+pub(super) const GIT_COMMIT_LOCK_POLL_MS: u64 = 50;
+
+pub(super) fn git_commit_lock_key(cwd: Option<&str>) -> String {
+    format!("repo:{}", cwd.unwrap_or(""))
+}
+
+fn git_commit_lock_holder(key: &str) -> Option<(String, u64)> {
+    let raw = super::host_abi::host_kv_read(GIT_COMMIT_LOCK_NS, key)?;
+    let (holder, ts) = raw.rsplit_once('|')?;
+    Some((holder.to_string(), ts.parse::<u64>().ok()?))
+}
+
+pub(super) fn git_commit_lock_acquire(key: &str, owner: &str) -> bool {
+    let started = unsafe { host_now_ms() };
+    loop {
+        let now = unsafe { host_now_ms() };
+        let free = match git_commit_lock_holder(key) {
+            None => true,
+            Some((holder, ts)) => holder == owner || now.saturating_sub(ts) > GIT_COMMIT_LOCK_TTL_MS,
+        };
+        if free {
+            git_async_kv_put(GIT_COMMIT_LOCK_NS, key, &format!("{}|{}", owner, now));
+            return true;
+        }
+        if now.saturating_sub(started) >= GIT_COMMIT_LOCK_WAIT_MS {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(GIT_COMMIT_LOCK_POLL_MS));
+    }
+}
+
+pub(super) fn git_commit_lock_release(key: &str, owner: &str) {
+    if let Some((holder, _)) = git_commit_lock_holder(key) {
+        if holder == owner {
+            git_async_kv_delete(GIT_COMMIT_LOCK_NS, key);
+        }
+    }
+}
+
 fn git_session_commits_key() -> String {
     crate::wasm_dispatch::current_dispatch_session_id().unwrap_or_default()
 }
@@ -1205,6 +1247,7 @@ fn bin_drift_check_js(base: &str, repo: &str, rev: &str, include: &[String], fro
         else fs.copyFileSync(from, to);
       }} else fs.rmSync(to, {{ force: true }});
     }}
+    fs.rmSync(path.join(head, 'node_modules'), {{ recursive: true, force: true }});
     fs.symlinkSync(path.join(repoDir, 'node_modules'), path.join(head, 'node_modules'), 'junction');
     const env = {{ ...process.env, GM_MCP_BUILD_INCLUDE: include.join(',') }};
     const r = cp.spawnSync(process.execPath, [path.join(head, 'scripts', 'check-bin-drift.mjs')], {{ cwd: head, env, encoding: 'utf8', windowsHide: true, timeout: 120000 }});
@@ -2142,7 +2185,7 @@ pub(super) fn git_commit_failed_for_missing_identity(sout: &str, serr: &str) -> 
 pub(super) const MISSING_COMMIT_IDENTITY: &str = "git commit needs an author identity: pass author_name and author_email in the body, or set git.author_name and git.author_email in the gm config. The identity of an earlier commit is never reused.";
 
 pub(super) const DEFAULT_COMMIT_AUTHOR_NAME: &str = "lanmower";
-pub(super) const DEFAULT_COMMIT_AUTHOR_EMAIL: &str = "lanmower@users.noreply.github.com";
+pub(super) const DEFAULT_COMMIT_AUTHOR_EMAIL: &str = "657315+lanmower@users.noreply.github.com";
 
 fn non_blank_str(value: Option<&Value>) -> Option<String> {
     value
@@ -2947,24 +2990,46 @@ pub(super) fn git_amend(body: &Value) -> u64 {
 
 pub(super) fn commit_message_shape(message: &str) -> Result<(), String> {
     let mut lines = message.lines();
-    let subject_len = lines.next().unwrap_or("").chars().count();
+    let subject = lines.next().unwrap_or("");
+    let subject_len = subject.chars().count();
     if subject_len > 50 {
+        let suggestion: String = subject.chars().take(50).collect();
         return Err(format!(
-            "subject is {} characters; the 50/72 rule allows at most 50. Re-draft the subject.",
-            subject_len
+            "subject is {} characters; the 50/72 rule allows at most 50. Re-draft the subject, for example: {}",
+            subject_len,
+            suggestion.trim_end()
         ));
     }
     for (index, line) in lines.enumerate() {
         let width = line.chars().count();
         if width > 72 {
             return Err(format!(
-                "body line {} is {} characters; the 50/72 rule wraps the body at 72. Re-wrap it.",
+                "body line {} is {} characters; the 50/72 rule wraps the body at 72. Re-wrap it, for example:\n{}",
                 index + 2,
-                width
+                width,
+                wrap_line_at(line, 72)
             ));
         }
     }
     Ok(())
+}
+
+fn wrap_line_at(line: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut current = String::new();
+    for word in line.split_whitespace() {
+        if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > width {
+            out.push_str(&current);
+            out.push('\n');
+            current.clear();
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    out.push_str(&current);
+    out
 }
 
 pub(super) const GIT_PATCH_COMMIT_TIMEOUT_MS: u64 = 60_000;
@@ -3645,11 +3710,23 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         let bundled_message = bundle_prd_commit_comments(message, &commit_notes);
         let identity = commit_identity(body);
         let commit_pathspec: Vec<String> = scoped_paths.iter().filter(|p| !index_removed_paths.contains(p)).cloned().collect();
+        let commit_lock = git_commit_lock_key(cwd);
+        if !git_commit_lock_acquire(&commit_lock, &plan.id) {
+            return Ok(err_json(
+                "git_commit",
+                json!({
+                    "error": "another git_commit to this repo held the per-repo commit lock past the wait budget; re-dispatch git_commit",
+                    "error_code": "commit_lock_timeout",
+                    "next_dispatch_hint": "git_commit",
+                }),
+            ));
+        }
         let r = git_step_replayed_by_call_order(
             plan,
             &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, &commit_pathspec, &identity)),
             cwd,
         )?;
+        git_commit_lock_release(&commit_lock, &plan.id);
         write_steps.push(r.clone());
         let prd_own_rows = own_rows_filter.as_ref().map(|f| f.own_rows.clone());
         if let Some(filter) = own_rows_filter.as_mut() {
@@ -3665,7 +3742,8 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 ));
             }
             if git_commit_failed_for_missing_identity(sout, serr) {
-                return Ok(err("git_commit", MISSING_COMMIT_IDENTITY));
+                let git_said = if serr.trim().is_empty() { sout.trim() } else { serr.trim() };
+                return Ok(err("git_commit", &format!("{} git said: {}", MISSING_COMMIT_IDENTITY, git_said)));
             }
             return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
         }
@@ -6122,6 +6200,23 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         .into_iter()
         .filter(|path| !gitlink_paths.contains(path))
         .collect();
+    let dirty_runtime_logs: Vec<String> = dirty_tracked
+        .iter()
+        .filter(|path| path.starts_with(".gm/") && path.ends_with("-log.jsonl"))
+        .cloned()
+        .collect();
+    if !dirty_runtime_logs.is_empty() {
+        return err_json(
+            "git_pull",
+            json!({
+                "error": "a tracked append-only runtime log under .gm/ is dirty; git_pull would shelve it under autostash and conflict on pop",
+                "error_code": "dirty_worktree",
+                "dirty_paths": dirty_runtime_logs,
+                "remote": remote,
+                "hint": "Nothing was fetched or merged. Commit or revert these logs from their own writer, then re-dispatch git_pull.",
+            }),
+        );
+    }
     let only_runtime_state_dirty =
         !dirty_tracked.is_empty() && dirty_tracked.iter().all(|path| path.starts_with(".gm/"));
     let autostash = autostash_requested || only_runtime_state_dirty;
@@ -6433,6 +6528,35 @@ fn ci_status_head_sha(cwd: Option<&str>, failure: &str) -> Result<CiStatusShaRes
     })
 }
 
+fn ci_status_submodule_head_for_github_repo(
+    body: &Value,
+    cwd: Option<&str>,
+) -> Option<CiStatusShaResolution> {
+    let wanted = body
+        .get("github_repo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let root = cwd.unwrap_or(".");
+    for line in exec_git_in(cwd, "config --file .gitmodules --get-regexp path").lines() {
+        let Some(path) = line.split_whitespace().nth(1) else {
+            continue;
+        };
+        let sub = format!("{}/{}", root, path);
+        let Ok(repo) =
+            ci_status_resolve_repo_preferring_unambiguous_github_repo_field(&json!({}), Some(&sub))
+        else {
+            continue;
+        };
+        if repo != wanted {
+            continue;
+        }
+        return ci_status_head_sha(Some(&sub), "unable to resolve submodule HEAD")
+            .ok();
+    }
+    None
+}
+
 pub(super) fn ci_status_resolve_sha(
     body: &Value,
     cwd: Option<&str>,
@@ -6441,10 +6565,13 @@ pub(super) fn ci_status_resolve_sha(
     let requested = match requested {
         Some(requested) => requested,
         None => {
+            if let Some(resolution) = ci_status_submodule_head_for_github_repo(body, cwd) {
+                return Ok(resolution);
+            }
             return ci_status_head_sha(
                 cwd,
                 "rev/sha/ref not provided and unable to resolve local HEAD",
-            )
+            );
         }
     };
     if is_full_sha(requested) {
@@ -6470,10 +6597,35 @@ pub(super) fn ci_status_resolve_sha(
     Err(err(
         "ci-status",
         &format!(
-            "{} \"{}\" is neither a 40-char commit sha nor a ref git can resolve here -- refusing to report local HEAD in its place, because an answer about HEAD is not an answer about the rev that was asked for; pass a full 40-char sha, or a ref git knows such as HEAD or a branch name",
+            "{} \"{}\" is neither a 40-char commit sha nor a ref git can resolve here, and origin did not resolve it as a short sha -- refusing to report local HEAD in its place, because an answer about HEAD is not an answer about the rev that was asked for; pass a full 40-char sha, a ref git knows such as HEAD or a branch name, or a short sha that origin has (run git fetch origin first if it is only local)",
             field, requested
         ),
     ))
+}
+
+fn is_short_sha(candidate: &str) -> bool {
+    (7..40).contains(&candidate.len()) && candidate.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn ci_status_resolve_short_sha_on_remote(
+    body: &Value,
+    repo: &str,
+    rest_opts: &str,
+) -> Option<CiStatusShaResolution> {
+    let (field, requested) = ci_status_requested_rev(body);
+    let requested = requested.filter(|rev| is_short_sha(rev))?;
+    let path = format!("repos/{}/commits/{}", repo, requested);
+    let sha = ci_status_rest_api_json(&path, rest_opts)
+        .ok()?
+        .get("sha")
+        .and_then(Value::as_str)
+        .filter(|sha| is_full_sha(sha))?
+        .to_string();
+    Some(CiStatusShaResolution {
+        sha,
+        field,
+        requested: Some(requested.to_string()),
+    })
 }
 
 pub(super) fn ci_status_annotate_sha_resolution(
@@ -7012,11 +7164,6 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
     let cwd = body_cwd(body);
     let repo = ci_status_resolve_repo_preferring_unambiguous_github_repo_field(body, cwd)
         .map_err(|packed| unpack_to_value(packed))?;
-    let resolution = ci_status_resolve_sha(body, cwd).map_err(|packed| unpack_to_value(packed))?;
-    let sha = resolution.sha.clone();
-    let repo = ci_status_repo_for_sha(cwd, &sha, repo);
-    let runs_path = format!("repos/{}/actions/runs?head_sha={}&per_page=20", repo, sha);
-    let tree_path = format!("repos/{}/git/trees/{}?recursive=1", repo, sha);
     let token = body
         .get("token")
         .and_then(|v| v.as_str())
@@ -7030,6 +7177,17 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
         headers["Authorization"] = json!(format!("Bearer {}", t));
     }
     let rest_opts = json!({ "timeoutMs": FETCH_DEFAULT_TIMEOUT_MS, "headers": headers }).to_string();
+    let resolution = match ci_status_resolve_sha(body, cwd) {
+        Ok(resolution) => resolution,
+        Err(packed) => match ci_status_resolve_short_sha_on_remote(body, &repo, &rest_opts) {
+            Some(resolution) => resolution,
+            None => return Err(unpack_to_value(packed)),
+        },
+    };
+    let sha = resolution.sha.clone();
+    let repo = ci_status_repo_for_sha(cwd, &sha, repo);
+    let runs_path = format!("repos/{}/actions/runs?head_sha={}&per_page=20", repo, sha);
+    let tree_path = format!("repos/{}/git/trees/{}?recursive=1", repo, sha);
     let mut ordered_transports: Vec<CiStatusTransport> = Vec::new();
     let mut failures: Vec<CiStatusAttemptFailure> = Vec::new();
     match ci_status_gh_unusable_reason() {

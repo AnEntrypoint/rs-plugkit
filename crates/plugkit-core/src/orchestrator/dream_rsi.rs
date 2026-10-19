@@ -71,6 +71,10 @@ pub struct VerbStat {
     pub count: u64,
     pub failure_rate: f64,
     pub gate_drift_rate: f64,
+    pub not_found: u64,
+    pub unclassified: u64,
+    pub causes: BTreeMap<String, u64>,
+    pub exit_codes: BTreeMap<i64, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -594,6 +598,35 @@ fn reply_layers(result: &Value) -> [Option<&Value>; 2] {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn reply_field(result: &Value, key: &str) -> Option<String> {
+    reply_layers(result).iter().flatten().find_map(|layer| {
+        layer.get(key).and_then(Value::as_str).map(str::trim).filter(|text| token_like(text)).map(str::to_owned)
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+const ERROR_LINE_KEYS: [&str; 5] = ["stderr", "error", "message", "reason", "output"];
+
+#[cfg(target_arch = "wasm32")]
+const ERROR_LINE_MAX_CHARS: usize = 240;
+
+#[cfg(target_arch = "wasm32")]
+fn error_line(result: &Value, exit_code: i64) -> Option<String> {
+    if exit_code == 0 {
+        return None;
+    }
+    reply_layers(result).iter().flatten().find_map(|layer| {
+        ERROR_LINE_KEYS.iter().find_map(|key| {
+            layer
+                .get(*key)
+                .and_then(Value::as_str)
+                .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+                .map(|line| line.chars().take(ERROR_LINE_MAX_CHARS).collect::<String>())
+        })
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
 #[derive(Debug, Clone, PartialEq)]
 pub enum FailureClass {
     Ok,
@@ -669,6 +702,8 @@ struct ObservationRecord {
     fingerprint: Option<String>,
     exit_code: Option<i64>,
     gate_drift: Option<bool>,
+    gate_id: Option<String>,
+    predicate: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     prd_open_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -684,6 +719,8 @@ struct ObservationRecord {
     no_match: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_error_line: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     run_end: bool,
 }
@@ -720,7 +757,7 @@ impl ObservationRecord {
     }
 
     fn is_gate_drift_failure(&self) -> bool {
-        !self.succeeded() && self.gate_drift.unwrap_or(true)
+        !self.succeeded() && self.gate_drift.unwrap_or(false)
     }
 }
 
@@ -770,6 +807,9 @@ pub struct ObservedDispatch<'a> {
     pub exit_code: i64,
     pub output_bytes: Option<u64>,
     pub gate_drift: bool,
+    pub gate_id: Option<&'a str>,
+    pub predicate: Option<&'a str>,
+    pub first_error_line: Option<&'a str>,
     pub reply: &'a str,
     pub lean_node: Option<&'a str>,
     pub failure: FailureClass,
@@ -1351,6 +1391,9 @@ pub struct Outcome {
     pub exit_code: i64,
     pub output_bytes: u64,
     gate_drift: bool,
+    gate_id: Option<String>,
+    predicate: Option<String>,
+    first_error_line: Option<String>,
     failure: FailureClass,
 }
 
@@ -1365,6 +1408,9 @@ pub(crate) fn outcome(result: &Value) -> Outcome {
         exit_code,
         output_bytes: dispatch_output_bytes(result),
         gate_drift: failure.error_code().is_some_and(is_gate_drift_code),
+        gate_id: reply_field(result, "gate_id"),
+        predicate: reply_field(result, "predicate"),
+        first_error_line: error_line(result, exit_code),
         failure,
     }
 }
@@ -1389,6 +1435,9 @@ pub(crate) fn observe_recorded(
         exit_code: outcome.exit_code,
         output_bytes: Some(outcome.output_bytes),
         gate_drift: outcome.gate_drift,
+        gate_id: outcome.gate_id.as_deref(),
+        predicate: outcome.predicate.as_deref(),
+        first_error_line: outcome.first_error_line.as_deref(),
         reply,
         lean_node,
         failure: outcome.failure,
@@ -1418,6 +1467,9 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         exit_code,
         output_bytes,
         gate_drift,
+        gate_id,
+        predicate,
+        first_error_line,
         reply,
         lean_node,
         failure,
@@ -1440,7 +1492,10 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         fingerprint: Some(fingerprint.to_string()),
         exit_code: Some(exit_code),
         gate_drift: Some(gate_drift),
-        prd_open_count,
+        gate_id: gate_id.map(str::to_owned),
+        predicate: predicate.map(str::to_owned),
+        first_error_line: first_error_line.map(str::to_owned),
+        prd_open_count: Some(prd_open_count),
         mutable_open_count: Some(mutable_open_count),
         quality: Some(outcome_score(exit_code, failure.no_match(), output_bytes)),
         ts: Some(ts),
@@ -2761,26 +2816,54 @@ fn observations_for_result() -> Result<(Vec<ObservationRecord>, usize), String> 
 }
 
 #[cfg(target_arch = "wasm32")]
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct VerbTally {
+    count: u64,
+    failures: u64,
+    drifts: u64,
+    not_found: u64,
+    unclassified: u64,
+    causes: BTreeMap<String, u64>,
+    exit_codes: BTreeMap<i64, u64>,
+}
+
+#[cfg(target_arch = "wasm32")]
 fn per_verb_stats(observations: &[ObservationRecord]) -> Vec<VerbStat> {
-    let mut tallies: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
+    let mut tallies: BTreeMap<String, VerbTally> = BTreeMap::new();
     for record in observations {
         let verb = record.verb.clone().unwrap_or_else(|| "unknown".to_owned());
-        let tally = tallies.entry(verb).or_insert((0, 0, 0));
-        tally.0 += 1;
-        if !record.succeeded() && !record.no_match {
-            tally.1 += 1;
+        let tally = tallies.entry(verb).or_default();
+        tally.count += 1;
+        if !record.succeeded() {
+            if record.no_match {
+                tally.not_found += 1;
+            } else {
+                tally.failures += 1;
+                match record.error_code.as_deref() {
+                    Some(code) => *tally.causes.entry(code.to_owned()).or_default() += 1,
+                    None => tally.unclassified += 1,
+                }
+            }
+        }
+        if let Some(code) = record.exit_code.filter(|code| *code != 0) {
+            *tally.exit_codes.entry(code).or_default() += 1;
         }
         if record.is_gate_drift_failure() {
-            tally.2 += 1;
+            tally.drifts += 1;
         }
     }
     tallies
         .into_iter()
-        .map(|(verb, (count, failures, drifts))| VerbStat {
+        .map(|(verb, tally)| VerbStat {
             verb,
-            count,
-            failure_rate: failures as f64 / count as f64,
-            gate_drift_rate: drifts as f64 / count as f64,
+            count: tally.count,
+            failure_rate: tally.failures as f64 / tally.count as f64,
+            gate_drift_rate: tally.drifts as f64 / tally.count as f64,
+            not_found: tally.not_found,
+            unclassified: tally.unclassified,
+            causes: tally.causes,
+            exit_codes: tally.exit_codes,
         })
         .collect()
 }
@@ -2965,6 +3048,10 @@ fn result_json(result: &DreamRsiResult) -> Value {
                     "count": stat.count,
                     "failure_rate": stat.failure_rate,
                     "gate_drift_rate": stat.gate_drift_rate,
+                    "not_found": stat.not_found,
+                    "unclassified": stat.unclassified,
+                    "causes": stat.causes,
+                    "exit_codes": stat.exit_codes,
                 }))
                 .collect::<Vec<_>>(),
             "proposals": proposals

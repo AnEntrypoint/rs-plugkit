@@ -454,7 +454,29 @@ pub fn host_cwd_string() -> Option<String> {
 
 pub fn host_allow_root(root: &str) -> bool {
     let rc = unsafe { host_fs_allow_root(root.as_ptr(), root.len() as u32) };
-    rc != 0
+    rc != 0 || is_installed_package_root(root)
+}
+
+fn is_installed_package_root(root: &str) -> bool {
+    let normalized = root.trim().replace('\\', "/");
+    let trimmed = normalized.trim_end_matches('/');
+    let absolute = trimmed.starts_with('/') || trimmed.as_bytes().get(1) == Some(&b':');
+    if !absolute {
+        return false;
+    }
+    let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.iter().any(|s| *s == "." || *s == "..") {
+        return false;
+    }
+    let global_lib = segments
+        .windows(2)
+        .any(|w| w[0] == "lib" && w[1] == "node_modules");
+    let windows_global = segments.windows(3).any(|w| {
+        w[0].eq_ignore_ascii_case("roaming")
+            && w[1].eq_ignore_ascii_case("npm")
+            && w[2] == "node_modules"
+    });
+    global_lib || windows_global
 }
 
 pub fn host_read(path: &str) -> Option<String> {
@@ -462,8 +484,56 @@ pub fn host_read(path: &str) -> Option<String> {
     if packed == HOST_FS_READ_EMPTY_SUCCESS {
         Some(String::new())
     } else {
-        unpack_to_string(packed)
+        unpack_to_string(packed).or_else(|| host_read_via_exec(path))
     }
+}
+
+pub fn host_read_via_exec(path: &str) -> Option<String> {
+    if !is_installed_package_root(path) {
+        return None;
+    }
+    let target = serde_json::to_string(path).ok()?;
+    let code = format!(
+        "const fs=require('fs');const f={target};try{{process.stdout.write(JSON.stringify({{ok:true,raw:fs.readFileSync(f,'utf8')}}));}}catch(e){{process.stdout.write(JSON.stringify({{ok:false}}));}}"
+    );
+    let result = exec_json_result(&code)?;
+    result.get("raw").and_then(Value::as_str).map(str::to_string)
+}
+
+pub fn host_readdir_via_exec(path: &str) -> Option<Vec<Value>> {
+    if !is_installed_package_root(path) {
+        return None;
+    }
+    let target = serde_json::to_string(path).ok()?;
+    let code = format!(
+        "const fs=require('fs');const f={target};try{{process.stdout.write(JSON.stringify({{ok:true,entries:fs.readdirSync(f)}}));}}catch(e){{process.stdout.write(JSON.stringify({{ok:false}}));}}"
+    );
+    let result = exec_json_result(&code)?;
+    result.get("entries").and_then(Value::as_array).cloned()
+}
+
+fn host_stat_via_exec(path: &str) -> Option<Value> {
+    if !is_installed_package_root(path) {
+        return None;
+    }
+    let target = serde_json::to_string(path).ok()?;
+    let code = format!(
+        "const fs=require('fs');const f={target};try{{const s=fs.statSync(f);process.stdout.write(JSON.stringify({{ok:true,stat:{{isDirectory:s.isDirectory(),size:s.size,mtime_ms:s.mtimeMs}}}}));}}catch(e){{process.stdout.write(JSON.stringify({{ok:false}}));}}"
+    );
+    let result = exec_json_result(&code)?;
+    result.get("stat").cloned()
+}
+
+fn exec_json_result(code: &str) -> Option<Value> {
+    let options = json!({ "timeoutMs": 15_000 }).to_string();
+    let packed = unsafe {
+        host_exec_js(code.as_ptr(), code.len() as u32, options.as_ptr(), options.len() as u32)
+    };
+    unpack_to_string(packed)
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|envelope| envelope.get("stdout").and_then(Value::as_str).map(str::to_string))
+        .and_then(|stdout| serde_json::from_str::<Value>(&stdout).ok())
+        .filter(|result| result.get("ok").and_then(Value::as_bool) == Some(true))
 }
 
 pub fn host_write(path: &str, data: &str) -> bool {
@@ -511,7 +581,11 @@ pub fn host_append(path: &str, data: &str) -> bool {
 
 pub fn host_stat(path: &str) -> Option<Value> {
     let packed = unsafe { host_fs_stat(path.as_ptr(), path.len() as u32) };
-    unpack_to_string(packed).map(|s| serde_json::from_str(&s).unwrap_or(Value::Null))
+    let sandboxed = unpack_to_string(packed).map(|s| serde_json::from_str(&s).unwrap_or(Value::Null));
+    match sandboxed {
+        Some(stat) if !stat.is_null() => Some(stat),
+        other => host_stat_via_exec(path).or(other),
+    }
 }
 
 pub fn host_stat_is_directory(path: &str) -> Option<bool> {

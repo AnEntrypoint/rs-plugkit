@@ -43,6 +43,8 @@ pub struct GateVerdict {
     pub pending_step_full: Option<Value>,
     pub residuals: Vec<String>,
     pub next_dispatch: Option<String>,
+    pub gate_id: Option<String>,
+    pub predicate: Option<String>,
 }
 
 impl GateVerdict {
@@ -55,6 +57,8 @@ impl GateVerdict {
             pending_step_full: None,
             residuals: vec![],
             next_dispatch: None,
+            gate_id: None,
+            predicate: None,
         }
     }
     fn deny(reason: String) -> Self {
@@ -66,10 +70,17 @@ impl GateVerdict {
             pending_step_full: None,
             residuals: vec![],
             next_dispatch: None,
+            gate_id: None,
+            predicate: None,
         }
     }
     fn with_next(mut self, next: &str) -> Self {
         self.next_dispatch = Some(next.to_string());
+        self
+    }
+    fn gated(mut self, gate_id: &str, predicate: Option<&str>) -> Self {
+        self.gate_id = Some(gate_id.to_string());
+        self.predicate = predicate.map(str::to_string);
         self
     }
     pub fn to_denial_json(&self, verb: &str) -> Value {
@@ -95,6 +106,8 @@ impl GateVerdict {
             "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
             "next_dispatch": next,
             "next_dispatch_hint": next,
+            "gate_id": self.gate_id,
+            "predicate": self.predicate,
         });
         if self.await_result {
             obj["await_result"] = json!(true);
@@ -511,7 +524,8 @@ fn await_gate(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> Option<G
         return Some(GateVerdict::deny(format!(
             "{}; restore the file from its .corrupt-<ts> backup or repair it before dispatching {}",
             detail, verb
-        )));
+        ))
+        .gated("deviation.turn-state-corrupt", Some("turn-state-corrupt")));
     }
     if let Some(step_id) = read_pending_step() {
         if !policy.await_allowed_verbs.iter().any(|v| v == verb) {
@@ -527,7 +541,8 @@ fn await_gate(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> Option<G
                  memorize-continue with body {{token, step_id, result}}. No other verb is valid until \
                  this completes.",
                 step_id
-            ));
+            ))
+            .gated("deviation.await-result-violation", Some("await-result-violation"));
             v.await_result = true;
             v.pending_step_id = Some(step_id.clone());
             v.pending_step_full = read_pending_step_full();
@@ -537,12 +552,343 @@ fn await_gate(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> Option<G
     None
 }
 
+const COMMAND_WRAPPERS: &[&str] = &[
+    "env", "command", "exec", "time", "nohup", "sudo", "xargs", "nice", "builtin", "if", "then",
+    "else", "elif", "do", "while", "until", "timeout", "stdbuf", "ionice", "setsid", "doas",
+];
+
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "powershell", "pwsh", "cmd"];
+
+const MAX_UNWRAP_DEPTH: usize = 8;
+
+fn wrapper_arg_flags(wrapper: &str) -> &'static [&'static str] {
+    match wrapper {
+        "env" => &["-u", "--unset", "-C", "--chdir"],
+        "sudo" => &["-u", "-g", "-h", "-p", "-r", "-t", "-U", "-C", "-D", "-T", "-R"],
+        "doas" => &["-u", "-C"],
+        "timeout" => &["-s", "--signal", "-k", "--kill-after"],
+        "stdbuf" => &["-i", "-o", "-e"],
+        "ionice" => &["-c", "-n", "-p", "-P", "-u"],
+        "nice" => &["-n"],
+        "time" => &["-f", "-o"],
+        "exec" => &["-a"],
+        "xargs" => &["-I", "-L", "-n", "-P", "-d", "-E", "-s", "-a"],
+        _ => &[],
+    }
+}
+
+fn wrapper_positionals(wrapper: &str) -> usize {
+    usize::from(wrapper == "timeout")
+}
+
+fn is_wrapper_prefix(token: &str) -> bool {
+    token.is_empty()
+        || token.chars().all(|c| c.is_ascii_digit())
+        || token.split_once('=').is_some_and(|(key, _)| {
+            !key.is_empty()
+                && !key.starts_with(|c: char| c.is_ascii_digit())
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+fn redirect_body(token: &str) -> &str {
+    token.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&')
+}
+
+fn is_redirect(token: &str) -> bool {
+    redirect_body(token).starts_with(['<', '>'])
+}
+
+fn is_bare_redirect(token: &str) -> bool {
+    is_redirect(token) && redirect_body(token).trim_start_matches(['<', '>']).is_empty()
+}
+
+fn shell_name(token: &str) -> Option<String> {
+    let base = token.rsplit(['/', '\\']).next().unwrap_or(token).to_ascii_lowercase();
+    let name = base.strip_suffix(".exe").unwrap_or(&base);
+    SHELLS.contains(&name).then(|| name.to_string())
+}
+
+fn shell_command_flag(shell: &str, flag: &str) -> bool {
+    let f = flag.to_ascii_lowercase();
+    match shell {
+        "cmd" => f == "/c" || f == "/k",
+        "powershell" | "pwsh" => f.len() > 1 && "-command".starts_with(f.as_str()),
+        _ => {
+            f == "-c"
+                || (f.len() > 2
+                    && !f.starts_with("--")
+                    && f.starts_with('-')
+                    && f[1..].chars().all(|c| c.is_ascii_alphabetic())
+                    && f.contains('c'))
+        }
+    }
+}
+
+fn rest_of(tokens: &[&str], from: usize) -> String {
+    tokens.get(from..).unwrap_or_default().join(" ")
+}
+
+const INTERPRETER_PREFIXES: &[&str] = &[
+    "node", "deno", "bun", "python", "perl", "ruby", "php", "lua",
+];
+
+const INLINE_SCRIPT_FLAGS: &[&str] = &["-c", "-e", "-E", "-p", "-r", "--eval", "--print"];
+
+fn is_interpreter(token: &str) -> bool {
+    let base = token.rsplit(['/', '\\']).next().unwrap_or(token).to_ascii_lowercase();
+    let name = base.strip_suffix(".exe").unwrap_or(&base);
+    INTERPRETER_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+}
+
+fn is_inline_script_arg(before: &str) -> bool {
+    let mut words = before.split_whitespace().rev();
+    let flag_is_inline = words.next().is_some_and(|flag| INLINE_SCRIPT_FLAGS.contains(&flag));
+    flag_is_inline && words.find(|word| !word.starts_with('-')).is_some_and(is_interpreter)
+}
+
+fn split_inline_scripts(text: &str) -> (String, Vec<(&str, char)>) {
+    let mut code = String::with_capacity(text.len());
+    let mut scripts = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find(['\'', '"']) {
+        let quote = char::from(rest.as_bytes()[open]);
+        let Some(len) = rest[open + 1..].find(quote) else {
+            break;
+        };
+        let span_end = open + len + 2;
+        let before = &rest[..open];
+        code.push_str(before);
+        if is_inline_script_arg(before) {
+            scripts.push((&rest[open + 1..open + 1 + len], quote));
+            code.push(' ');
+        } else {
+            code.push_str(&rest[open..span_end]);
+        }
+        rest = &rest[span_end..];
+    }
+    code.push_str(rest);
+    (code, scripts)
+}
+
+fn contains_git_word(script: &str) -> bool {
+    let lower = script.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    lower.match_indices("git").any(|(i, _)| {
+        let before = i.checked_sub(1).is_some_and(|p| is_word(bytes[p]));
+        let after = bytes.get(i + 3).is_some_and(|&b| is_word(b));
+        !before && !after
+    })
+}
+
+fn substitutions_invoke_git(
+    text: &str,
+    is_git_token: &dyn Fn(&str) -> bool,
+    depth: usize,
+) -> bool {
+    extract_substitution_bodies(text)
+        .into_iter()
+        .any(|inner| text_invokes_git(&inner, is_git_token, depth + 1))
+}
+
+fn is_drive_path(token: &str) -> bool {
+    let b = token.as_bytes();
+    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
+    let msys = b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b'/';
+    drive || msys
+}
+
+fn closing_quote(chars: &[char], open: usize) -> Option<usize> {
+    let quote = chars[open];
+    let mut j = open + 1;
+    while j < chars.len() {
+        if quote == '"' && chars[j] == '\\' && chars.get(j + 1) == Some(&'"') {
+            j += 2;
+            continue;
+        }
+        if chars[j] == quote {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+fn push_word(segments: &mut Vec<Vec<String>>, word: &mut String, in_word: &mut bool) {
+    if *in_word {
+        if let Some(segment) = segments.last_mut() {
+            segment.push(std::mem::take(word));
+        }
+    }
+    word.clear();
+    *in_word = false;
+}
+
+fn split_words(text: &str) -> Vec<Vec<String>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut segments: Vec<Vec<String>> = vec![Vec::new()];
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' || c == '"' {
+            if let Some(end) = closing_quote(&chars, i) {
+                let mut j = i + 1;
+                while j < end {
+                    if c == '"' && chars[j] == '\\' && chars.get(j + 1) == Some(&'"') {
+                        j += 1;
+                    }
+                    word.push(chars[j]);
+                    j += 1;
+                }
+                in_word = true;
+                i = end + 1;
+                continue;
+            }
+        }
+        match c {
+            ' ' | '\t' | '\r' => push_word(&mut segments, &mut word, &mut in_word),
+            '\n' | ';' | '|' | '&' => {
+                push_word(&mut segments, &mut word, &mut in_word);
+                segments.push(Vec::new());
+            }
+            _ => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+        i += 1;
+    }
+    push_word(&mut segments, &mut word, &mut in_word);
+    segments
+}
+
+fn variable_name(token: &str) -> Option<&str> {
+    let name = token.strip_prefix('$')?.trim_start_matches('{').trim_end_matches('}');
+    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then_some(name)
+}
+
+fn assignments(segments: &[Vec<String>]) -> Vec<(String, String)> {
+    segments
+        .iter()
+        .flatten()
+        .filter_map(|word| {
+            let (key, value) = word.split_once('=')?;
+            let valid = !key.is_empty()
+                && !key.starts_with(|c: char| c.is_ascii_digit())
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            valid.then(|| (key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+fn text_invokes_git(text: &str, is_git_token: &dyn Fn(&str) -> bool, depth: usize) -> bool {
+    if depth > MAX_UNWRAP_DEPTH {
+        return true;
+    }
+    let (code, scripts) = split_inline_scripts(text);
+    let quoted_substitution = scripts.iter().any(|&(script, quote)| {
+        quote == '"' && substitutions_invoke_git(script, is_git_token, depth)
+    });
+    let script_names_git = scripts.iter().any(|&(script, _)| contains_git_word(script));
+    let segments = split_words(&code);
+    let vars = assignments(&segments);
+    quoted_substitution
+        || script_names_git
+        || segments
+            .iter()
+            .any(|segment| segment_invokes_git(segment, &vars, is_git_token, depth))
+        || substitutions_invoke_git(&code, is_git_token, depth)
+}
+
+fn segment_invokes_git(
+    segment: &[String],
+    vars: &[(String, String)],
+    is_git_token: &dyn Fn(&str) -> bool,
+    depth: usize,
+) -> bool {
+    let tokens: Vec<&str> = segment
+        .iter()
+        .map(|t| t.trim_matches(|c: char| matches!(c, '(' | '{' | '!' | '"' | '\'')))
+        .collect();
+    let mut wrapper: &str = "";
+    let mut positionals = 0usize;
+    let mut i = 0usize;
+    while i < tokens.len() {
+        let t = tokens[i];
+        i += 1;
+        if is_redirect(t) {
+            if is_bare_redirect(t) {
+                i += 1;
+            }
+            continue;
+        }
+        if positionals > 0 && !t.starts_with('-') {
+            positionals -= 1;
+            continue;
+        }
+        if t == "eval" {
+            return text_invokes_git(&rest_of(&tokens, i), is_git_token, depth + 1);
+        }
+        if let Some(shell) = shell_name(t) {
+            return tokens
+                .get(i..)
+                .unwrap_or_default()
+                .iter()
+                .position(|flag| shell_command_flag(&shell, flag))
+                .is_some_and(|k| {
+                    text_invokes_git(&rest_of(&tokens, i + k + 1), is_git_token, depth + 1)
+                });
+        }
+        if COMMAND_WRAPPERS.contains(&t) {
+            wrapper = t;
+            positionals = wrapper_positionals(t);
+            continue;
+        }
+        if t.starts_with('-') {
+            if wrapper == "env" && matches!(t, "-S" | "--split-string") {
+                return text_invokes_git(&rest_of(&tokens, i), is_git_token, depth + 1);
+            }
+            if wrapper_arg_flags(wrapper).contains(&t) {
+                i += 1;
+            }
+            continue;
+        }
+        if is_wrapper_prefix(t) {
+            continue;
+        }
+        if t.starts_with("$(") || t.starts_with('`') {
+            return true;
+        }
+        if let Some(name) = variable_name(t) {
+            return vars.iter().any(|(key, value)| {
+                key.as_str() == name && text_invokes_git(value, is_git_token, depth + 1)
+            });
+        }
+        if is_drive_path(t)
+            && (i - 1..tokens.len()).any(|j| is_git_token(tokens[i - 1..=j].join(" ").as_str()))
+        {
+            return true;
+        }
+        return is_git_token(t);
+    }
+    false
+}
+
 fn shell_git_gate(
     verb: &str,
     body: &Value,
     policy: &crate::orchestrator::fsm::Policy,
 ) -> Option<GateVerdict> {
-    if policy.deny_shell_git && policy.shell_verbs.iter().any(|v| v == verb) {
+    let lang_is_shell = verb == "lang"
+        && body
+            .get("lang")
+            .and_then(|v| v.as_str())
+            .is_some_and(|lang| policy.shell_verbs.iter().any(|v| v == lang));
+    let shell_verb = policy.shell_verbs.iter().any(|v| v == verb) || lang_is_shell;
+    if policy.deny_shell_git && shell_verb {
         let cmd = body
             .get("command")
             .and_then(|v| v.as_str())
@@ -550,30 +896,14 @@ fn shell_git_gate(
             .or_else(|| body.get("script").and_then(|v| v.as_str()))
             .unwrap_or("");
         let is_git_token = |first: &str| {
-            first == "git"
-                || first == "git.exe"
-                || first.ends_with("/git")
-                || first.ends_with("\\git")
-                || first.ends_with("/git.exe")
-                || first.ends_with("\\git.exe")
+            let base = first.rsplit(['/', '\\']).next().unwrap_or(first).to_ascii_lowercase();
+            let stem = [".exe", ".cmd", ".bat"]
+                .iter()
+                .find_map(|ext| base.strip_suffix(*ext))
+                .unwrap_or(base.as_str());
+            stem == "git"
         };
-        let git_dominant = cmd
-            .split([';', '\n', '|', '&'])
-            .map(|s| s.trim_start())
-            .any(|s| {
-                let first = s.split_whitespace().next().unwrap_or("");
-                is_git_token(first)
-            });
-        let git_in_subshell = extract_substitution_bodies(cmd).into_iter().any(|inner| {
-            inner
-                .split([';', '\n', '|', '&'])
-                .map(|s| s.trim_start())
-                .any(|s| {
-                    let first = s.split_whitespace().next().unwrap_or("");
-                    is_git_token(first)
-                })
-        });
-        if git_dominant || git_in_subshell {
+        if text_invokes_git(cmd, &is_git_token, 0) {
             log_deviation(
                 "bash-git-bypass",
                 &format!(
@@ -583,11 +913,11 @@ fn shell_git_gate(
                 ),
             );
             return Some(GateVerdict::deny(format!(
-                "bash-git-bypass:a `{}` verb invoking `git` is denied - git is a first-class spool surface, not a shell command. Use the git verb instead: \
-                 git_status (porcelain), git_log, git_diff, git_show, git_branch (inspect); git_add, git_commit, git_finalize (stage/commit/push in one), git_push (push w/ rebase-retry); git_checkout (switch a ref, or restore only the given paths), git_fetch, git_rm, git_revert, git_reset, git_cherry_pick (mutate); git_stash, git_stash_pop, git_stash_drop, git_stash_list (shelve); git_init (turn a non-repo directory into a repo). \
-                 git_finalize {{message}} bundles add->commit->porcelain-gate->push in ONE dispatch. The shell git bypasses the porcelain gate, the witness ledger, and is non-portable. Command was: `{}`",
+                "bash-git-bypass:a `{}` verb invoking `git` is denied - git is a spool surface, not a shell command. Use the git verb for the intent; the substitution table in the Spool ABI section of the instruction reply maps each one. git_finalize {{message}} bundles add, commit and push in one dispatch. Command was: `{}`",
                 verb, cmd.chars().take(120).collect::<String>()
-            )).with_next("git_finalize"));
+            ))
+            .with_next("git_finalize")
+            .gated("deviation.bash-git-bypass", Some("bash-git-bypass")));
         }
     }
     None
@@ -633,9 +963,33 @@ fn native_search_gate(
             verb,
             cmd.chars().take(120).collect::<String>()
         ))
-        .with_next("codesearch"));
+        .with_next("codesearch")
+        .gated("deviation.native-search-bypass", Some("native-search-bypass")));
     }
     None
+}
+
+fn failing_transition_gate(
+    from: &str,
+    to: &str,
+    residuals: &[String],
+) -> (Option<String>, Option<String>) {
+    let graph = crate::orchestrator::fsm::graph();
+    let Some(edge) = graph.transition_edge(from, to) else {
+        return (None, None);
+    };
+    let first = residuals.first().map(String::as_str).unwrap_or_default();
+    for name in &edge.gates {
+        let Some(gate) = graph.gate(name) else {
+            continue;
+        };
+        let detailed = format!("{} -- ", gate.message);
+        let matched = first == gate.message.as_str() || first.starts_with(detailed.as_str());
+        if !gate.advisory && matched {
+            return (Some(gate.name.clone()), gate.predicate.clone());
+        }
+    }
+    (None, None)
 }
 
 fn policy_gate(
@@ -715,7 +1069,11 @@ fn policy_gate(
                 return GateVerdict::deny(format!(
                     "long-gap-retry-without-instruction: verb=`{}` denied {}x in a row by long-gap-no-instruction gate, yet the agent retried instead of dispatching `instruction`. The gate's `next_dispatch` field names the recovery verb - when it says `instruction`, the next verb IS `instruction`, not the same verb again. Dispatch `instruction` now; the chain cannot recover by re-attempting the denied verb.",
                     verb, new_count
-                ));
+                ))
+                .gated(
+                    "deviation.long-gap-retry-without-instruction",
+                    Some("long-gap-retry-without-instruction"),
+                );
             }
             if !same_burst {
                 log_deviation(
@@ -733,7 +1091,8 @@ fn policy_gate(
                     ("gap_ms", gap_ms.to_string()),
                     ("threshold_ms", longgap_threshold_ms.to_string()),
                 ],
-            ));
+            ))
+            .gated("deviation.long-gap-no-instruction", Some("long-gap-no-instruction"));
         }
     }
 
@@ -789,7 +1148,12 @@ fn policy_gate(
                     reason, repeat_count
                 );
             }
-            let mut v = GateVerdict::deny(reason);
+            let (failing_gate, failing_predicate) =
+                failing_transition_gate(&from, to, &residuals);
+            let mut v = GateVerdict::deny(reason).gated(
+                failing_gate.as_deref().unwrap_or(label.as_str()),
+                failing_predicate.as_deref(),
+            );
             v.residuals = residuals;
             v.next_dispatch = next_recovery;
             return v;
@@ -805,7 +1169,8 @@ fn policy_gate(
                     return GateVerdict::deny(format!(
                         "unsolicited-doc-created: `{}` is a top-level doc outside policy.toplevel_doc_allowlist, and this project's policy.deviation_severity promotes this kind to deny. A report/summary/findings file is not the deliverable -- return the finding in the response, or write it where the work lives.",
                         p
-                    ));
+                    ))
+                    .gated("deviation.unsolicited-doc-created", Some("unsolicited-doc-created"));
                 }
             }
         }
@@ -816,7 +1181,8 @@ fn policy_gate(
                     return GateVerdict::deny(format!(
                         "synthetic-test-file: `{}` is a standing test file, and this project's policy.deviation_severity promotes this kind to deny. Doctrine is a live exec_js witness run THIS turn, not a test case deferred to a later run.",
                         p
-                    ));
+                    ))
+                    .gated("deviation.synthetic-test-file", Some("no-synthetic-test-files"));
                 }
             }
         }
@@ -860,7 +1226,9 @@ fn policy_gate(
         }
         if open_rows > 0 {
             if let Some(reason) = concurrency_refusal_at_complete(body, open_rows) {
-                return GateVerdict::deny(reason).with_next("instruction");
+                return GateVerdict::deny(reason)
+                    .with_next("instruction")
+                    .gated("concurrency-shortfall", Some("concurrency-shortfall"));
             }
         }
         if !anti_shape.is_empty() && effective_severity_is_deny("prd-anti-shape") {
@@ -868,7 +1236,9 @@ fn policy_gate(
                 "prd-anti-shape: {} row(s) are marked closed with empty witness_evidence ({}), and this project's policy.deviation_severity promotes this kind to deny. Re-resolve each with its own distinct witness_evidence before closing the chain.",
                 anti_shape.len(),
                 anti_shape.join(", ")
-            )).with_next("prd-resolve");
+            ))
+            .with_next("prd-resolve")
+            .gated("deviation.prd-anti-shape", Some("prd-anti-shape"));
         }
     }
 
