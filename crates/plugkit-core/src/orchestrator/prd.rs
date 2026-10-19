@@ -2550,7 +2550,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 }
             }
             if let Some(scratch) = scratch_root.as_deref() {
-                if crate::dispatch_ledger::lookup(scratch, dispatch_id)?.is_some() {
+                if crate::dispatch_ledger::lookup_outside_root(scratch, dispatch_id)?.is_some() {
                     return Ok(Some("scratch_ledger"));
                 }
             }
