@@ -4516,6 +4516,11 @@ fn path_is_inside_dependency_store(path: &str) -> bool {
         .any(|segment| DEPENDENCY_STORE_SEGMENTS.contains(&segment))
 }
 
+fn path_is_inside_gm_state(path: &str) -> bool {
+    path.split(['/', '\\'])
+        .any(crate::scan_universe::is_own_state_name)
+}
+
 fn parse_globs(patterns: &[String]) -> Result<Vec<crate::path_glob::PathGlob>, String> {
     patterns
         .iter()
@@ -5200,7 +5205,9 @@ fn scan_uncovered_files(
             continue;
         }
         let Some(content) = host_read(path) else {
-            result.files_unreadable += 1;
+            if !path_is_inside_gm_state(path) {
+                result.files_unreadable += 1;
+            }
             continue;
         };
         result.files_scanned += 1;
@@ -5518,7 +5525,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 files_skipped_binary += 1;
             } else if path_is_inside_dependency_store(path) {
                 unreadable_dependency_files += 1;
-            } else {
+            } else if !path_is_inside_gm_state(path) {
                 files_unreadable += 1;
                 if unreadable_sample.len() < UNREADABLE_SAMPLE_LEN {
                     unreadable_sample.push(path.clone());
