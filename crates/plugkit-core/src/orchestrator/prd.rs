@@ -592,6 +592,30 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         requested_statuses
     };
     let folded_rows = fold_last_blocks(rows);
+    let closed_statuses = super::fsm::graph().policy.prd_closed_statuses.clone();
+    if let Some(unknown) = wanted_statuses.iter().find(|want| {
+        !want.eq_ignore_ascii_case("pending")
+            && !status_is_blocked(want.as_str())
+            && !closed_statuses.iter().any(|c| c.eq_ignore_ascii_case(want.as_str()))
+            && !folded_rows
+                .iter()
+                .any(|row| row_status(row).eq_ignore_ascii_case(want.as_str()))
+    }) {
+        let accepted: Vec<String> = ["pending", "blocked", "all"]
+            .iter()
+            .map(|s| s.to_string())
+            .chain(closed_statuses.iter().map(|c| c.to_string()))
+            .collect();
+        return (
+            String::new(),
+            format!(
+                "prd-list refused: unknown status '{}'; accepted values: {}",
+                unknown,
+                accepted.join(", ")
+            ),
+            1,
+        );
+    }
     let open_ids: Vec<String> = folded_rows
         .iter()
         .map(|row| row_text(row, &["id"]))
