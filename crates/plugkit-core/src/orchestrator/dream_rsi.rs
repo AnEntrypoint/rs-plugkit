@@ -74,6 +74,7 @@ pub struct VerbStat {
     pub not_found: u64,
     pub unclassified: u64,
     pub causes: BTreeMap<String, u64>,
+    pub exit_codes: BTreeMap<i64, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2824,6 +2825,7 @@ struct VerbTally {
     not_found: u64,
     unclassified: u64,
     causes: BTreeMap<String, u64>,
+    exit_codes: BTreeMap<i64, u64>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2844,6 +2846,9 @@ fn per_verb_stats(observations: &[ObservationRecord]) -> Vec<VerbStat> {
                 }
             }
         }
+        if let Some(code) = record.exit_code.filter(|code| *code != 0) {
+            *tally.exit_codes.entry(code).or_default() += 1;
+        }
         if record.is_gate_drift_failure() {
             tally.drifts += 1;
         }
@@ -2858,6 +2863,7 @@ fn per_verb_stats(observations: &[ObservationRecord]) -> Vec<VerbStat> {
             not_found: tally.not_found,
             unclassified: tally.unclassified,
             causes: tally.causes,
+            exit_codes: tally.exit_codes,
         })
         .collect()
 }
@@ -3045,6 +3051,7 @@ fn result_json(result: &DreamRsiResult) -> Value {
                     "not_found": stat.not_found,
                     "unclassified": stat.unclassified,
                     "causes": stat.causes,
+                    "exit_codes": stat.exit_codes,
                 }))
                 .collect::<Vec<_>>(),
             "proposals": proposals
