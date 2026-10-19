@@ -550,15 +550,20 @@ fn append_store(path: &str, kind: &str, records: Vec<Value>) -> Result<(), Strin
 fn latest_per_owner_id(records: Vec<Value>) -> Vec<Value> {
     let key = |record: &Value| {
         (
-            record.get("owner_session_id").cloned(),
-            record.get("id").cloned(),
+            record.get("owner_session_id").map(|v| v.to_string()),
+            record.get("id").map(|v| v.to_string()),
         )
     };
     let mut latest: Vec<Value> = Vec::new();
+    let mut slot_of: std::collections::HashMap<(Option<String>, Option<String>), usize> =
+        std::collections::HashMap::new();
     for record in records {
-        match latest.iter().position(|kept| key(kept) == key(&record)) {
-            Some(index) => latest[index] = record,
-            None => latest.push(record),
+        match slot_of.get(&key(&record)) {
+            Some(&index) => latest[index] = record,
+            None => {
+                slot_of.insert(key(&record), latest.len());
+                latest.push(record);
+            }
         }
     }
     latest
