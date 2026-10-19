@@ -491,6 +491,7 @@ fn write_remote_record(paths: &ProbePaths, rec: &RemoteRecord) {
     let path = paths.record();
     let tmp = format!("{path}.tmp-{}", std::process::id());
     if std::fs::write(&tmp, rec.to_json()).is_err() {
+        let _ = std::fs::remove_file(&tmp);
         return;
     }
     if std::fs::rename(&tmp, &path).is_err() {
