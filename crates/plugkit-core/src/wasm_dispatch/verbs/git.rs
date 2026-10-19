@@ -3393,6 +3393,37 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 .map(String::from)
                 .collect()
         };
+        if merge_pending && !add_all && paths.is_empty() && !allow_whole_index {
+            let incoming: Vec<String> = git_step_replayed_by_call_order(
+                plan,
+                &["diff", "--name-only", "-z", "HEAD", "MERGE_HEAD"],
+                cwd,
+            )?
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .split('\0')
+            .filter(|entry| !entry.is_empty())
+            .map(String::from)
+            .collect();
+            let session_staged = git_add_staged_recorded(cwd, &lane_session);
+            let foreign: Vec<String> = staged_before
+                .iter()
+                .filter(|p| !incoming.contains(p) && !session_staged.contains(p))
+                .cloned()
+                .collect();
+            if !foreign.is_empty() {
+                return Ok(err_json(
+                    "git_commit",
+                    json!({
+                        "error": format!("a merge commit with no paths would take {} staged path(s) owned by another session ({}); pass allow_whole_index: true to accept them, or unstage them first", foreign.len(), foreign.join(", ")),
+                        "error_code": "merge_foreign_staged_paths",
+                        "foreign_paths": foreign,
+                        "staged_count": staged_before.len(),
+                    }),
+                ));
+            }
+        }
         let commits_session_staging = !add_all
             && paths.is_empty()
             && index_equals_session_staging(cwd, &lane_session, &staged_before);
