@@ -756,8 +756,23 @@ fn path_traversal_message(path: &str) -> String {
     format!("path must not contain a \"..\" segment, even with allowOutsideRoot:true -- the opt-in widens which root a read may address, never whether it may climb out of one; pass the final absolute path directly instead of \"{path}\"")
 }
 
+fn path_inside_host_root(path: &str) -> bool {
+    if path_has_parent_traversal(path) {
+        return false;
+    }
+    let Some(root) = super::host_abi::host_cwd_string() else {
+        return false;
+    };
+    let root_slashed = root.replace('\\', "/");
+    let root_trimmed = root_slashed.trim_end_matches('/');
+    let path_slashed = path.replace('\\', "/");
+    path_slashed
+        .strip_prefix(root_trimmed)
+        .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1)
+}
+
 fn project_path_rejection(verb: &str, path: &str, allow_outside_root: bool) -> Option<u64> {
-    if path_within_project(path) {
+    if path_within_project(path) || path_inside_host_root(path) {
         return None;
     }
     let read_verb = READ_ONLY_OUTSIDE_ROOT_VERBS.contains(&verb);
