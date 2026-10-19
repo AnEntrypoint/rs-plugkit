@@ -5126,6 +5126,7 @@ fn scan_uncovered_files(
     admitted: &dyn Fn(&str) -> bool,
     max_matches: usize,
     budget_ms: u64,
+    force_disk: bool,
 ) -> UncoveredScanResult {
     let empty = |listing_error: Option<String>| UncoveredScanResult {
         files_listed: 0,
@@ -5150,13 +5151,15 @@ fn scan_uncovered_files(
         UNCOVERED_SCAN_LIST_CAP.saturating_add(1),
         cfg,
         origin,
-        req.refresh,
+        force_disk,
         true,
         true,
     ) {
         Ok(u) => u,
         Err(e) => return empty(Some(e)),
     };
+    let list_truncated = wide.files.len() > UNCOVERED_SCAN_LIST_CAP;
+    let wide_complete = wide.listing_complete && !list_truncated;
     let uncovered: Vec<&String> = wide
         .files
         .iter()
@@ -5165,7 +5168,9 @@ fn scan_uncovered_files(
         .filter(|p| !uncovered_path_is_out_of_scope(p, cfg))
         .collect();
     if uncovered.is_empty() {
-        return empty(None);
+        let mut none = empty(None);
+        none.complete = wide_complete;
+        return none;
     }
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let budget_ms = req
@@ -5174,7 +5179,6 @@ fn scan_uncovered_files(
         .min(UNCOVERED_SCAN_BUDGET_MS)
         .min(budget_ms);
     let files_listed = uncovered.len();
-    let list_truncated = wide.files.len() > UNCOVERED_SCAN_LIST_CAP;
     let match_cap = max_matches.min(UNCOVERED_SCAN_MATCH_CAP);
     let mut result = UncoveredScanResult {
         files_listed,
@@ -5190,7 +5194,7 @@ fn scan_uncovered_files(
         compact_lines: Vec::new(),
         file_line_counts: Vec::new(),
         matches_truncated: false,
-        complete: wide.listing_complete && !list_truncated,
+        complete: wide_complete,
         listing_error: None,
     };
     for path in uncovered.iter() {
@@ -5801,18 +5805,19 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let cache_bytes = cache.bytes;
     scan_cache_put(cache);
 
-    let mut listed_files_all_read_within_scope = !files_truncated
+    let scope_clean = !files_truncated
         && !(matches_truncated && !walk_every_file_in_scope)
         && !budget_exhausted
         && files_skipped_too_large_count == 0
         && files_unreadable == 0
-        && universe.listing_complete
         && !glob_matched_no_files
         && glob_outside_path.is_empty()
         && !split_form_truncated;
-    let corpus_blind_spot = universe.git_tracked_files == 0
+    let mut listing_complete = universe.listing_complete;
+    let mut listed_files_all_read_within_scope = scope_clean && listing_complete;
+    let mut corpus_blind_spot = universe.git_tracked_files == 0
         && universe.git_untracked_files > 0
-        && !universe.listing_complete;
+        && !listing_complete;
     if corpus_blind_spot {
         listed_files_all_read_within_scope = false;
     }
@@ -5866,6 +5871,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             &admitted,
             max_matches,
             budget_ms.saturating_sub(elapsed_ms),
+            req.refresh || !listing_complete,
         );
         uncovered_files_listed = extra.files_listed;
         uncovered_files_scanned = extra.files_scanned;
@@ -5875,6 +5881,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         uncovered_unreadable = extra.files_unreadable;
         uncovered_complete = extra.complete && !extra.matches_truncated;
         uncovered_listing_error = extra.listing_error.clone();
+        let listing_completed_by_uncovered = !listing_complete && uncovered_complete && uncovered_listing_error.is_none();
+        if listing_completed_by_uncovered {
+            listing_complete = true;
+            corpus_blind_spot = false;
+        }
         files_scanned += extra.files_scanned;
         lines_scanned += extra.lines_scanned;
         files_with_matches += extra.files_with_matches;
@@ -5895,6 +5906,9 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         if extra.files_scanned > 0 {
             listed_files_all_read_within_scope =
                 listed_files_all_read_within_scope && uncovered_complete;
+        }
+        if listing_completed_by_uncovered {
+            listed_files_all_read_within_scope = scope_clean && uncovered_complete;
         }
     }
 
@@ -5985,7 +5999,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("no_ignore".to_string(), json!(true));
         out.insert("no_ignore_note".to_string(), json!(NO_IGNORE_NOTE));
     }
-    if !universe.listing_complete {
+    if !listing_complete {
         out.insert("listing_incomplete".to_string(), json!(true));
     }
     if let Some(reason) = &universe.walk_reason {
@@ -6048,7 +6062,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         if files_truncated {
             gaps.push(format!("the file cap cut the listing at {file_cap} files"));
         }
-        if !universe.listing_complete {
+        if !listing_complete {
             gaps.push("the file listing was cut short".to_string());
         }
         if budget_exhausted {
