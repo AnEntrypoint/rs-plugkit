@@ -2593,10 +2593,15 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                     false
                 } else {
                     let searched = crate::dispatch_ledger::ledger_path(cwd);
+                    let expected_root = if cwd.is_empty() {
+                        crate::wasm_dispatch::host_cwd_string().unwrap_or_default()
+                    } else {
+                        cwd.to_string()
+                    };
                     let (reason, hint): (&str, String) = if aged_out {
                         ("aged_out", "the ledger keeps only the most recent ledger_retained_entries dispatches of a project; this id is older than its oldest retained entry, so the dispatch ran but aged out of the window. Bind the witness instead: witness_exit_code 0, witness_output_sha256, witness_output_path and witness_ts do not depend on the ledger.".to_string())
                     } else {
-                        ("not_recorded", format!("no dispatch with this id is in the ledger {searched}, and the id is not older than the ledger's oldest entry. The expected repo root is {cwd}: the directory that holds .gm/exec-spool/.dispatch-ledger.json. A parent of the repo holds no such ledger, so pass the repo root as witness_root, or pass the dispatch_id copied from the response of the dispatch that produced the evidence, or bind the witness with witness_exit_code, witness_output_sha256, witness_output_path and witness_ts."))
+                        ("not_recorded", format!("no dispatch with this id is in the ledger {searched}, and the id is not older than the ledger's oldest entry. The expected repo root is {expected_root}: the directory that holds .gm/exec-spool/.dispatch-ledger.json. A parent of the repo holds no such ledger, so pass the repo root as witness_root, or pass the dispatch_id copied from the response of the dispatch that produced the evidence, or bind the witness with witness_exit_code, witness_output_sha256, witness_output_path and witness_ts."))
                     };
                     let body = serde_json::json!({
                         "error": format!(
@@ -2604,7 +2609,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                             dispatch_id, searched, reason
                         ),
                         "ledger_searched": searched,
-                        "expected_root": cwd,
+                        "expected_root": expected_root,
                         "deviation_kind": kind,
                         "deviation_severity": "deny",
                         "prd_id": id_target,
