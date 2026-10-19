@@ -2943,24 +2943,46 @@ pub(super) fn git_amend(body: &Value) -> u64 {
 
 pub(super) fn commit_message_shape(message: &str) -> Result<(), String> {
     let mut lines = message.lines();
-    let subject_len = lines.next().unwrap_or("").chars().count();
+    let subject = lines.next().unwrap_or("");
+    let subject_len = subject.chars().count();
     if subject_len > 50 {
+        let suggestion: String = subject.chars().take(50).collect();
         return Err(format!(
-            "subject is {} characters; the 50/72 rule allows at most 50. Re-draft the subject.",
-            subject_len
+            "subject is {} characters; the 50/72 rule allows at most 50. Re-draft the subject, for example: {}",
+            subject_len,
+            suggestion.trim_end()
         ));
     }
     for (index, line) in lines.enumerate() {
         let width = line.chars().count();
         if width > 72 {
             return Err(format!(
-                "body line {} is {} characters; the 50/72 rule wraps the body at 72. Re-wrap it.",
+                "body line {} is {} characters; the 50/72 rule wraps the body at 72. Re-wrap it, for example:\n{}",
                 index + 2,
-                width
+                width,
+                wrap_line_at(line, 72)
             ));
         }
     }
     Ok(())
+}
+
+fn wrap_line_at(line: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut current = String::new();
+    for word in line.split_whitespace() {
+        if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > width {
+            out.push_str(&current);
+            out.push('\n');
+            current.clear();
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    out.push_str(&current);
+    out
 }
 
 pub(super) const GIT_PATCH_COMMIT_TIMEOUT_MS: u64 = 60_000;
