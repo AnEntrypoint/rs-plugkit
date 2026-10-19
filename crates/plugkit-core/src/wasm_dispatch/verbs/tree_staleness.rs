@@ -78,11 +78,14 @@ pub(super) fn tree_staleness(body: &Value) -> Option<Value> {
     } else {
         format!("upstream of {dir} not fetched for over 24 h, so a behind count of 0 is unproven; git_pull, then re-run")
     };
+    let action = if behind > 0 && ahead > 0 { "merge_upstream" } else { "git_pull" };
     Some(json!({
         "behind": behind,
         "ahead": ahead,
         "head": short(head),
         "upstream_tip": short(upstream),
+        "upstream_sha": upstream,
+        "action": action,
         "fetched_ago_s": fetched_ago.map(|ms| ms / 1000),
         "note": note,
     }))
@@ -96,10 +99,13 @@ pub(super) fn stamp_tree_staleness_packed(body: &Value, packed: u64) -> u64 {
     let Some(map) = v.as_object_mut() else {
         return packed;
     };
+    let zero_hits = map.get("total_matches").and_then(Value::as_u64) == Some(0)
+        || map.get("data").and_then(|d| d.get("match_count")).and_then(Value::as_u64) == Some(0);
     mark_incomplete(map, STALE_COMPLETE_REASON);
     if let Some(data) = map.get_mut("data").and_then(Value::as_object_mut) {
         mark_incomplete(data, STALE_COMPLETE_REASON);
     }
+    map.insert("unproven_zero".to_string(), json!(zero_hits));
     map.insert("stale_tree".to_string(), stale);
     pack(v.to_string())
 }
