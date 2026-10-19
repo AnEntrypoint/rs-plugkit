@@ -27,7 +27,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7
         with:
-          key: native-check-default
+          shared-key: native-check
       - name: cargo check native host target, default features
         run: cargo check -p rs-plugkit
 
@@ -46,7 +46,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7
         with:
-          key: native-check-slim
+          shared-key: native-check
       - name: cargo check native host target, slim feature set that the wasm release ships
         run: cargo check -p rs-plugkit --features slim
 
@@ -61,6 +61,6 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7
         with:
-          key: native-check-unit
+          shared-key: native-check
       - name: cargo test native host target, pure-logic unit tests
         run: cargo test -p rs-plugkit
