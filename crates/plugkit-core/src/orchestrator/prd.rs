@@ -577,12 +577,12 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
     };
     let store_total = rows.len();
     let wanted_ids = request_strings(&request, PRD_ROW_ID_FIELDS);
-    let limit = limit.or(if wanted_ids.is_empty() {
+    let requested_statuses = request_strings(&request, PRD_ROW_STATUS_FIELDS);
+    let limit = limit.or(if wanted_ids.is_empty() && requested_statuses.is_empty() {
         Some(PRD_LIST_DEFAULT_PAGE)
     } else {
         None
     });
-    let requested_statuses = request_strings(&request, PRD_ROW_STATUS_FIELDS);
     let every_status = requested_statuses
         .iter()
         .any(|want| want.eq_ignore_ascii_case("all"));
