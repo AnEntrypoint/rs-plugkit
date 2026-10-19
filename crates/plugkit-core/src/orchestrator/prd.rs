@@ -374,11 +374,14 @@ const PRD_BRIEF_TITLE_CHARS: usize = 140;
 
 const PRD_ROW_ID_FIELDS: &[&str] = &["id", "ids", "row_id"];
 
+const PRD_ID_PREFIX_FIELDS: &[&str] = &["id_prefix", "idPrefix"];
+
 const PRD_ROW_STATUS_FIELDS: &[&str] = &["status"];
 
 const PRD_FULL_BODY_FIELDS: &[&str] = &["full", "verbose", "bodies"];
 
 const PRD_BRIEF_BODY_FIELDS: &[&str] = &["brief", "compact"];
+const PRD_LIST_ITEMS_BUDGET_CHARS: usize = 20_000;
 
 const PRD_TITLE_FIELDS: &[&str] = &["title", "subject"];
 
@@ -577,6 +580,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
     };
     let store_total = rows.len();
     let wanted_ids = request_strings(&request, PRD_ROW_ID_FIELDS);
+    let id_prefixes = request_strings(&request, PRD_ID_PREFIX_FIELDS);
     let requested_statuses = request_strings(&request, PRD_ROW_STATUS_FIELDS);
     let limit = limit.or(if wanted_ids.is_empty() && requested_statuses.is_empty() {
         Some(PRD_LIST_DEFAULT_PAGE)
@@ -626,11 +630,13 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
             let id = row_text(row, &["id"]);
             let status = row_status(row);
             let id_ok = wanted_ids.is_empty() || wanted_ids.iter().any(|want| want == &id);
+            let prefix_ok = id_prefixes.is_empty()
+                || id_prefixes.iter().any(|prefix| id.starts_with(prefix.as_str()));
             let status_ok = wanted_statuses.is_empty()
                 || wanted_statuses
                     .iter()
                     .any(|want| status_matches_filter(want, &status));
-            id_ok && status_ok
+            id_ok && prefix_ok && status_ok
         })
         .collect();
     let store = row_store::Store::prd();
@@ -672,6 +678,12 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
             }
         }
     }
+    if !id_prefixes.is_empty() {
+        selected.retain(|row| {
+            let id = row_text(row, &["id"]);
+            id_prefixes.iter().any(|prefix| id.starts_with(prefix.as_str()))
+        });
+    }
     if !wanted_ids.is_empty() && selected.is_empty() {
         return (
             String::new(),
@@ -689,18 +701,24 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         Ok(offset) => offset.min(matched),
         Err(message) => return (String::new(), message, 1),
     };
-    let page = limit.map_or(matched - offset, |n| n.min(matched - offset));
-    let truncated = offset + page < matched;
-    let window: Vec<serde_json::Value> = selected.into_iter().skip(offset).take(page).collect();
+    let requested = limit.map_or(matched - offset, |n| n.min(matched - offset));
     let brief_flag = request_flag(&request, PRD_BRIEF_BODY_FIELDS);
     let full_flag = request_flag(&request, PRD_FULL_BODY_FIELDS);
     let want_full =
         full_flag.unwrap_or_else(|| brief_flag.map(|b| !b).unwrap_or(!wanted_ids.is_empty()));
-    let items: Vec<serde_json::Value> = if want_full {
-        window
-    } else {
-        window.iter().map(brief_row).collect()
-    };
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut items_chars = 0usize;
+    for row in selected.into_iter().skip(offset).take(requested) {
+        let item = if want_full { row } else { brief_row(&row) };
+        let item_chars = item.to_string().len();
+        if !items.is_empty() && items_chars + item_chars > PRD_LIST_ITEMS_BUDGET_CHARS {
+            break;
+        }
+        items_chars += item_chars;
+        items.push(item);
+    }
+    let page = items.len();
+    let truncated = offset + page < matched;
     let mut reply = serde_json::json!({
         "items": items,
         "count": items.len(),
