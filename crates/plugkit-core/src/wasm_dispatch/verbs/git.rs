@@ -6259,7 +6259,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         Ok(v) => v,
         Err(detail) => return err_json("git_pull", detail),
     };
-    let status_probe = super::host_abi::porcelain_from(&git_call_argv(&["status", "--porcelain"], cwd));
+    let status_probe = super::host_abi::porcelain_from(&git_call_argv(&["status", "--porcelain", "-uall", "-z"], cwd));
     if status_probe.partial {
         return err_json(
             "git_pull",
@@ -6273,7 +6273,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
     }
     let dirty_tracked: Vec<String> = status_probe
         .porcelain
-        .lines()
+        .split('\0')
         .filter(|line| !line.starts_with("??"))
         .filter_map(|line| line.get(3..).map(|path| path.trim().to_string()))
         .filter(|path| !path.is_empty())
@@ -6294,7 +6294,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
     };
     let staged_gitlinks: Vec<String> = status_probe
         .porcelain
-        .lines()
+        .split('\0')
         .filter(|line| !line.starts_with("??") && !line.starts_with(' ') && line.len() > 3)
         .filter_map(|line| line.get(3..).map(|path| path.trim().to_string()))
         .filter(|path| gitlink_paths.contains(path))
