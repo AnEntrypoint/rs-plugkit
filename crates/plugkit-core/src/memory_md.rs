@@ -134,7 +134,10 @@ fn rename_batch(pairs: &[(String, String)]) -> usize {
             .collect();
         let payload = match serde_json::to_string(&Value::Array(list)) {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(_) => {
+                remove_temps(chunk);
+                continue;
+            }
         };
         let code = format!(
             "const fs=require('fs');const pairs={};let n=0;for(const x of pairs){{try{{fs.renameSync(x.t,x.p);n++;}}catch(e){{try{{fs.unlinkSync(x.t);}}catch(e2){{}}}}}}process.stdout.write('renamed:'+n);",
@@ -151,14 +154,23 @@ fn rename_batch(pairs: &[(String, String)]) -> usize {
         };
         let out = crate::wasm_dispatch::unpack_to_string_pub(packed).unwrap_or_default();
         let parsed: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
-        total += parsed
+        match parsed
             .get("stdout")
             .and_then(|v| v.as_str())
             .and_then(|s| s.strip_prefix("renamed:"))
             .and_then(|n| n.parse::<usize>().ok())
-            .unwrap_or(0);
+        {
+            Some(renamed) => total += renamed,
+            None => remove_temps(chunk),
+        }
     }
     total
+}
+
+fn remove_temps(chunk: &[(String, String)]) {
+    for (temp, _) in chunk {
+        let _ = crate::wasm_dispatch::host_remove_file_never_directory(temp);
+    }
 }
 
 fn atomic_write(path: &str, content: &str) -> bool {
