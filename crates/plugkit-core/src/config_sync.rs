@@ -309,6 +309,7 @@ fn write_remote_record(paths: &RemoteProbePaths, rec: &RemoteRecord) {
     let path = paths.record();
     let tmp = format!("{path}.tmp-{}", now_ms());
     if !crate::pkfs::write(&tmp, &rec.to_json()) {
+        let _ = crate::wasm_dispatch::host_remove_file_never_directory(&tmp);
         return;
     }
     if !rename(&tmp, &path) {
@@ -407,6 +408,7 @@ fn write_state(src: &RepoSource, st: &SyncState) {
     let path = state_path(src);
     let tmp = format!("{}.tmp-{}", path, now_ms());
     if !crate::pkfs::write(&tmp, &st.to_json()) {
+        let _ = crate::wasm_dispatch::host_remove_file_never_directory(&tmp);
         return;
     }
     if !rename(&tmp, &path) {

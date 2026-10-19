@@ -1180,6 +1180,8 @@ fn atomic_write_batch(files: &[(String, String)]) -> usize {
         let tmp = format!("{}.tmp-{}", path, pairs.len());
         if crate::wasm_dispatch::host_write(&tmp, content) {
             pairs.push((tmp, path.clone()));
+        } else {
+            let _ = crate::wasm_dispatch::host_remove_file_never_directory(&tmp);
         }
     }
     rename_batch(&pairs)

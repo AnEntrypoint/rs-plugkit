@@ -4345,6 +4345,7 @@ fn publish_codesearch_artifact(
     let artifact_text =
         serde_json::to_string(&artifact).map_err(|_| "artifact serialization failed")?;
     if !crate::wasm_dispatch::host_write(&temporary_path, &artifact_text) {
+        let _ = crate::wasm_dispatch::host_remove_file_never_directory(&temporary_path);
         return Err("artifact temporary write failed");
     }
     let pair = json!({ "temporary": temporary_path, "artifact": artifact_path }).to_string();
