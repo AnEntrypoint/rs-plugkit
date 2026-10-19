@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::{DEFAULT_REPO_CACHE_REL, DEFAULT_REPO_REFERENCE, DEFAULT_REPO_URL};
 
-const SHARED_PROBE_WAIT_MS: u64 = 15 * 1000;
+const SHARED_PROBE_WAIT_MS: u64 = 5 * 1000;
 
 const SHARED_PROBE_POLL_MS: u64 = 25;
 
