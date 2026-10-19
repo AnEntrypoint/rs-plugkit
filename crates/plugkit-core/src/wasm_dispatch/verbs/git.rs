@@ -4352,6 +4352,22 @@ pub(super) fn remote_moved_recovery_refusal(
     }
 }
 
+fn unpublished_local_paths(cwd: Option<&str>, branch: &str) -> Vec<String> {
+    let Some(remote_tip) = resolve_ref(cwd, &format!("origin/{}", branch)) else {
+        return Vec::new();
+    };
+    let Some(head) = resolve_ref(cwd, "HEAD") else {
+        return Vec::new();
+    };
+    let base = exec_git_in(cwd, &format!("merge-base {} {}", remote_tip, head))
+        .trim()
+        .to_string();
+    if !is_full_sha(&base) {
+        return Vec::new();
+    }
+    delta_paths_between(cwd, &base, &head).unwrap_or_default()
+}
+
 pub(super) fn pull_and_repush_remote_moved(
     body: &Value,
     repo: &Option<String>,
@@ -4362,7 +4378,10 @@ pub(super) fn pull_and_repush_remote_moved(
     let dirty = git_push_porcelain_in(cwd);
     let dirty_split = split_dirty_submodules(cwd, &porcelain_dirty_paths(&dirty));
     let _ = git_call_argv(&["fetch", "origin", branch], cwd);
-    let scope = body_scope_paths(body);
+    let mut scope = body_scope_paths(body);
+    if scope.is_empty() {
+        scope = unpublished_local_paths(cwd, branch);
+    }
     if !scope.is_empty() {
         let local_sha = refusal
             .get("source_sha")
