@@ -71,6 +71,7 @@ pub struct VerbStat {
     pub count: u64,
     pub failure_rate: f64,
     pub gate_drift_rate: f64,
+    pub not_found: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2812,26 +2813,41 @@ fn observations_for_result() -> Result<(Vec<ObservationRecord>, usize), String> 
 }
 
 #[cfg(target_arch = "wasm32")]
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct VerbTally {
+    count: u64,
+    failures: u64,
+    drifts: u64,
+    not_found: u64,
+}
+
+#[cfg(target_arch = "wasm32")]
 fn per_verb_stats(observations: &[ObservationRecord]) -> Vec<VerbStat> {
-    let mut tallies: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
+    let mut tallies: BTreeMap<String, VerbTally> = BTreeMap::new();
     for record in observations {
         let verb = record.verb.clone().unwrap_or_else(|| "unknown".to_owned());
-        let tally = tallies.entry(verb).or_insert((0, 0, 0));
-        tally.0 += 1;
-        if !record.succeeded() && !record.no_match {
-            tally.1 += 1;
+        let tally = tallies.entry(verb).or_default();
+        tally.count += 1;
+        if !record.succeeded() {
+            if record.no_match {
+                tally.not_found += 1;
+            } else {
+                tally.failures += 1;
+            }
         }
         if record.is_gate_drift_failure() {
-            tally.2 += 1;
+            tally.drifts += 1;
         }
     }
     tallies
         .into_iter()
-        .map(|(verb, (count, failures, drifts))| VerbStat {
+        .map(|(verb, tally)| VerbStat {
             verb,
-            count,
-            failure_rate: failures as f64 / count as f64,
-            gate_drift_rate: drifts as f64 / count as f64,
+            count: tally.count,
+            failure_rate: tally.failures as f64 / tally.count as f64,
+            gate_drift_rate: tally.drifts as f64 / tally.count as f64,
+            not_found: tally.not_found,
         })
         .collect()
 }
@@ -3016,6 +3032,7 @@ fn result_json(result: &DreamRsiResult) -> Value {
                     "count": stat.count,
                     "failure_rate": stat.failure_rate,
                     "gate_drift_rate": stat.gate_drift_rate,
+                    "not_found": stat.not_found,
                 }))
                 .collect::<Vec<_>>(),
             "proposals": proposals
