@@ -110,8 +110,8 @@ pub fn drain_for_session(session_id: Option<&str>) -> Value {
     let now = super::state::now_ms();
     let before_len = records.len();
     records.retain(|r| {
-        let ts = (r.get("ts").and_then(|v| v.as_u64()).unwrap_or(0) as u128).min(now);
-        ts == 0 || now - ts <= MAX_RECORD_AGE_MS
+        let ts = r.get("ts").and_then(|v| v.as_u64()).unwrap_or(0) as u128;
+        ts == 0 || (ts <= now && now - ts <= MAX_RECORD_AGE_MS)
     });
     let mut dirty = records.len() != before_len;
 
