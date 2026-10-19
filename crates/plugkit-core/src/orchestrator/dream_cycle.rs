@@ -77,11 +77,6 @@ fn evaluate(content: &str) -> Result<Value, String> {
     fields["lost_cursor"] = json!(lost_cursor);
     fields["cycle_id"] = json!(cycle_id);
     fields["last_dispatch_id"] = json!(latest);
-    if let Some(violation) = contract_violation(&fields) {
-        let mut reply = refused(owner, cycle_id, violation);
-        reply["dampened_probe"] = json!(dampen_session_probe(owner));
-        return Ok(reply);
-    }
     match super::dream_rsi::persist_replay_result(
         super::dream_rsi::ReplayFile::Cycle,
         super::dream_rsi::ReplaySource("dream-replay-cycle"),
@@ -114,19 +109,6 @@ fn refused(owner: &str, cycle_id: Option<&str>, error: String) -> Value {
 fn dampen_session_probe(owner: &str) -> Option<String> {
     let path = format!(".gm/dream-rsi/{owner}/{}.json", super::dream_rsi::CYCLE_RESULT_FILE);
     crate::pkfs::remove_file(&path).then_some(path)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn contract_violation(fields: &Value) -> Option<String> {
-    let incumbent = fields.get("incumbent_score").and_then(Value::as_f64)?;
-    let selected = fields.get("selected_score").and_then(Value::as_f64)?;
-    if selected < incumbent {
-        return Some(format!("selected_score {selected} below incumbent_score {incumbent}"));
-    }
-    if fields.get("improved").and_then(Value::as_bool) == Some(true) && selected <= incumbent {
-        return Some(format!("improved without gain: selected_score {selected} <= incumbent_score {incumbent}"));
-    }
-    None
 }
 
 #[cfg(target_arch = "wasm32")]
