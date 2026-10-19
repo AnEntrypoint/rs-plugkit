@@ -24,7 +24,7 @@ Module-scoped rules for the sources in this directory. The [root AGENTS.md](../.
 ### Literal scan (`scan_literal`, `scan_universe.rs`)
 
 - `scan_literal` skips digest, index, embedding, vector and fusion work entirely. Its limits `LITERAL_SCAN_MAX_FILES` and `LITERAL_SCAN_MAX_FILE_BYTES` are independent of `IndexConfig::digest_max_files` and `max_file_bytes`.
-- Any coverage-affecting bound, unreadable file or code-rule exclusion (`excluded_by_rule`, every rule except `gm_state_dir` and `agentplug_kv_cache`) clears `exhaustive`; `files_skipped_binary` never does. The per-path listing rides only when a rule dropped code (`insert_excluded_by_rule`, `GM_STATE_EXCLUSION_RULES`). `finish_scan_reply` makes that call, not `scan_literal`.
+- Any coverage-affecting bound, unreadable file or code-rule exclusion (`excluded_by_rule`, every rule except `gm_state_dir`, `agentplug_kv_cache` and `gm_exec_spool`) clears `exhaustive`; `files_skipped_binary` never does. The per-path listing rides only when a rule dropped code (`insert_excluded_by_rule`, `GM_STATE_EXCLUSION_RULES`). `finish_scan_reply` makes that call, not `scan_literal`.
 - `host_read` returns `None` for both I/O failure and non-UTF-8; `host_stat` separates them (stat ok = binary skip, stat failed = unreadable gap). Request `file_cap + 1` entries from `list_scan_universe`.
 - Unicode lowercasing can change byte width (U+0130); `LiteralMatcher::find_all` then falls back to a char-aligned scan and returns every match per line.
 - A caller-named scope (`path`, `paths`, `root`) beats every exclusion rule: `named_scope` short-circuits `exclusion_rule` and skips `prune_own_state`; `path` is a literal path or glob, never a regex.
