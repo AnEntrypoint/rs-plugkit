@@ -1485,7 +1485,11 @@ fn automatic_replay(session_id: Option<&str>) -> Value {
             *dropped.entry("unscored").or_default() += 1;
             continue;
         };
-        let cost = observation.prd_open_count.unwrap_or(0)
+        let Some(prd_open) = observation.prd_open_count else {
+            *dropped.entry("prd_count_unknown").or_default() += 1;
+            continue;
+        };
+        let cost = prd_open
             + observation.mutable_open_count.unwrap_or(0)
             + 1;
         let replay_score = quality - DEFAULT_CYCLE_BETA1 * cost as f64;
