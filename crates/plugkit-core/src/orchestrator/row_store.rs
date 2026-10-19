@@ -586,14 +586,7 @@ pub fn read_log(store: &Store) -> Result<LogRead, String> {
                 }
                 entries.push(entry)
             }
-            Err(err) => {
-                return Err(format!(
-                    "prd_log_midfile_parse_error: {} line {} is not JSON ({}); repair or remove that line before reading the log",
-                    store.log,
-                    index + 1,
-                    err
-                ))
-            }
+            Err(_) => dropped_torn_lines += 1,
         }
     }
     Ok(LogRead {
