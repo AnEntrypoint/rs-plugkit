@@ -1464,7 +1464,7 @@ pub(super) const GREP_ACCEPTED_FIELDS: &[&str] = &[
     "pattern", "query", "mode", "comments", "help",
     "path", "paths", "files",
     "glob", "include", "path_glob", "exclude", "exclude_glob", "exclude_globs",
-    "output_mode", "outputMode", "detail", "columns",
+    "output_mode", "outputMode", "detail", "columns", "combine", "term_combination", "verbatim",
     "regex", "fixed_strings", "fixedStrings", "case_insensitive", "ignore_case", "whole_word",
     "context", "max_files",
     "no_ignore", "include_ignored",
