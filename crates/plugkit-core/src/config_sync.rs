@@ -12,6 +12,10 @@ const BACKOFF_MAX_MS: u64 = 60 * 60 * 1000;
 
 const LOCK_STALE_MS: u64 = 10 * 60 * 1000;
 
+const SHARED_PROBE_POLL_MS: u64 = 250;
+
+const SHARED_PROBE_WAIT_MS: u64 = 5 * 1000;
+
 const UNMEASURED_REF_INTERVAL_MS: u64 = 60 * 1000;
 
 const PROBE_BACKOFF_BASE_MS: u64 = 60 * 1000;
@@ -345,13 +349,23 @@ fn global_remote_tip_with(src: &RepoSource, now: u64, forced: bool) -> GlobalTip
             let _ = unlock(&lock);
             outcome
         }
-        LockProbe::Held => match shared_probe_since(&paths, baseline) {
-            Some(shared) => GlobalTip::Known(shared.remote_sha),
-            None => GlobalTip::Held(format!(
-                "config probe lock {} is held by another process; the guest cannot wait for its result",
-                paths.lock()
-            )),
-        },
+        LockProbe::Held => {
+            let mut waited_ms = 0;
+            loop {
+                if let Some(shared) = shared_probe_since(&paths, baseline) {
+                    break GlobalTip::Known(shared.remote_sha);
+                }
+                if waited_ms >= SHARED_PROBE_WAIT_MS {
+                    break GlobalTip::Held(format!(
+                        "config probe lock {} stayed held by another process for {} ms; the guest gave up waiting for its result",
+                        paths.lock(),
+                        SHARED_PROBE_WAIT_MS
+                    ));
+                }
+                crate::orchestrator::sleep_ms(SHARED_PROBE_POLL_MS);
+                waited_ms += SHARED_PROBE_POLL_MS;
+            }
+        }
         LockProbe::Failed(reason) => GlobalTip::Unavailable(reason),
     }
 }
