@@ -7191,6 +7191,10 @@ pub(super) fn ci_status_summarize(
     } else if any_cancelled {
         overall = "cancelled";
     }
+    let run_url = failed_jobs
+        .first()
+        .and_then(|job| job.get("run_url").and_then(Value::as_str).map(String::from))
+        .or(run_url);
     json!({
         "ok": true, "verb": "ci-status", "data": {
             "status": overall, "repo": repo, "sha": sha,
