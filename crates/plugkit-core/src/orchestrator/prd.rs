@@ -2522,16 +2522,24 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     #[cfg(target_arch = "wasm32")]
     let (dispatch_verified, evidence_in_ledger, bound_in_project, verified_via) = {
         let cwd = resolve_cwd.as_deref().unwrap_or("");
+        let host_root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
         let known_via = |dispatch_id: &str| -> Result<Option<&'static str>, String> {
-            if crate::dispatch_ledger::lookup(cwd, dispatch_id)?.is_some() {
-                Ok(Some("ledger"))
-            } else if dispatch_in_spool_out(cwd, dispatch_id) {
-                Ok(Some("spool_out"))
-            } else if crate::dispatch_ledger::submodule_holding(cwd, dispatch_id)?.is_some() {
-                Ok(Some("nested_ledger"))
-            } else {
-                Ok(None)
+            let mut roots: Vec<&str> = vec![cwd];
+            if !host_root.is_empty() && host_root.as_str() != cwd {
+                roots.push(host_root.as_str());
             }
+            for root in roots {
+                if crate::dispatch_ledger::lookup(root, dispatch_id)?.is_some() {
+                    return Ok(Some("ledger"));
+                }
+                if dispatch_in_spool_out(root, dispatch_id) {
+                    return Ok(Some("spool_out"));
+                }
+                if crate::dispatch_ledger::submodule_holding(root, dispatch_id)?.is_some() {
+                    return Ok(Some("nested_ledger"));
+                }
+            }
+            Ok(None)
         };
         let evidence_in_ledger = match evidence_dispatch_id.as_deref() {
             None => None,
