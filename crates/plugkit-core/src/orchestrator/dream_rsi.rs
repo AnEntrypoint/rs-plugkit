@@ -502,6 +502,65 @@ fn session_store_path(name: &str) -> Result<String, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn parse_store(raw: &str, label: &str) -> Result<Vec<Value>, String> {
+    let invalid = || format!("{label} store is invalid");
+    if raw.trim_start().starts_with('[') {
+        return serde_json::from_str::<Value>(raw)
+            .ok()
+            .and_then(|value| value.as_array().cloned())
+            .ok_or_else(invalid);
+    }
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .ok()
+                .filter(Value::is_object)
+                .ok_or_else(invalid)
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn append_store(path: &str, kind: &str, records: Vec<Value>) -> Result<(), String> {
+    let raw = crate::pkfs::read_to_string(path).unwrap_or_default();
+    if raw.trim_start().starts_with('[') {
+        let migrated = parse_store(&raw, kind)?
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>();
+        if !matches!(
+            crate::pkfs::cas_write(path, &raw, &migrated),
+            crate::pkfs::CasWriteOutcome::Swapped
+        ) {
+            return Err(format!("{kind} store changed during migration"));
+        }
+    }
+    for record in records {
+        super::row_store::append_chained(path, kind, record)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn latest_per_owner_id(records: Vec<Value>) -> Vec<Value> {
+    let key = |record: &Value| {
+        (
+            record.get("owner_session_id").cloned(),
+            record.get("id").cloned(),
+        )
+    };
+    let mut latest: Vec<Value> = Vec::new();
+    for record in records {
+        match latest.iter().position(|kept| key(kept) == key(&record)) {
+            Some(index) => latest[index] = record,
+            None => latest.push(record),
+        }
+    }
+    latest
+}
+
+#[cfg(target_arch = "wasm32")]
 fn is_gate_drift_code(code: &str) -> bool {
     matches!(
         code,
@@ -1681,14 +1740,12 @@ fn register_policy(content: &str) -> Result<Value, String> {
         .ok_or_else(|| "dream-policy-register max_online_rounds must be a positive integer when present".to_string())).transpose()?;
     let policy_path = session_store_path("policies")?;
     let raw = crate::pkfs::read_to_string(&policy_path).unwrap_or_else(|| "[]".to_string());
-    let mut policies = serde_json::from_str::<Value>(&raw)
-        .map_err(|_| "dream-policy-register policy store is invalid".to_string())?
-        .as_array()
-        .cloned()
-        .ok_or_else(|| "dream-policy-register policy store is invalid".to_string())?
-        .into_iter()
-        .map(|entry| verify_record("policy", &entry))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut policies = latest_per_owner_id(
+        parse_store(&raw, "dream-policy-register policy")?
+            .into_iter()
+            .map(|entry| verify_record("policy", &entry))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     if policies.iter().any(|entry| {
         entry.get("id").and_then(Value::as_str) == Some(policy.id.as_str())
             && entry.get("owner_session_id").and_then(Value::as_str)
@@ -1699,6 +1756,7 @@ fn register_policy(content: &str) -> Result<Value, String> {
             policy.id
         ));
     }
+    let mut flipped: Vec<Value> = Vec::new();
     if deployed {
         let incumbent = policies
             .iter()
@@ -1738,21 +1796,22 @@ fn register_policy(content: &str) -> Result<Value, String> {
         for entry in &mut policies {
             if entry.get("owner_session_id").and_then(Value::as_str)
                 == Some(owner_session_id.as_str())
+                && entry.get("deployed") != Some(&Value::Bool(false))
             {
                 entry["deployed"] = Value::Bool(false);
+                flipped.push(entry.clone());
             }
         }
     }
     let deployed_at = deployed.then(|| super::state::now_ms() as i64);
     let new_policy = json!({ "id": policy.id, "owner_session_id": owner_session_id, "roots": policy.roots, "max_nodes": policy.max_nodes, "attempt": policy.attempt, "group_size": policy.group_size, "stop": policy.stop.map(Stop::name), "deployed": deployed, "deployed_at": deployed_at, "max_online_rounds": max_online_rounds, "online_rounds": Vec::<u64>::new() });
-    policies.push(new_policy);
-    let signed = policies
+    flipped.push(new_policy);
+    let signed = flipped
         .into_iter()
         .map(|record| signed_record("policy", record))
         .collect::<Result<Vec<_>, _>>()?;
-    if !crate::pkfs::write(&policy_path, &Value::Array(signed).to_string()) {
-        return Err("dream-policy-register could not persist policy".to_string());
-    }
+    append_store(&policy_path, "dream-policy", signed)
+        .map_err(|_| "dream-policy-register could not persist policy".to_string())?;
     Ok(json!({ "ok": true, "policy_id": policy.id, "deployed": deployed }))
 }
 
@@ -1827,16 +1886,8 @@ fn evaluator_receipt(content: &str) -> Result<Value, String> {
         json!({ "id": receipt_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": outcome_score(exit_code, false, output_bytes), "cost": 1, "parent_id": parent_id, "owner_session_id": owner_session_id, "metric": "completed-dispatch-success" }),
     )?;
     let path = evaluator_receipt_path()?;
-    let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
-    let mut receipts = serde_json::from_str::<Value>(&raw)
-        .map_err(|_| "dream-evaluator-receipt store is invalid".to_string())?
-        .as_array()
-        .cloned()
-        .ok_or_else(|| "dream-evaluator-receipt store is invalid".to_string())?;
-    receipts.push(signed.clone());
-    if !crate::pkfs::write(&path, &Value::Array(receipts).to_string()) {
-        return Err("dream-evaluator-receipt could not persist receipt".to_string());
-    }
+    append_store(&path, "dream-evaluator-receipt", vec![signed.clone()])
+        .map_err(|_| "dream-evaluator-receipt could not persist receipt".to_string())?;
     Ok(signed)
 }
 
@@ -1859,11 +1910,7 @@ fn record_discovery(content: &str) -> Result<Value, String> {
     let receipt_path = evaluator_receipt_path()?;
     let raw_receipts = crate::pkfs::read_to_string(&receipt_path)
         .ok_or_else(|| "dream-discovery-record has no evaluator receipts".to_string())?;
-    let receipts = serde_json::from_str::<Value>(&raw_receipts)
-        .map_err(|_| "dream-discovery-record evaluator receipt store is invalid".to_string())?
-        .as_array()
-        .cloned()
-        .ok_or_else(|| "dream-discovery-record evaluator receipt store is invalid".to_string())?;
+    let receipts = parse_store(&raw_receipts, "dream-discovery-record evaluator receipt")?;
     let signed_receipt = receipts
         .iter()
         .find(|receipt| receipt.get("id").and_then(Value::as_str) == Some(receipt_id.as_str()))
@@ -1894,14 +1941,12 @@ fn record_discovery(content: &str) -> Result<Value, String> {
     let policy_path = session_store_path("policies")?;
     let raw_policies = crate::pkfs::read_to_string(&policy_path)
         .ok_or_else(|| "dream-discovery-record has no registered policies".to_string())?;
-    let mut policies = serde_json::from_str::<Value>(&raw_policies)
-        .map_err(|_| "dream-discovery-record policy store is invalid".to_string())?
-        .as_array()
-        .cloned()
-        .ok_or_else(|| "dream-discovery-record policy store is invalid".to_string())?
-        .into_iter()
-        .map(|entry| verify_record("policy", &entry))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut policies = latest_per_owner_id(
+        parse_store(&raw_policies, "dream-discovery-record policy")?
+            .into_iter()
+            .map(|entry| verify_record("policy", &entry))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     let policy_index = policies
         .iter()
         .position(|policy| {
@@ -1942,11 +1987,7 @@ fn record_discovery(content: &str) -> Result<Value, String> {
     }
     let discovery_path = session_store_path("discovery")?;
     let raw = crate::pkfs::read_to_string(&discovery_path).unwrap_or_else(|| "[]".to_string());
-    let mut records = serde_json::from_str::<Value>(&raw)
-        .map_err(|_| "dream-discovery-record store is invalid".to_string())?
-        .as_array()
-        .cloned()
-        .ok_or_else(|| "dream-discovery-record store is invalid".to_string())?
+    let records = parse_store(&raw, "dream-discovery-record")?
         .into_iter()
         .map(|entry| verify_record("discovery", &entry))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1968,24 +2009,14 @@ fn record_discovery(content: &str) -> Result<Value, String> {
         }
     }
     let record = json!({ "id": id, "evaluator_receipt_id": receipt_id, "owner_session_id": owner_session_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": evaluator_score, "cost": cost, "round": round, "parent_id": parent_id });
-    records.push(record.clone());
-    let signed = records
-        .into_iter()
-        .map(|record| signed_record("discovery", record))
-        .collect::<Result<Vec<_>, _>>()?;
-    if !crate::pkfs::write(&discovery_path, &Value::Array(signed).to_string()) {
-        return Err("dream-discovery-record could not persist discovery record".to_string());
-    }
+    let signed = signed_record("discovery", record)?;
+    append_store(&discovery_path, "dream-discovery-record", vec![signed])
+        .map_err(|_| "dream-discovery-record could not persist discovery record".to_string())?;
     if policies_dirty {
-        let signed_policies = policies
-            .into_iter()
-            .map(|record| signed_record("policy", record))
-            .collect::<Result<Vec<_>, _>>()?;
-        if !crate::pkfs::write(&policy_path, &Value::Array(signed_policies).to_string()) {
-            return Err(
-                "dream-discovery-record could not persist policy online-round usage".to_string(),
-            );
-        }
+        let signed_policy = signed_record("policy", policies[policy_index].clone())?;
+        append_store(&policy_path, "dream-policy", vec![signed_policy]).map_err(|_| {
+            "dream-discovery-record could not persist policy online-round usage".to_string()
+        })?;
     }
     Ok(json!({ "ok": true, "discovery_id": id }))
 }
@@ -2003,11 +2034,7 @@ fn seal(content: &str) -> Result<Value, String> {
     let discovery_path = session_store_path("discovery")?;
     let raw_records = crate::pkfs::read_to_string(&discovery_path)
         .ok_or_else(|| "dream-world-seal has no discovery records".to_string())?;
-    let records = serde_json::from_str::<Value>(&raw_records)
-        .map_err(|_| "dream-world-seal discovery record store is invalid".to_string())?
-        .as_array()
-        .cloned()
-        .ok_or_else(|| "dream-world-seal discovery record store is invalid".to_string())?
+    let records = parse_store(&raw_records, "dream-world-seal discovery record")?
         .into_iter()
         .map(|entry| verify_record("discovery", &entry))
         .collect::<Result<Vec<_>, _>>()?;
@@ -2018,7 +2045,7 @@ fn seal(content: &str) -> Result<Value, String> {
         let receipt_id = string_field(record, "evaluator_receipt_id")?;
         let receipt_path = evaluator_receipt_path()?;
         let raw_receipts = crate::pkfs::read_to_string(&receipt_path).ok_or_else(|| "dream-world-seal has no evaluator receipts".to_string())?;
-        let receipts = serde_json::from_str::<Value>(&raw_receipts).map_err(|_| "dream-world-seal evaluator receipt store is invalid".to_string())?.as_array().cloned().ok_or_else(|| "dream-world-seal evaluator receipt store is invalid".to_string())?;
+        let receipts = parse_store(&raw_receipts, "dream-world-seal evaluator receipt")?;
         let receipt = receipts.iter().find(|receipt| receipt.get("id").and_then(Value::as_str) == Some(receipt_id.as_str())).ok_or_else(|| format!("dream-world-seal evaluator receipt {receipt_id} is absent"))?;
         let evaluator = verify_record("evaluator", receipt)?;
         if evaluator.get("policy_id").and_then(Value::as_str) != record.get("policy_id").and_then(Value::as_str)
@@ -2129,14 +2156,12 @@ fn replay_round(content: &str) -> Result<Value, String> {
         let policy_path = session_store_path("policies")?;
         let raw_policies = crate::pkfs::read_to_string(&policy_path)
             .ok_or_else(|| "dream-replay-round has no registered policies".to_string())?;
-        let stored_policies = serde_json::from_str::<Value>(&raw_policies)
-            .map_err(|_| "dream-replay-round policy store is invalid".to_string())?
-            .as_array()
-            .cloned()
-            .ok_or_else(|| "dream-replay-round policy store is invalid".to_string())?
-            .into_iter()
-            .map(|entry| verify_record("policy", &entry))
-            .collect::<Result<Vec<_>, _>>()?;
+        let stored_policies = latest_per_owner_id(
+            parse_store(&raw_policies, "dream-replay-round policy")?
+                .into_iter()
+                .map(|entry| verify_record("policy", &entry))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         let stored_policy = stored_policies
             .iter()
             .find(|policy| {
@@ -2392,14 +2417,12 @@ fn evaluate(content: &str) -> Result<Value, String> {
     let policy_path = session_store_path("policies")?;
     let raw_policies = crate::pkfs::read_to_string(&policy_path)
         .ok_or_else(|| "dream-replay has no registered policies".to_string())?;
-    let stored_policies = serde_json::from_str::<Value>(&raw_policies)
-        .map_err(|_| "dream-replay policy store is invalid".to_string())?
-        .as_array()
-        .cloned()
-        .ok_or_else(|| "dream-replay policy store is invalid".to_string())?
-        .into_iter()
-        .map(|entry| verify_record("policy", &entry))
-        .collect::<Result<Vec<_>, _>>()?;
+    let stored_policies = latest_per_owner_id(
+        parse_store(&raw_policies, "dream-replay policy")?
+            .into_iter()
+            .map(|entry| verify_record("policy", &entry))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     let policies = policy_ids
         .iter()
         .map(|id| {
