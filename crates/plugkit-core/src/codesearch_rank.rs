@@ -643,7 +643,17 @@ fn commit_hit(
                 "message": message,
             });
             if let Some(lines) = tree_snippet(opts, path, line, files) {
-                hit["snip"] = json!(lines);
+                let subject = squeeze(
+                    commit.get("message").and_then(|v| v.as_str()).unwrap_or("").lines().next().unwrap_or("").trim(),
+                    SNIPPET_CHARS,
+                );
+                let lines: Vec<String> = lines
+                    .into_iter()
+                    .filter(|l| subject.is_empty() || !l.contains(subject.as_str()))
+                    .collect();
+                if !lines.is_empty() {
+                    hit["snip"] = json!(lines);
+                }
             }
             hit
         }
