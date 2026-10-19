@@ -1421,19 +1421,8 @@ fn fs_readdir(body: &Value) -> u64 {
     if let Some(rejection) = read_path_rejection("fs_readdir", path, body) {
         return rejection;
     }
-    let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
-    let v = unpack_to_value(packed);
-    if v.is_null() {
+    let Some(entries) = super::host_abi::host_readdir(path) else {
         return fs_readdir_unlisted(path);
-    }
-    let entries = match v {
-        Value::Array(entries) => entries,
-        other => {
-            if other.get("missing").and_then(Value::as_bool) == Some(true) || other.get("error").is_some() {
-                return fs_readdir_unlisted(path);
-            }
-            return ok("fs_readdir", other);
-        }
     };
     let limit = body
         .get("limit")

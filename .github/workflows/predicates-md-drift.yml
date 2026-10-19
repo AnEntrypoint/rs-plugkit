@@ -29,10 +29,10 @@ jobs:
           workspaces: rs-plugkit
       - name: generate predicates.md from the live registry
         working-directory: rs-plugkit
-        run: cargo run -q -p rs-plugkit --example predicates_md > /tmp/generated-predicates.md
+        run: cargo run -q -p rs-plugkit --example predicates_md > "${{ runner.temp }}/generated-predicates.md"
       - name: diff generated output against gm-config's committed copy
         run: |
-          if ! diff -u gm-config/fsm/predicates.md /tmp/generated-predicates.md; then
+          if ! diff -u gm-config/fsm/predicates.md "${{ runner.temp }}/generated-predicates.md"; then
             echo "::error::gm-config/fsm/predicates.md has drifted from rs-plugkit's predicate_registry.rs. Regenerate it (see the file's own header) and commit the result."
             exit 1
           fi
