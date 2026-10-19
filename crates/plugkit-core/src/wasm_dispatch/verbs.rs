@@ -3328,7 +3328,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "codesearch" | "code_search" | "search" => {
             tree_staleness::stamp_tree_staleness_packed(&body, codesearch(&body))
         }
-        "grep" | "rg" => grep(&body),
+        "grep" | "rg" => tree_staleness::stamp_tree_staleness_packed(&body, grep(&body)),
         "callers" => callers(&body),
         "callees" => callees(&body),
         "impact" => impact(&body),
