@@ -9,14 +9,18 @@ on:
       - "formal/**"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: formal
     steps:
-      - uses: actions/checkout@v5
-      - uses: leanprover/lean-action@v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: leanprover/lean-action@24581d74d674803a25a81b10b059c5c0cdd344c6
         with:
           lake-package-directory: formal
