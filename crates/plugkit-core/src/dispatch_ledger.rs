@@ -62,9 +62,77 @@ fn sweep_stale_spool_tmp(cwd: &str, now: u64) {
 
 const LEDGER_BODY_MAX_CHARS: usize = 8192;
 
+const SECRET_KEYS: [&str; 8] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "apikey",
+    "api_key",
+    "authorization",
+    "bearer",
+];
+
+fn redact_secrets(body: &str) -> String {
+    let lower = body.to_ascii_lowercase();
+    let lb = lower.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut cursor = 0usize;
+    let mut i = 0usize;
+    while i < lb.len() {
+        let Some(key) = SECRET_KEYS
+            .iter()
+            .find(|k| lb[i..].starts_with(k.as_bytes()))
+        else {
+            i += 1;
+            continue;
+        };
+        let mut j = i + key.len();
+        while j < lb.len() && (lb[j].is_ascii_alphanumeric() || lb[j] == b'_') {
+            j += 1;
+        }
+        let skip_quotes = |mut k: usize| {
+            while k < lb.len() && matches!(lb[k], b'"' | b'\'' | b' ' | b'\t') {
+                k += 1;
+            }
+            k
+        };
+        let mut k = skip_quotes(j);
+        let value_start = if k < lb.len() && matches!(lb[k], b':' | b'=') {
+            skip_quotes(k + 1)
+        } else if k > j && matches!(*key, "bearer" | "authorization") {
+            k
+        } else {
+            i = j;
+            continue;
+        };
+        k = value_start;
+        let mut end = k;
+        while end < lb.len()
+            && !matches!(
+                lb[end],
+                b'"' | b'\'' | b',' | b'&' | b'}' | b']' | b')' | b';' | b'\n' | b'\r'
+            )
+        {
+            end += 1;
+        }
+        if end == k {
+            i = j;
+            continue;
+        }
+        out.push_str(&body[cursor..k]);
+        out.push_str("[REDACTED]");
+        cursor = end;
+        i = end;
+    }
+    out.push_str(&body[cursor..]);
+    out
+}
+
 fn bounded_request_body(body: &str) -> (String, bool) {
-    let text: String = body.chars().take(LEDGER_BODY_MAX_CHARS).collect();
-    let truncated = text.len() < body.len();
+    let redacted = redact_secrets(body);
+    let text: String = redacted.chars().take(LEDGER_BODY_MAX_CHARS).collect();
+    let truncated = text.len() < redacted.len();
     (text, truncated)
 }
 
@@ -222,16 +290,31 @@ pub fn lookup(cwd: &str, dispatch_id: &str) -> Option<Value> {
 }
 
 pub fn submodule_holding(cwd: &str, dispatch_id: &str) -> Option<String> {
-    let root = cwd.trim_end_matches('/').trim_end_matches('\\');
-    let gitmodules = host_read(&format!("{}/.gitmodules", root)).unwrap_or_default();
-    gitmodules
+    let project = if cwd.is_empty() {
+        crate::wasm_dispatch::host_cwd_string().unwrap_or_default()
+    } else {
+        cwd.to_string()
+    };
+    let root = project.trim_end_matches('/').trim_end_matches('\\');
+    let under = |child: &str| format!("{}/{}", root, child);
+    let gitmodules = host_read(&under(".gitmodules")).unwrap_or_default();
+    let submodules: Vec<String> = gitmodules
         .lines()
         .filter_map(|line| {
             line.trim()
                 .strip_prefix("path")
                 .and_then(|rest| rest.trim_start().strip_prefix('='))
-                .map(|path| format!("{}/{}", root, path.trim()))
+                .map(|path| under(path.trim()))
         })
+        .collect();
+    let candidates = submodules
+        .iter()
+        .flat_map(|sub| {
+            std::iter::once(sub.clone()).chain(crate::scan_universe::nested_worktree_dirs(sub))
+        })
+        .chain(crate::scan_universe::nested_worktree_dirs(root));
+    candidates
+        .into_iter()
         .find(|sub_cwd| lookup(sub_cwd, dispatch_id).is_some())
         .map(|sub_cwd| ledger_path(&sub_cwd))
 }
