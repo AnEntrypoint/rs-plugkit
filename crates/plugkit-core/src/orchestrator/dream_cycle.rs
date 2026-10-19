@@ -77,6 +77,8 @@ fn evaluate(content: &str) -> Result<Value, String> {
     fields["lost_cursor"] = json!(lost_cursor);
     fields["cycle_id"] = json!(cycle_id);
     fields["last_dispatch_id"] = json!(latest);
+    let replayed_worlds = fields["history"]["worlds"].clone();
+    let replayed_observations = fields["history"]["observations"].clone();
     match super::dream_rsi::persist_replay_result(
         super::dream_rsi::ReplayFile::Cycle,
         super::dream_rsi::ReplaySource("dream-replay-cycle"),
@@ -86,7 +88,11 @@ fn evaluate(content: &str) -> Result<Value, String> {
             "ok": true, "kind": "observations", "status": "replayed",
             "owner_session_id": owner, "cycle_id": cycle_id,
             "last_dispatch_id": latest, "cycle": fields,
-            "replay": {"replays": [{"dispatch_id": latest}]},
+            "replay": {
+                "replays": [{"dispatch_id": latest}],
+                "replayed_worlds": replayed_worlds,
+                "replayed_observations": replayed_observations
+            },
             "replay_result_path": replay_result_path
         })),
         Err(error) => Ok(json!({
