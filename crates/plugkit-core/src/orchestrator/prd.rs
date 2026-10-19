@@ -2596,7 +2596,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                     let (reason, hint): (&str, String) = if aged_out {
                         ("aged_out", "the ledger keeps only the most recent ledger_retained_entries dispatches of a project; this id is older than its oldest retained entry, so the dispatch ran but aged out of the window. Bind the witness instead: witness_exit_code 0, witness_output_sha256, witness_output_path and witness_ts do not depend on the ledger.".to_string())
                     } else {
-                        ("not_recorded", format!("no dispatch with this id is in the searched ledger {searched} and the id is not older than the ledger's oldest entry, so the cwd may be another project or the id may be invented. Pass the dispatch_id copied from the response of the dispatch that produced the evidence, or bind the witness with witness_exit_code, witness_output_sha256, witness_output_path and witness_ts."))
+                        ("not_recorded", format!("no dispatch with this id is in the ledger {searched}, and the id is not older than the ledger's oldest entry. The expected repo root is {cwd}: the directory that holds .gm/exec-spool/.dispatch-ledger.json. A parent of the repo holds no such ledger, so pass the repo root as witness_root, or pass the dispatch_id copied from the response of the dispatch that produced the evidence, or bind the witness with witness_exit_code, witness_output_sha256, witness_output_path and witness_ts."))
                     };
                     let body = serde_json::json!({
                         "error": format!(
@@ -2604,6 +2604,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                             dispatch_id, searched, reason
                         ),
                         "ledger_searched": searched,
+                        "expected_root": cwd,
                         "deviation_kind": kind,
                         "deviation_severity": "deny",
                         "prd_id": id_target,
@@ -2818,13 +2819,13 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     #[cfg(target_arch = "wasm32")]
     if !annotate_only && deviation_refuses("prd-resolve-self-witness") {
         if let Some(dispatch_id) = witness_dispatch_id.as_deref() {
-            let dispatch_session = crate::dispatch_ledger::lookup(
-                resolve_cwd.as_deref().unwrap_or(""),
-                dispatch_id,
-            )
-            .ok()
-            .flatten()
-            .and_then(|entry| entry.get("session_id")?.as_str().map(str::to_string));
+            let cwd = resolve_cwd.as_deref().unwrap_or("");
+            let dispatch_session = crate::dispatch_ledger::lookup(cwd, dispatch_id)
+                .ok()
+                .flatten()
+                .and_then(|entry| entry.get("session_id")?.as_str().map(str::to_string));
+            let resolving_session = body_session_id(&request_object(trimmed))
+                .or_else(crate::orchestrator::state::dispatch_session_id);
             let row_session = existing_blocks
                 .iter()
                 .filter_map(|item| item.as_mapping())
@@ -2835,30 +2836,57 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 .and_then(|map| map.get(&Value::String("session_id".to_string())))
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            if let (Some(dispatch_session), Some(row_session)) = (dispatch_session, row_session) {
-                if dispatch_session == row_session {
-                    let body = serde_json::json!({
-                        "error": format!(
-                            "prd-resolve refused: witness_dispatch_id {} was produced by session {}, the executor session of {} -- a row cannot be witnessed by the session that executed it",
-                            dispatch_id, row_session, id_target
-                        ),
-                        "deviation_kind": "prd-resolve-self-witness",
-                        "deviation_severity": "deny",
-                        "prd_id": id_target,
-                        "field": "witness_dispatch_id",
-                        "witness_dispatch_id": dispatch_id,
-                        "executor_session": row_session,
-                        "dispatch_session": dispatch_session,
-                        "next_verb": "prd-witness-request",
-                        "hint": "The witness must be a live run dispatched under a different session than the row's executor. Dispatch prd-witness-request {id} to record the request and receive a verifier brief, run the witness from that verifier session, and resolve with its dispatch id.",
-                    })
-                    .to_string();
-                    return (
-                        body,
-                        format!("prd-resolve refused: self-witness for {}", id_target),
-                        1,
-                    );
-                }
+            let self_witness = dispatch_session.as_deref().is_some_and(|ds| {
+                resolving_session.as_deref() == Some(ds) || row_session.as_deref() == Some(ds)
+            });
+            let unattributed = dispatch_session.is_none()
+                && (dispatch_in_spool_out(cwd, dispatch_id)
+                    || crate::dispatch_ledger::submodule_holding(cwd, dispatch_id)
+                        .ok()
+                        .flatten()
+                        .is_some());
+            let refusal = if self_witness {
+                Some((
+                    "self_witness",
+                    format!(
+                        "prd-resolve refused: witness_dispatch_id {} was produced by session {}, the session resolving {} or its executor session -- a row cannot be witnessed by the session that resolves or executed it",
+                        dispatch_id,
+                        dispatch_session.as_deref().unwrap_or_default(),
+                        id_target
+                    ),
+                ))
+            } else if unattributed {
+                Some((
+                    "unattributed",
+                    format!(
+                        "prd-resolve refused: witness_dispatch_id {} has no session recorded in the dispatch ledger, so it cannot be shown to come from a session other than the one resolving {}",
+                        dispatch_id, id_target
+                    ),
+                ))
+            } else {
+                None
+            };
+            if let Some((reason, error)) = refusal {
+                let body = serde_json::json!({
+                    "error": error,
+                    "deviation_kind": "prd-resolve-self-witness",
+                    "deviation_severity": "deny",
+                    "prd_id": id_target,
+                    "field": "witness_dispatch_id",
+                    "reason": reason,
+                    "witness_dispatch_id": dispatch_id,
+                    "dispatch_session": dispatch_session,
+                    "executor_session": row_session,
+                    "resolving_session": resolving_session,
+                    "next_verb": "prd-witness-request",
+                    "hint": "The witness must be a live run dispatched under a session other than the one resolving the row and other than its executor. Dispatch prd-witness-request {id} to record the request and receive a verifier brief, run the witness from that verifier session, and resolve with its dispatch id.",
+                })
+                .to_string();
+                return (
+                    body,
+                    format!("prd-resolve refused: self-witness for {}", id_target),
+                    1,
+                );
             }
         }
     }
