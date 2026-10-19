@@ -275,6 +275,11 @@ fn next_phase_hint(phase: &str) -> Option<String> {
 
 #[cfg(target_arch = "wasm32")]
 fn prd_items_json() -> Vec<serde_json::Value> {
+    prd_items_read().unwrap_or_default()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn prd_items_read() -> Option<Vec<serde_json::Value>> {
     for attempt in 0..2 {
         let (body, err, code) = prd::handle_list_full();
         if code == 0 {
@@ -283,16 +288,16 @@ fn prd_items_json() -> Vec<serde_json::Value> {
                 .and_then(|v| v.get("items").cloned())
                 .and_then(|v| v.as_array().cloned())
             {
-                return items;
+                return Some(items);
             }
         }
         if attempt == 0 {
             std::thread::sleep(std::time::Duration::from_millis(50));
             continue;
         }
-        ilog(&format!("prd_items_json: read/parse failed twice (torn-read retry exhausted), code={code} err={err} -- treating as UNKNOWN, not empty, this instruction dispatch cannot report a trustworthy PRD count"));
+        ilog(&format!("prd_items_read: read/parse failed twice (torn-read retry exhausted), code={code} err={err} -- treating as UNKNOWN, not empty, this instruction dispatch cannot report a trustworthy PRD count"));
     }
-    Vec::new()
+    None
 }
 
 const LAUNCH_LIST_MAX: usize = 32;
@@ -1001,7 +1006,9 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
     }
 
     let mutables_pending = dedup_rows_by_id_keeping_last(mutables::pending_detailed());
-    let prd_items = prd_items_json();
+    let prd_read = prd_items_read();
+    let prd_known = prd_read.is_some();
+    let prd_items = prd_read.unwrap_or_default();
     let prd_pending = prd_pending_count(&prd_items);
     let prd_items_open = dedup_rows_by_id_keeping_last(
         prd_items
@@ -1033,7 +1040,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         serde_json::Value::Array(a) => a.len(),
         _ => 0,
     };
-    let should_scan = should_residual_scan(prd_pending, running_tasks_count);
+    let should_scan = prd_known && should_residual_scan(prd_pending, running_tasks_count);
 
     let prompt = read_last_prompt();
     let nouns = orient_nouns(&prompt);
@@ -1171,9 +1178,9 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         "epistemic_gap": mutables_pending_count,
         "prd_items": prd_items_inlined,
         "prd_items_truncated": prd_items_truncated,
-        "prd_open_count": prd_items_open_count,
+        "prd_open_count": if prd_known { json!(prd_items_open_count) } else { serde_json::Value::Null },
         "prd_total_count": prd_items.len(),
-        "prd_pending_count": prd_pending,
+        "prd_pending_count": if prd_known { json!(prd_pending) } else { serde_json::Value::Null },
         "next_phase_hint": next,
         "orient_nouns": nouns,
         "codeinsight_start": codeinsight_start,
