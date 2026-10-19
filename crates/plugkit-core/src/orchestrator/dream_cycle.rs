@@ -61,9 +61,7 @@ fn evaluate(content: &str) -> Result<Value, String> {
         {
             Some("no-new-verified-observations")
         }
-        Some(_) if round.summary.pointer("/history/worlds").and_then(Value::as_u64) == Some(0) => {
-            Some("no-replayable-worlds")
-        }
+        Some(_) if round.no_replayable_worlds => Some("no-replayable-worlds"),
         Some(_) => None,
     };
     if let Some(reason) = reason {

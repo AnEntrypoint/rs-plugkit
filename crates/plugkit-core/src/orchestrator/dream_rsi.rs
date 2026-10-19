@@ -1103,6 +1103,7 @@ pub struct HistoryRound {
     pub latest_dispatch_id: Option<String>,
     pub summary: Value,
     pub lost_cursor: Option<String>,
+    pub no_replayable_worlds: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1129,6 +1130,7 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
             latest_dispatch_id: latest_dispatch_id.clone(),
             summary: json!({ "history": history, "incumbent_policy_id": incumbent.id, "candidates": candidates.len() }),
             lost_cursor: lost_cursor.clone(),
+            no_replayable_worlds: true,
         });
     }
     let candidate_count = candidates.len();
@@ -1172,6 +1174,7 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
     Ok(HistoryRound {
         latest_dispatch_id,
         lost_cursor,
+        no_replayable_worlds: false,
         summary: json!({
             "selection": if improved { "propose-challenger" } else { "keep-incumbent" },
             "incumbent_policy_id": incumbent.id,
@@ -2534,6 +2537,17 @@ fn persist_sealed_replay(source: &'static str, replay: &mut Value) {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let ranked_score = |id: Option<&str>| {
+        id.and_then(|id| rankings.iter().find(|ranking| ranking.get("policy_id").and_then(Value::as_str) == Some(id)))
+            .and_then(|ranking| ranking.get("score").and_then(Value::as_f64))
+    };
+    let never_worse = match (
+        ranked_score(replay.get("selected_policy_id").and_then(Value::as_str)),
+        ranked_score(replay.get("baseline_policy_id").and_then(Value::as_str)),
+    ) {
+        (Some(selected), Some(baseline)) => selected >= baseline,
+        _ => false,
+    };
     let summary = json!({
         "baseline_policy_id": replay.get("baseline_policy_id"),
         "selected_policy_id": replay.get("selected_policy_id"),
@@ -2542,7 +2556,7 @@ fn persist_sealed_replay(source: &'static str, replay: &mut Value) {
         "n_observations": replay.get("n_observations"),
         "domain": replay.get("domain"),
         "improved": replay.get("improved"),
-        "never_worse": matches!((baseline_score, selected_score), (Some(base), Some(sel)) if sel >= base),
+        "never_worse": never_worse,
         "beta1": replay.get("beta1"),
         "beta2": replay.get("beta2"),
         "rankings": rankings,
