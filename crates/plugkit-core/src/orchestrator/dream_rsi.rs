@@ -1005,9 +1005,33 @@ fn newest_entry_mtime_ms(dir: &str) -> Option<i64> {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn open_row_sessions() -> Option<std::collections::HashSet<String>> {
+    let (body, _, code) = super::prd::handle_list_full();
+    if code != 0 {
+        return None;
+    }
+    let doc: serde_json::Value = serde_json::from_str(&body).ok()?;
+    Some(
+        doc.get("items")?
+            .as_array()?
+            .iter()
+            .filter(|row| {
+                row.get("status")
+                    .and_then(|s| s.as_str())
+                    .is_some_and(super::prd::status_is_open)
+            })
+            .filter_map(|row| row.get("session_id")?.as_str().map(str::to_owned))
+            .collect(),
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
 fn prune_idle_sessions(now_ms: i64, keep: &str) {
+    let Some(exempt) = open_row_sessions() else {
+        return;
+    };
     for session in dir_entry_names(".gm/dream-rsi") {
-        if session.starts_with('.') || session == keep {
+        if session.starts_with('.') || session == keep || exempt.contains(&session) {
             continue;
         }
         let dir = format!(".gm/dream-rsi/{session}");
