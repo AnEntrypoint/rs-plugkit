@@ -862,12 +862,12 @@ fn shell_git_gate(
             .or_else(|| body.get("script").and_then(|v| v.as_str()))
             .unwrap_or("");
         let is_git_token = |first: &str| {
-            first == "git"
-                || first == "git.exe"
-                || first.ends_with("/git")
-                || first.ends_with("\\git")
-                || first.ends_with("/git.exe")
-                || first.ends_with("\\git.exe")
+            let base = first.rsplit(['/', '\\']).next().unwrap_or(first).to_ascii_lowercase();
+            let stem = [".exe", ".cmd", ".bat"]
+                .iter()
+                .find_map(|ext| base.strip_suffix(*ext))
+                .unwrap_or(base.as_str());
+            stem == "git"
         };
         if text_invokes_git(cmd, &is_git_token, 0) {
             log_deviation(
