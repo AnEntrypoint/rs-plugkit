@@ -1173,16 +1173,39 @@ fn bin_drift_check_js(base: &str, repo: &str, include: &[String]) -> String {
     format!(
         r#"(() => {{
   const cp = require('child_process');
+  const fs = require('fs');
+  const os = require('os');
   const path = require('path');
   const repoDir = path.resolve({base}, {repo});
-  const script = path.join(repoDir, 'scripts', 'check-bin-drift.mjs');
-  const env = {{ ...process.env, GM_MCP_BUILD_INCLUDE: {include} }};
-  const r = cp.spawnSync(process.execPath, [script], {{ cwd: repoDir, env, encoding: 'utf8', windowsHide: true, timeout: 120000 }});
-  process.stdout.write(JSON.stringify({{ exit_code: r.status, output: String(r.stdout || '') + String(r.stderr || ''), error: r.error ? String(r.error.message || r.error) : null }}));
+  const include = {include};
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-bin-drift-'));
+  const head = path.join(tmp, 'head');
+  let reply;
+  try {{
+    const clone = cp.spawnSync('git', ['clone', '-q', '--no-hardlinks', repoDir, head], {{ encoding: 'utf8' }});
+    if (clone.status !== 0) throw new Error('git clone of HEAD failed: ' + String(clone.stderr || ''));
+    for (const rel of include) {{
+      const from = path.join(repoDir, rel);
+      const to = path.join(head, rel);
+      if (fs.existsSync(from)) {{
+        fs.mkdirSync(path.dirname(to), {{ recursive: true }});
+        fs.copyFileSync(from, to);
+      }} else fs.rmSync(to, {{ force: true }});
+    }}
+    fs.symlinkSync(path.join(repoDir, 'node_modules'), path.join(head, 'node_modules'), 'junction');
+    const env = {{ ...process.env, GM_MCP_BUILD_INCLUDE: include.join(',') }};
+    const r = cp.spawnSync(process.execPath, [path.join(head, 'scripts', 'check-bin-drift.mjs')], {{ cwd: head, env, encoding: 'utf8', windowsHide: true, timeout: 120000 }});
+    reply = {{ exit_code: r.status, output: String(r.stdout || '') + String(r.stderr || ''), error: r.error ? String(r.error.message || r.error) : null }};
+  }} catch (e) {{
+    reply = {{ exit_code: null, output: '', error: String((e && e.message) || e) }};
+  }} finally {{
+    fs.rmSync(tmp, {{ recursive: true, force: true }});
+  }}
+  process.stdout.write(JSON.stringify(reply));
 }})();"#,
         base = serde_json::to_string(base).unwrap_or_else(|_| "\"\"".to_string()),
         repo = serde_json::to_string(repo).unwrap_or_else(|_| "\"\"".to_string()),
-        include = serde_json::to_string(&include.join(",")).unwrap_or_else(|_| "\"\"".to_string()),
+        include = serde_json::to_string(include).unwrap_or_else(|_| "[]".to_string()),
     )
 }
 
@@ -7618,6 +7641,22 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
             "accepted_fields": ["run_id", "job_id", "sha"],
         }));
     }
+    let sha = if sha.len() < 40 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        let commit = ci_status_gh_api_json(&format!("repos/{}/commits/{}", repo, sha))
+            .map_err(|reason| {
+                json!({
+                    "error": format!("could not resolve sha {} in {}: {}", sha, repo, reason),
+                    "repo": repo, "sha": sha,
+                })
+            })?;
+        commit
+            .get("sha")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or(sha)
+    } else {
+        sha
+    };
     let parsed = ci_status_gh_api_json(&format!(
         "repos/{}/actions/runs?head_sha={}&per_page=20",
         repo, sha
