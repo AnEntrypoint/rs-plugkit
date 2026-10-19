@@ -321,7 +321,7 @@ fn directory_is_gitignored(dir: &str) -> Result<bool, String> {
 const NESTED_WORKTREE_SCAN_DEPTH: usize = 2;
 const MAX_NESTED_WORKTREES: usize = 64;
 
-fn nested_worktree_dirs(dir: &str) -> Vec<String> {
+pub(crate) fn nested_worktree_dirs(dir: &str) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     let mut frontier: Vec<(String, usize)> = vec![(dir.to_string(), 0)];
     while let Some((current, depth)) = frontier.pop() {
