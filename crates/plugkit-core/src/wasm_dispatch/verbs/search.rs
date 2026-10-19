@@ -2713,7 +2713,8 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         return err("codesearch", &format!(
             "mode \"{}\" is not a codesearch mode -- valid modes are {}. \
              \"literal\"/\"regex\" are exhaustive: every match with path:line, no ranking, no top-k. \
-             \"dual\" is ranked BM25+vector retrieval. \"filename\" matches paths only. \
+             \"dual\" is ranked BM25+vector retrieval, and a single identifier-shaped query under \"dual\" \
+             is answered by the identifier route, whose reply has mode \"symbol\". \"filename\" matches paths only. \
              An unrecognised mode is refused here rather than served as \"dual\", \
              which is what used to happen.",
             mode,
