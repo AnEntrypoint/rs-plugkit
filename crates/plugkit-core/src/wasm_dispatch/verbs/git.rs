@@ -1169,7 +1169,7 @@ pub(super) fn pushed_commits_published(repo: Option<&str>, from: Option<&str>, t
     })
 }
 
-fn bin_drift_check_js(base: &str, repo: &str, rev: &str, include: &[String]) -> String {
+fn bin_drift_check_js(base: &str, repo: &str, rev: &str, include: &[String], from_index: bool) -> String {
     format!(
         r#"(() => {{
   const cp = require('child_process');
@@ -1179,6 +1179,7 @@ fn bin_drift_check_js(base: &str, repo: &str, rev: &str, include: &[String]) -> 
   const repoDir = path.resolve({base}, {repo});
   const rev = {rev};
   const include = {include};
+  const fromIndex = {from_index};
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-bin-drift-'));
   const head = path.join(tmp, 'head');
   let reply;
@@ -1192,9 +1193,11 @@ fn bin_drift_check_js(base: &str, repo: &str, rev: &str, include: &[String]) -> 
     for (const rel of include) {{
       const from = path.join(repoDir, rel);
       const to = path.join(head, rel);
-      if (fs.existsSync(from)) {{
+      const blob = fromIndex ? cp.spawnSync('git', ['-C', repoDir, 'show', ':' + rel], {{ maxBuffer: 64 * 1024 * 1024 }}) : null;
+      if (fromIndex ? blob.status === 0 : fs.existsSync(from)) {{
         fs.mkdirSync(path.dirname(to), {{ recursive: true }});
-        fs.copyFileSync(from, to);
+        if (fromIndex) fs.writeFileSync(to, blob.stdout);
+        else fs.copyFileSync(from, to);
       }} else fs.rmSync(to, {{ force: true }});
     }}
     fs.symlinkSync(path.join(repoDir, 'node_modules'), path.join(head, 'node_modules'), 'junction');
@@ -1212,6 +1215,7 @@ fn bin_drift_check_js(base: &str, repo: &str, rev: &str, include: &[String]) -> 
         repo = serde_json::to_string(repo).unwrap_or_else(|_| "\"\"".to_string()),
         rev = serde_json::to_string(rev).unwrap_or_else(|_| "\"HEAD\"".to_string()),
         include = serde_json::to_string(include).unwrap_or_else(|_| "[]".to_string()),
+        from_index = if from_index { "true" } else { "false" },
     )
 }
 
@@ -1233,10 +1237,10 @@ fn bin_drift_tracks_gate(repo: Option<&str>, rev: &str) -> bool {
         == 0
 }
 
-fn bin_drift_run(repo: Option<&str>, rev: &str, include: &[String]) -> Result<(), String> {
+fn bin_drift_run(repo: Option<&str>, rev: &str, include: &[String], from_index: bool) -> Result<(), String> {
     let checkout = repo.unwrap_or("the checkout");
     let base = super::host_abi::host_cwd_string().unwrap_or_default();
-    let code = bin_drift_check_js(&base, repo.unwrap_or(""), rev, include);
+    let code = bin_drift_check_js(&base, repo.unwrap_or(""), rev, include, from_index);
     let opts = json!({ "timeoutMs": 150000 }).to_string();
     let packed = unsafe {
         super::host_abi::host_exec_js(
@@ -1291,7 +1295,7 @@ fn bin_drift_refusal(repo: Option<&str>, source_sha: &str) -> Option<String> {
     if !bin_drift_tracks_gate(repo, source_sha) {
         return None;
     }
-    bin_drift_run(repo, source_sha, &[])
+    bin_drift_run(repo, source_sha, &[], false)
         .err()
         .map(|detail| format!("bin drift gate refused the push: {detail}"))
 }
@@ -1312,7 +1316,6 @@ fn bin_drift_commit_refusal(repo: Option<&str>, paths: &[String], add_all: bool)
     let porcelain = git_push_porcelain_in(repo);
     let mut touches_gate = false;
     let mut committed_inputs: Vec<String> = Vec::new();
-    let mut outside: Vec<String> = Vec::new();
     for line in porcelain.lines() {
         let path = line.get(3..).unwrap_or("").trim().trim_matches('"');
         if !bin_drift_gate_input(path) {
@@ -1320,7 +1323,6 @@ fn bin_drift_commit_refusal(repo: Option<&str>, paths: &[String], add_all: bool)
         }
         let bytes = line.as_bytes();
         let staged = bytes.first().map_or(false, |&x| x != b' ' && x != b'?');
-        let unstaged = bytes.get(1).map_or(false, |&y| y != b' ');
         let in_commit = if add_all {
             true
         } else if index_only {
@@ -1332,21 +1334,11 @@ fn bin_drift_commit_refusal(repo: Option<&str>, paths: &[String], add_all: bool)
             touches_gate = true;
             committed_inputs.push(path.to_string());
         }
-        if index_only && staged && unstaged {
-            outside.push(path.to_string());
-        }
     }
     if !touches_gate {
         return None;
     }
-    if !outside.is_empty() {
-        let listed: Vec<String> = outside.iter().take(12).cloned().collect();
-        return Some(format!(
-            "bin drift gate refused the commit: the commit changes build inputs, but these gate inputs are outside the commit or have unstaged changes: {}. Stage them in this commit or revert them, then commit again. bin/gm-mcp-server.js must match a fresh build of the committed src/: run npm run build and include bin/gm-mcp-server.js in the same commit.",
-            listed.join(", ")
-        ));
-    }
-    bin_drift_run(repo, "HEAD", &committed_inputs)
+    bin_drift_run(repo, "HEAD", &committed_inputs, index_only)
         .err()
         .map(|detail| format!("bin drift gate refused the commit: {detail}"))
 }
