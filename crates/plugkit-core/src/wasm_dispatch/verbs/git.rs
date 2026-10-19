@@ -406,6 +406,10 @@ fn v1_xy(xy: &str) -> String {
     xy.replace('.', " ")
 }
 
+fn git_status_is_unmerged(x: char, y: char) -> bool {
+    x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D')
+}
+
 pub(super) const GIT_STATUS_SKIPPED_PATHS_MAX: usize = 25;
 pub(super) const GIT_STATUS_SAMPLE_PATHS: usize = 10;
 pub(super) const GIT_STATUS_DIRECTORY_BUCKETS: usize = 10;
@@ -598,6 +602,7 @@ pub(super) fn git_status(body: &Value) -> u64 {
         let mut untracked: Vec<String> = vec![];
         let mut deleted: Vec<String> = vec![];
         let mut staged: Vec<String> = vec![];
+        let mut conflicted: Vec<String> = vec![];
         for line in porcelain.lines() {
             if line.len() < 3 {
                 continue;
@@ -608,6 +613,10 @@ pub(super) fn git_status(body: &Value) -> u64 {
             let y = xy.chars().nth(1).unwrap_or(' ');
             if xy == "??" {
                 untracked.push(path);
+                continue;
+            }
+            if git_status_is_unmerged(x, y) {
+                conflicted.push(path);
                 continue;
             }
             if x != ' ' && x != '?' {
@@ -654,6 +663,7 @@ pub(super) fn git_status(body: &Value) -> u64 {
                     "staged": staged.len(),
                     "deleted": deleted.len(),
                     "untracked": untracked.len(),
+                    "conflicted": conflicted.len(),
                 },
                 "first_paths": first_paths,
                 "first_paths_note": "each entry is the two-column porcelain status, a space, then the path",
@@ -687,6 +697,7 @@ pub(super) fn git_status(body: &Value) -> u64 {
                     "untracked": untracked.len(),
                     "deleted": deleted.len(),
                     "staged": staged.len(),
+                    "conflicted": conflicted.len(),
                 },
                 "by_directory": git_status_by_directory(&modified, &deleted, &untracked, &staged),
                 "modified": git_status_sample(&modified, sample_n),
@@ -4753,7 +4764,7 @@ pub(super) fn pull_and_repush_remote_moved(
                             "relanded_commit": new_sha.clone(),
                             "stranded_local_commit": local_sha.clone(),
                             "stranded_local_commit_note": format!(
-                                "the content of {} is published as {}; this checkout still points at {}, so it now reads diverged (1 ahead, 1 behind). No later verb reconciles that on its own: dispatch git_reset or git_pull once this lane owns the whole worktree, or keep using path-scoped git_finalize, which re-lands onto the remote tip again on the next push.",
+                                "the content of {} is published as {}; this checkout still points at {}, so it now reads diverged (1 ahead, 1 behind). No later verb reconciles that on its own: once this lane owns the whole worktree, dispatch git_pull to fast-forward onto the remote tip, or keep using path-scoped git_finalize, which re-lands onto the remote tip again on the next push.",
                                 local_sha, new_sha, local_sha
                             ),
                             "out_of_scope_commit_paths": out_of_scope_commit_paths,
@@ -8211,17 +8222,14 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
                 })
             })
     };
-    let other_run_ids: Vec<u64> = if failing_run_ids.is_empty() {
-        Vec::new()
-    } else {
-        runs.map(|runs| {
+    let other_run_ids: Vec<u64> = runs
+        .map(|runs| {
             runs.iter()
                 .filter_map(newest_id)
                 .filter(|id| !failing_run_ids.contains(id))
                 .collect()
         })
-        .unwrap_or_default()
-    };
+        .unwrap_or_default();
     let mut run_with_failed_job = None;
     let mut unreadable_run = None;
     for id in failing_run_ids.iter().chain(other_run_ids.iter()).copied() {
