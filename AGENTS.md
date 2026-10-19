@@ -35,7 +35,7 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 
 ### Staging and commit (`wasm_dispatch/verbs.rs`, `verbs/git.rs`)
 
-- `git_commit {patch}` or `{hunks}` (`git_commit_hunk_scoped`) commits through a temporary index built from HEAD and never touches the work tree; `git_add` refuses `hunks`. An unscoped commit carries the session's earlier `git_add` paths recorded under kv namespace `git_add_staged`.
+- `git_commit {patch}` or `{hunks}` (`git_commit_hunk_scoped`) commits through a temporary index built from HEAD and never touches the work tree; `git_add` refuses `hunks`. An unscoped `git_commit` or `git_finalize` over a nonempty index is refused (`whole_index_refused`) unless `allow_whole_index: true`; merge commits keep their own check. Session `git_add` paths (kv namespace `git_add_staged`) are named in the refusal, not carried.
 - Scoped `git_commit` and `git_finalize` stage and commit only the caller's pathspecs, including the concurrent-write amend; a scope that stages nothing is refused, and an empty scoped add is never followed by an unscoped commit. Blanket staging needs `add_all: true`.
 - `git_pathspec_scope` emits every exclude before the caller's pathspecs: on Windows git 2.46 stages nothing for `git add -- <untracked> <exclude>` (exit 0), and an exclude ordered last turns a scoped commit into an unscoped one.
 - Every staging path (`git_add`, `git_commit`, `git_finalize`, porcelain probes, `git_push`'s dirty gate) appends `GIT_PROTECTED_PATHSPECS` (`:(top,exclude).gm`, `:(top,exclude).agentplug*`); receipts list them under `excluded`.
