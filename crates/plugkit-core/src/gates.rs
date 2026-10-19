@@ -537,12 +537,43 @@ fn await_gate(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> Option<G
     None
 }
 
+const COMMAND_WRAPPERS: &[&str] = &[
+    "env", "command", "exec", "time", "nohup", "sudo", "xargs", "nice", "builtin", "if", "then",
+    "else", "elif", "do", "while", "until",
+];
+
+fn is_wrapper_prefix(token: &str) -> bool {
+    token.is_empty()
+        || token.starts_with('-')
+        || token.chars().all(|c| c.is_ascii_digit())
+        || COMMAND_WRAPPERS.contains(&token)
+        || token.split_once('=').is_some_and(|(key, _)| {
+            !key.is_empty()
+                && !key.starts_with(|c: char| c.is_ascii_digit())
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+fn segment_invokes_git(segment: &str, is_git_token: &dyn Fn(&str) -> bool) -> bool {
+    segment
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c: char| matches!(c, '(' | '{' | '!' | '"' | '\'')))
+        .find(|t| !is_wrapper_prefix(t))
+        .is_some_and(is_git_token)
+}
+
 fn shell_git_gate(
     verb: &str,
     body: &Value,
     policy: &crate::orchestrator::fsm::Policy,
 ) -> Option<GateVerdict> {
-    if policy.deny_shell_git && policy.shell_verbs.iter().any(|v| v == verb) {
+    let lang_is_shell = verb == "lang"
+        && body
+            .get("lang")
+            .and_then(|v| v.as_str())
+            .is_some_and(|lang| policy.shell_verbs.iter().any(|v| v == lang));
+    let shell_verb = policy.shell_verbs.iter().any(|v| v == verb) || lang_is_shell;
+    if policy.deny_shell_git && shell_verb {
         let cmd = body
             .get("command")
             .and_then(|v| v.as_str())
@@ -559,19 +590,11 @@ fn shell_git_gate(
         };
         let git_dominant = cmd
             .split([';', '\n', '|', '&'])
-            .map(|s| s.trim_start())
-            .any(|s| {
-                let first = s.split_whitespace().next().unwrap_or("");
-                is_git_token(first)
-            });
+            .any(|s| segment_invokes_git(s, &is_git_token));
         let git_in_subshell = extract_substitution_bodies(cmd).into_iter().any(|inner| {
             inner
                 .split([';', '\n', '|', '&'])
-                .map(|s| s.trim_start())
-                .any(|s| {
-                    let first = s.split_whitespace().next().unwrap_or("");
-                    is_git_token(first)
-                })
+                .any(|s| segment_invokes_git(s, &is_git_token))
         });
         if git_dominant || git_in_subshell {
             log_deviation(
