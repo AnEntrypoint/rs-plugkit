@@ -12,10 +12,6 @@ const BACKOFF_MAX_MS: u64 = 60 * 60 * 1000;
 
 const LOCK_STALE_MS: u64 = 10 * 60 * 1000;
 
-const SHARED_PROBE_WAIT_MS: u64 = 5 * 1000;
-
-const SHARED_PROBE_POLL_MS: u64 = 250;
-
 const UNMEASURED_REF_INTERVAL_MS: u64 = 60 * 1000;
 
 const PROBE_BACKOFF_BASE_MS: u64 = 60 * 1000;
@@ -348,35 +344,24 @@ fn global_remote_tip_with(src: &RepoSource, now: u64, forced: bool) -> GlobalTip
             let _ = unlock(&lock);
             outcome
         }
-        LockProbe::Held => match wait_for_shared_probe(&paths, baseline, SHARED_PROBE_WAIT_MS) {
+        LockProbe::Held => match shared_probe_since(&paths, baseline) {
             Some(shared) => GlobalTip::Known(shared.remote_sha),
             None => GlobalTip::Held(format!(
-                "config probe lock {} is held by another process; no shared probe result within {} ms",
-                paths.lock(),
-                SHARED_PROBE_WAIT_MS
+                "config probe lock {} is held by another process; the guest cannot wait for its result",
+                paths.lock()
             )),
         },
         LockProbe::Failed(reason) => GlobalTip::Unavailable(reason),
     }
 }
 
-fn wait_for_shared_probe(
-    paths: &RemoteProbePaths,
-    baseline_ms: u64,
-    budget_ms: u64,
-) -> Option<RemoteRecord> {
-    let deadline = now_ms().saturating_add(budget_ms);
-    loop {
-        let rec = read_remote_record(paths);
-        if !rec.remote_sha.is_empty() && rec.last_probe_ms > baseline_ms {
-            remember_remote(&paths.key, &rec);
-            return Some(rec);
-        }
-        if now_ms() >= deadline {
-            return None;
-        }
-        crate::orchestrator::sleep_ms(SHARED_PROBE_POLL_MS);
+fn shared_probe_since(paths: &RemoteProbePaths, baseline_ms: u64) -> Option<RemoteRecord> {
+    let rec = read_remote_record(paths);
+    if !rec.remote_sha.is_empty() && rec.last_probe_ms > baseline_ms {
+        remember_remote(&paths.key, &rec);
+        return Some(rec);
     }
+    None
 }
 
 fn probe_and_record(
