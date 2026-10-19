@@ -72,6 +72,8 @@ pub struct VerbStat {
     pub failure_rate: f64,
     pub gate_drift_rate: f64,
     pub not_found: u64,
+    pub unclassified: u64,
+    pub causes: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2820,6 +2822,8 @@ struct VerbTally {
     failures: u64,
     drifts: u64,
     not_found: u64,
+    unclassified: u64,
+    causes: BTreeMap<String, u64>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2834,6 +2838,10 @@ fn per_verb_stats(observations: &[ObservationRecord]) -> Vec<VerbStat> {
                 tally.not_found += 1;
             } else {
                 tally.failures += 1;
+                match record.error_code.as_deref() {
+                    Some(code) => *tally.causes.entry(code.to_owned()).or_default() += 1,
+                    None => tally.unclassified += 1,
+                }
             }
         }
         if record.is_gate_drift_failure() {
@@ -2848,6 +2856,8 @@ fn per_verb_stats(observations: &[ObservationRecord]) -> Vec<VerbStat> {
             failure_rate: tally.failures as f64 / tally.count as f64,
             gate_drift_rate: tally.drifts as f64 / tally.count as f64,
             not_found: tally.not_found,
+            unclassified: tally.unclassified,
+            causes: tally.causes,
         })
         .collect()
 }
@@ -3033,6 +3043,8 @@ fn result_json(result: &DreamRsiResult) -> Value {
                     "failure_rate": stat.failure_rate,
                     "gate_drift_rate": stat.gate_drift_rate,
                     "not_found": stat.not_found,
+                    "unclassified": stat.unclassified,
+                    "causes": stat.causes,
                 }))
                 .collect::<Vec<_>>(),
             "proposals": proposals
