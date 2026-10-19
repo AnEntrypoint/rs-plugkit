@@ -154,6 +154,10 @@ fn default_longgap_refresh_verbs() -> Vec<String> {
         "mutable-resolve",
         "mutable-list",
         "mutable-defer",
+        "unknown-add",
+        "unknown-resolve",
+        "unknown-list",
+        "unknown-defer",
     ]
     .iter()
     .map(|s| s.to_string())
