@@ -688,8 +688,10 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         "truncated": truncated,
         "brief": !want_full,
         "full": want_full,
-        "hint": "pass {\"id\":\"<row id>\"} for one row in full (repeated ids fold to the last); {\"status\":\"pending\"} to filter; {\"status\":\"pending\",\"limit\":<n>} to cap; {\"status\":\"all\",\"limit\":<n>,\"offset\":<n>} to page (next_offset null when done); {\"full\":true} for every full body. .gm/prd/ holds open work only; resolved rows are in .gm/prd-log.jsonl.",
     });
+    if truncated {
+        reply["hint"] = serde_json::json!("more rows: repeat with offset set to next_offset");
+    }
     if log.dropped_torn_lines > 0 {
         reply["dropped_torn_lines"] = serde_json::json!(log.dropped_torn_lines);
         reply["dropped_torn_lines_sidecar"] = serde_json::json!(".gm/prd-log.jsonl.torn");
