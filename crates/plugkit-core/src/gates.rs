@@ -43,6 +43,8 @@ pub struct GateVerdict {
     pub pending_step_full: Option<Value>,
     pub residuals: Vec<String>,
     pub next_dispatch: Option<String>,
+    pub gate_id: Option<String>,
+    pub predicate: Option<String>,
 }
 
 impl GateVerdict {
@@ -55,6 +57,8 @@ impl GateVerdict {
             pending_step_full: None,
             residuals: vec![],
             next_dispatch: None,
+            gate_id: None,
+            predicate: None,
         }
     }
     fn deny(reason: String) -> Self {
@@ -66,10 +70,17 @@ impl GateVerdict {
             pending_step_full: None,
             residuals: vec![],
             next_dispatch: None,
+            gate_id: None,
+            predicate: None,
         }
     }
     fn with_next(mut self, next: &str) -> Self {
         self.next_dispatch = Some(next.to_string());
+        self
+    }
+    fn gated(mut self, gate_id: &str, predicate: Option<&str>) -> Self {
+        self.gate_id = Some(gate_id.to_string());
+        self.predicate = predicate.map(str::to_string);
         self
     }
     pub fn to_denial_json(&self, verb: &str) -> Value {
@@ -95,6 +106,8 @@ impl GateVerdict {
             "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
             "next_dispatch": next,
             "next_dispatch_hint": next,
+            "gate_id": self.gate_id,
+            "predicate": self.predicate,
         });
         if self.await_result {
             obj["await_result"] = json!(true);
@@ -511,7 +524,8 @@ fn await_gate(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> Option<G
         return Some(GateVerdict::deny(format!(
             "{}; restore the file from its .corrupt-<ts> backup or repair it before dispatching {}",
             detail, verb
-        )));
+        ))
+        .gated("deviation.turn-state-corrupt", Some("turn-state-corrupt")));
     }
     if let Some(step_id) = read_pending_step() {
         if !policy.await_allowed_verbs.iter().any(|v| v == verb) {
@@ -527,7 +541,8 @@ fn await_gate(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> Option<G
                  memorize-continue with body {{token, step_id, result}}. No other verb is valid until \
                  this completes.",
                 step_id
-            ));
+            ))
+            .gated("deviation.await-result-violation", Some("await-result-violation"));
             v.await_result = true;
             v.pending_step_id = Some(step_id.clone());
             v.pending_step_full = read_pending_step_full();
@@ -719,7 +734,9 @@ fn shell_git_gate(
             return Some(GateVerdict::deny(format!(
                 "bash-git-bypass:a `{}` verb invoking `git` is denied - git is a spool surface, not a shell command. Use the git verb for the intent; the substitution table in the Spool ABI section of the instruction reply maps each one. git_finalize {{message}} bundles add, commit and push in one dispatch. Command was: `{}`",
                 verb, cmd.chars().take(120).collect::<String>()
-            )).with_next("git_finalize"));
+            ))
+            .with_next("git_finalize")
+            .gated("deviation.bash-git-bypass", Some("bash-git-bypass")));
         }
     }
     None
@@ -765,9 +782,33 @@ fn native_search_gate(
             verb,
             cmd.chars().take(120).collect::<String>()
         ))
-        .with_next("codesearch"));
+        .with_next("codesearch")
+        .gated("deviation.native-search-bypass", Some("native-search-bypass")));
     }
     None
+}
+
+fn failing_transition_gate(
+    from: &str,
+    to: &str,
+    residuals: &[String],
+) -> (Option<String>, Option<String>) {
+    let graph = crate::orchestrator::fsm::graph();
+    let Some(edge) = graph.transition_edge(from, to) else {
+        return (None, None);
+    };
+    let first = residuals.first().map(String::as_str).unwrap_or_default();
+    for name in &edge.gates {
+        let Some(gate) = graph.gate(name) else {
+            continue;
+        };
+        let detailed = format!("{} -- ", gate.message);
+        let matched = first == gate.message.as_str() || first.starts_with(detailed.as_str());
+        if !gate.advisory && matched {
+            return (Some(gate.name.clone()), gate.predicate.clone());
+        }
+    }
+    (None, None)
 }
 
 fn policy_gate(
@@ -847,7 +888,11 @@ fn policy_gate(
                 return GateVerdict::deny(format!(
                     "long-gap-retry-without-instruction: verb=`{}` denied {}x in a row by long-gap-no-instruction gate, yet the agent retried instead of dispatching `instruction`. The gate's `next_dispatch` field names the recovery verb - when it says `instruction`, the next verb IS `instruction`, not the same verb again. Dispatch `instruction` now; the chain cannot recover by re-attempting the denied verb.",
                     verb, new_count
-                ));
+                ))
+                .gated(
+                    "deviation.long-gap-retry-without-instruction",
+                    Some("long-gap-retry-without-instruction"),
+                );
             }
             if !same_burst {
                 log_deviation(
@@ -865,7 +910,8 @@ fn policy_gate(
                     ("gap_ms", gap_ms.to_string()),
                     ("threshold_ms", longgap_threshold_ms.to_string()),
                 ],
-            ));
+            ))
+            .gated("deviation.long-gap-no-instruction", Some("long-gap-no-instruction"));
         }
     }
 
@@ -921,7 +967,12 @@ fn policy_gate(
                     reason, repeat_count
                 );
             }
-            let mut v = GateVerdict::deny(reason);
+            let (failing_gate, failing_predicate) =
+                failing_transition_gate(&from, to, &residuals);
+            let mut v = GateVerdict::deny(reason).gated(
+                failing_gate.as_deref().unwrap_or(label.as_str()),
+                failing_predicate.as_deref(),
+            );
             v.residuals = residuals;
             v.next_dispatch = next_recovery;
             return v;
@@ -937,7 +988,8 @@ fn policy_gate(
                     return GateVerdict::deny(format!(
                         "unsolicited-doc-created: `{}` is a top-level doc outside policy.toplevel_doc_allowlist, and this project's policy.deviation_severity promotes this kind to deny. A report/summary/findings file is not the deliverable -- return the finding in the response, or write it where the work lives.",
                         p
-                    ));
+                    ))
+                    .gated("deviation.unsolicited-doc-created", Some("unsolicited-doc-created"));
                 }
             }
         }
@@ -948,7 +1000,8 @@ fn policy_gate(
                     return GateVerdict::deny(format!(
                         "synthetic-test-file: `{}` is a standing test file, and this project's policy.deviation_severity promotes this kind to deny. Doctrine is a live exec_js witness run THIS turn, not a test case deferred to a later run.",
                         p
-                    ));
+                    ))
+                    .gated("deviation.synthetic-test-file", Some("no-synthetic-test-files"));
                 }
             }
         }
@@ -992,7 +1045,9 @@ fn policy_gate(
         }
         if open_rows > 0 {
             if let Some(reason) = concurrency_refusal_at_complete(body, open_rows) {
-                return GateVerdict::deny(reason).with_next("instruction");
+                return GateVerdict::deny(reason)
+                    .with_next("instruction")
+                    .gated("concurrency-shortfall", Some("concurrency-shortfall"));
             }
         }
         if !anti_shape.is_empty() && effective_severity_is_deny("prd-anti-shape") {
@@ -1000,7 +1055,9 @@ fn policy_gate(
                 "prd-anti-shape: {} row(s) are marked closed with empty witness_evidence ({}), and this project's policy.deviation_severity promotes this kind to deny. Re-resolve each with its own distinct witness_evidence before closing the chain.",
                 anti_shape.len(),
                 anti_shape.join(", ")
-            )).with_next("prd-resolve");
+            ))
+            .with_next("prd-resolve")
+            .gated("deviation.prd-anti-shape", Some("prd-anti-shape"));
         }
     }
 
