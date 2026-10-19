@@ -765,6 +765,25 @@ fn split_words(text: &str) -> Vec<Vec<String>> {
     segments
 }
 
+fn variable_name(token: &str) -> Option<&str> {
+    let name = token.strip_prefix('$')?.trim_start_matches('{').trim_end_matches('}');
+    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then_some(name)
+}
+
+fn assignments(segments: &[Vec<String>]) -> Vec<(String, String)> {
+    segments
+        .iter()
+        .flatten()
+        .filter_map(|word| {
+            let (key, value) = word.split_once('=')?;
+            let valid = !key.is_empty()
+                && !key.starts_with(|c: char| c.is_ascii_digit())
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            valid.then(|| (key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
 fn text_invokes_git(text: &str, is_git_token: &dyn Fn(&str) -> bool, depth: usize) -> bool {
     if depth > MAX_UNWRAP_DEPTH {
         return true;
@@ -774,15 +793,22 @@ fn text_invokes_git(text: &str, is_git_token: &dyn Fn(&str) -> bool, depth: usiz
         quote == '"' && substitutions_invoke_git(script, is_git_token, depth)
     });
     let script_names_git = scripts.iter().any(|&(script, _)| contains_git_word(script));
+    let segments = split_words(&code);
+    let vars = assignments(&segments);
     quoted_substitution
         || script_names_git
-        || split_words(&code)
+        || segments
             .iter()
-            .any(|segment| segment_invokes_git(segment, is_git_token, depth))
+            .any(|segment| segment_invokes_git(segment, &vars, is_git_token, depth))
         || substitutions_invoke_git(&code, is_git_token, depth)
 }
 
-fn segment_invokes_git(segment: &[String], is_git_token: &dyn Fn(&str) -> bool, depth: usize) -> bool {
+fn segment_invokes_git(
+    segment: &[String],
+    vars: &[(String, String)],
+    is_git_token: &dyn Fn(&str) -> bool,
+    depth: usize,
+) -> bool {
     let tokens: Vec<&str> = segment
         .iter()
         .map(|t| t.trim_matches(|c: char| matches!(c, '(' | '{' | '!' | '"' | '\'')))
@@ -832,6 +858,14 @@ fn segment_invokes_git(segment: &[String], is_git_token: &dyn Fn(&str) -> bool, 
         }
         if is_wrapper_prefix(t) {
             continue;
+        }
+        if t.starts_with("$(") || t.starts_with('`') {
+            return true;
+        }
+        if let Some(name) = variable_name(t) {
+            return vars.iter().any(|(key, value)| {
+                key.as_str() == name && text_invokes_git(value, is_git_token, depth + 1)
+            });
         }
         if is_drive_path(t)
             && (i - 1..tokens.len()).any(|j| is_git_token(tokens[i - 1..=j].join(" ").as_str()))
