@@ -613,8 +613,10 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
             if selected.iter().any(|row| row_text(row, &["id"]) == *want) {
                 continue;
             }
-            if let Some(row) = row_store::log_row(&store, want) {
-                selected.push(row);
+            match row_store::log_row(&store, want) {
+                Ok(Some(row)) => selected.push(row),
+                Ok(None) => {}
+                Err(message) => return (String::new(), message, 1),
             }
         }
     } else if every_status || !wanted_statuses.is_empty() {
@@ -624,7 +626,11 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
                 .iter()
                 .any(|want| closed.iter().any(|c| c.eq_ignore_ascii_case(want)))
         {
-            for row in row_store::log_rows_with_status(&store, &closed) {
+            let logged = match row_store::log_rows_with_status(&store, &closed) {
+                Ok(logged) => logged,
+                Err(message) => return (String::new(), message, 1),
+            };
+            for row in logged {
                 if every_status
                     || wanted_statuses
                         .iter()
@@ -2888,7 +2894,11 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 }
             }
             if !found {
-                if let Some(logged) = row_store::log_row(&store, &id_target) {
+                let logged = match row_store::log_row(&store, &id_target) {
+                    Ok(logged) => logged,
+                    Err(message) => return cas::CasOutcome::Abort(String::new(), message, 1),
+                };
+                if let Some(logged) = logged {
                     let status = logged.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let body = serde_json::json!({
                         "error": format!(

@@ -309,13 +309,13 @@ fn merge_blocks(existing: Vec<Value>, incoming: Vec<Value>) -> Vec<Value> {
     out
 }
 
-pub fn maybe_absorb(store: &Store) {
+pub fn maybe_absorb(store: &Store) -> Result<(), String> {
     if marker_matches(store) {
-        return;
+        return Ok(());
     }
     let Some(legacy_raw) = pkfs::read_to_string(&store.legacy) else {
         write_marker(store, None);
-        return;
+        return Ok(());
     };
     let legacy_text = legacy_raw.strip_prefix(BOM).unwrap_or(legacy_raw.as_str());
     if !legacy_text.trim().is_empty() {
@@ -325,7 +325,7 @@ pub fn maybe_absorb(store: &Store) {
             let stem = item_stem(block_id(&block).unwrap_or_default().as_str());
             groups.entry(stem).or_default().push(block);
         }
-        let resolved = resolved_stems(store);
+        let resolved = resolved_stems(store)?;
         let mut landed = true;
         for (stem, blocks) in groups {
             if resolved.contains(&stem) {
@@ -349,10 +349,11 @@ pub fn maybe_absorb(store: &Store) {
             }
         }
         if !landed {
-            return;
+            return Ok(());
         }
     }
     write_marker(store, legacy_stat(store));
+    Ok(())
 }
 
 pub fn read_blocks(store: &Store) -> Result<ReadSet, (String, i32)> {
@@ -375,7 +376,7 @@ pub fn read_blocks(store: &Store) -> Result<ReadSet, (String, i32)> {
             let legacy_text = legacy_raw.strip_prefix(BOM).unwrap_or(legacy_raw.as_str());
             if !legacy_text.trim().is_empty() {
                 let parsed = parse_blocks(&store.legacy, legacy_text)?;
-                let resolved = resolved_stems(store);
+                let resolved = resolved_stems(store).map_err(|message| (message, 1))?;
                 for block in parsed {
                     let stem = item_stem(block_id(&block).unwrap_or_default().as_str());
                     if raw.contains_key(&stem) || resolved.contains(&stem) {
@@ -457,7 +458,9 @@ pub fn cas_retry_write_verified<T>(
     mut modify: impl FnMut(Value) -> cas::CasOutcome<T>,
     verify: impl Fn(&Value) -> bool,
 ) -> Result<T, (String, String, i32)> {
-    maybe_absorb(store);
+    if let Err(message) = maybe_absorb(store) {
+        return Err((String::new(), format!("{} refused: {}", verb, message), 1));
+    }
     let max_attempts = max_attempts.max(1);
     let mut attempt: u32 = 0;
     loop {
@@ -599,26 +602,28 @@ pub fn read_log(store: &Store) -> Result<LogRead, String> {
     })
 }
 
-pub fn log_entries(store: &Store) -> Vec<serde_json::Value> {
-    read_log(store).map(|log| log.entries).unwrap_or_default()
+pub fn log_entries(store: &Store) -> Result<Vec<serde_json::Value>, String> {
+    read_log(store).map(|log| log.entries)
 }
 
-fn resolved_stems(store: &Store) -> BTreeSet<String> {
-    log_entries(store)
+fn resolved_stems(store: &Store) -> Result<BTreeSet<String>, String> {
+    Ok(log_entries(store)?
         .iter()
         .filter_map(|entry| entry.get("id").and_then(|v| v.as_str()))
         .map(item_stem)
-        .collect()
+        .collect())
 }
 
-pub fn log_row(store: &Store, id: &str) -> Option<serde_json::Value> {
+pub fn log_row(store: &Store, id: &str) -> Result<Option<serde_json::Value>, String> {
     let mut found: Option<serde_json::Value> = None;
-    for entry in log_entries(store) {
+    for entry in log_entries(store)? {
         if entry.get("id").and_then(|v| v.as_str()) == Some(id) {
             found = Some(entry);
         }
     }
-    let entry = found?;
+    let Some(entry) = found else {
+        return Ok(None);
+    };
     let mut row = match entry.get("row") {
         Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map.clone()),
         _ => serde_json::json!({}),
@@ -641,12 +646,15 @@ pub fn log_row(store: &Store, id: &str) -> Option<serde_json::Value> {
             map.insert("resolved_at".to_string(), ts.clone());
         }
     }
-    Some(row)
+    Ok(Some(row))
 }
 
-pub fn log_rows_with_status(store: &Store, statuses: &[String]) -> Vec<serde_json::Value> {
+pub fn log_rows_with_status(
+    store: &Store,
+    statuses: &[String],
+) -> Result<Vec<serde_json::Value>, String> {
     let mut out = Vec::new();
-    for entry in log_entries(store) {
+    for entry in log_entries(store)? {
         let status = entry
             .get("status")
             .and_then(|v| v.as_str())
@@ -656,11 +664,11 @@ pub fn log_rows_with_status(store: &Store, statuses: &[String]) -> Vec<serde_jso
             continue;
         }
         let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        if let Some(row) = log_row(store, id) {
+        if let Some(row) = log_row(store, id)? {
             out.push(row);
         }
     }
-    out
+    Ok(out)
 }
 
 fn iso_ms(ms: u128) -> String {
