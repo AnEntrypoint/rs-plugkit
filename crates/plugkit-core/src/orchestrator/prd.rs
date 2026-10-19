@@ -1914,6 +1914,7 @@ fn rerun_bound_witness(script: &str) -> Result<serde_json::Value, String> {
         let dispatch_id = crate::dispatch_ledger::record(
             "",
             "witness-rerun",
+            &script,
             &fingerprint,
             status.unwrap_or(-1),
             None,
