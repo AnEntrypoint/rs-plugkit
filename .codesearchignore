@@ -5,3 +5,7 @@ weights/
 vendor/
 # Stray nested git worktree copy of the crates (find11).
 wt-find11-tmp/
+# Nested worktree copies of the crates (CI-fix and wasip3 lanes).
+ci-fix-wt/
+ci-fix-wt-status/
+wasip3-fix-wt/
