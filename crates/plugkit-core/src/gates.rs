@@ -539,14 +539,36 @@ fn await_gate(verb: &str, policy: &crate::orchestrator::fsm::Policy) -> Option<G
 
 const COMMAND_WRAPPERS: &[&str] = &[
     "env", "command", "exec", "time", "nohup", "sudo", "xargs", "nice", "builtin", "if", "then",
-    "else", "elif", "do", "while", "until",
+    "else", "elif", "do", "while", "until", "timeout", "stdbuf", "ionice", "setsid", "doas",
 ];
+
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "powershell", "pwsh", "cmd"];
+
+const MAX_UNWRAP_DEPTH: usize = 8;
+
+fn wrapper_arg_flags(wrapper: &str) -> &'static [&'static str] {
+    match wrapper {
+        "env" => &["-u", "--unset", "-C", "--chdir"],
+        "sudo" => &["-u", "-g", "-h", "-p", "-r", "-t", "-U", "-C", "-D", "-T", "-R"],
+        "doas" => &["-u", "-C"],
+        "timeout" => &["-s", "--signal", "-k", "--kill-after"],
+        "stdbuf" => &["-i", "-o", "-e"],
+        "ionice" => &["-c", "-n", "-p", "-P", "-u"],
+        "nice" => &["-n"],
+        "time" => &["-f", "-o"],
+        "exec" => &["-a"],
+        "xargs" => &["-I", "-L", "-n", "-P", "-d", "-E", "-s", "-a"],
+        _ => &[],
+    }
+}
+
+fn wrapper_positionals(wrapper: &str) -> usize {
+    usize::from(wrapper == "timeout")
+}
 
 fn is_wrapper_prefix(token: &str) -> bool {
     token.is_empty()
-        || token.starts_with('-')
         || token.chars().all(|c| c.is_ascii_digit())
-        || COMMAND_WRAPPERS.contains(&token)
         || token.split_once('=').is_some_and(|(key, _)| {
             !key.is_empty()
                 && !key.starts_with(|c: char| c.is_ascii_digit())
@@ -554,12 +576,109 @@ fn is_wrapper_prefix(token: &str) -> bool {
         })
 }
 
-fn segment_invokes_git(segment: &str, is_git_token: &dyn Fn(&str) -> bool) -> bool {
-    segment
+fn redirect_body(token: &str) -> &str {
+    token.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&')
+}
+
+fn is_redirect(token: &str) -> bool {
+    redirect_body(token).starts_with(['<', '>'])
+}
+
+fn is_bare_redirect(token: &str) -> bool {
+    is_redirect(token) && redirect_body(token).trim_start_matches(['<', '>']).is_empty()
+}
+
+fn shell_name(token: &str) -> Option<String> {
+    let base = token.rsplit(['/', '\\']).next().unwrap_or(token).to_ascii_lowercase();
+    let name = base.strip_suffix(".exe").unwrap_or(&base);
+    SHELLS.contains(&name).then(|| name.to_string())
+}
+
+fn shell_command_flag(shell: &str, flag: &str) -> bool {
+    let f = flag.to_ascii_lowercase();
+    match shell {
+        "cmd" => f == "/c" || f == "/k",
+        "powershell" | "pwsh" => f.len() > 1 && "-command".starts_with(f.as_str()),
+        _ => {
+            f == "-c"
+                || (f.len() > 2
+                    && !f.starts_with("--")
+                    && f.starts_with('-')
+                    && f[1..].chars().all(|c| c.is_ascii_alphabetic())
+                    && f.contains('c'))
+        }
+    }
+}
+
+fn rest_of(tokens: &[&str], from: usize) -> String {
+    tokens.get(from..).unwrap_or_default().join(" ")
+}
+
+fn text_invokes_git(text: &str, is_git_token: &dyn Fn(&str) -> bool, depth: usize) -> bool {
+    if depth > MAX_UNWRAP_DEPTH {
+        return true;
+    }
+    text.split([';', '\n', '|', '&'])
+        .any(|segment| segment_invokes_git(segment, is_git_token, depth))
+        || extract_substitution_bodies(text)
+            .into_iter()
+            .any(|inner| text_invokes_git(&inner, is_git_token, depth + 1))
+}
+
+fn segment_invokes_git(segment: &str, is_git_token: &dyn Fn(&str) -> bool, depth: usize) -> bool {
+    let tokens: Vec<&str> = segment
         .split_whitespace()
         .map(|t| t.trim_matches(|c: char| matches!(c, '(' | '{' | '!' | '"' | '\'')))
-        .find(|t| !is_wrapper_prefix(t))
-        .is_some_and(is_git_token)
+        .collect();
+    let mut wrapper: &str = "";
+    let mut positionals = 0usize;
+    let mut i = 0usize;
+    while i < tokens.len() {
+        let t = tokens[i];
+        i += 1;
+        if is_redirect(t) {
+            if is_bare_redirect(t) {
+                i += 1;
+            }
+            continue;
+        }
+        if positionals > 0 && !t.starts_with('-') {
+            positionals -= 1;
+            continue;
+        }
+        if t == "eval" {
+            return text_invokes_git(&rest_of(&tokens, i), is_git_token, depth + 1);
+        }
+        if let Some(shell) = shell_name(t) {
+            return tokens
+                .get(i..)
+                .unwrap_or_default()
+                .iter()
+                .position(|flag| shell_command_flag(&shell, flag))
+                .is_some_and(|k| {
+                    text_invokes_git(&rest_of(&tokens, i + k + 1), is_git_token, depth + 1)
+                });
+        }
+        if COMMAND_WRAPPERS.contains(&t) {
+            wrapper = t;
+            positionals = wrapper_positionals(t);
+            continue;
+        }
+        if t.starts_with('-') {
+            if wrapper == "env" && matches!(t, "-S" | "--split-string") {
+                return text_invokes_git(&rest_of(&tokens, i), is_git_token, depth + 1);
+            }
+            if wrapper_arg_flags(wrapper).contains(&t) {
+                i += 1;
+            }
+            continue;
+        }
+        if is_wrapper_prefix(t) {
+            continue;
+        }
+        return is_git_token(t);
+    }
+    false
 }
 
 fn shell_git_gate(
@@ -588,15 +707,7 @@ fn shell_git_gate(
                 || first.ends_with("/git.exe")
                 || first.ends_with("\\git.exe")
         };
-        let git_dominant = cmd
-            .split([';', '\n', '|', '&'])
-            .any(|s| segment_invokes_git(s, &is_git_token));
-        let git_in_subshell = extract_substitution_bodies(cmd).into_iter().any(|inner| {
-            inner
-                .split([';', '\n', '|', '&'])
-                .any(|s| segment_invokes_git(s, &is_git_token))
-        });
-        if git_dominant || git_in_subshell {
+        if text_invokes_git(cmd, &is_git_token, 0) {
             log_deviation(
                 "bash-git-bypass",
                 &format!(
