@@ -6075,12 +6075,15 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         !dirty_tracked.is_empty() && dirty_tracked.iter().all(|path| path.starts_with(".gm/"));
     let autostash = autostash_requested || only_runtime_state_dirty;
     if !autostash && !dirty_tracked.is_empty() {
+        let (runtime_state_paths, code_dirty_paths): (Vec<String>, Vec<String>) =
+            dirty_tracked.into_iter().partition(|path| path.starts_with(".gm/"));
         return err_json(
             "git_pull",
             json!({
                 "error": "worktree holds uncommitted tracked changes; git_pull refuses to merge over them",
                 "error_code": "dirty_worktree",
-                "dirty_paths": dirty_tracked,
+                "dirty_paths": code_dirty_paths,
+                "runtime_state_paths": runtime_state_paths,
                 "remote": remote,
                 "hint": "Nothing was fetched or merged. Commit or shelve these paths from their own writer (or pass autostash:true), then re-dispatch git_pull.",
             }),
