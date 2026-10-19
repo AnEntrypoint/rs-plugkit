@@ -781,7 +781,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
                         report_unlisted_own_state(root, &kept, &mut pruned);
                         (kept, pruned)
                     };
-                    let codesearchignore = if named_scope { None } else { load_codesearchignore(root) };
+                    let codesearchignore = load_codesearchignore(root);
                     let mut kept = Vec::with_capacity(files.len());
                     for path in files {
                         let rule = runtime_artifact_rule(&path).or_else(|| codesearchignore_rule(&codesearchignore, &path));
