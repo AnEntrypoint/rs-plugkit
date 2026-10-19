@@ -1272,6 +1272,7 @@ fn bin_drift_gate_input(path: &str) -> bool {
     path.starts_with("bin/")
         || path.starts_with("src/")
         || path == "package-lock.json"
+        || path == "package.json"
         || path == "scripts/"
         || path == "scripts/build.mjs"
         || path == "scripts/check-bin-drift.mjs"
