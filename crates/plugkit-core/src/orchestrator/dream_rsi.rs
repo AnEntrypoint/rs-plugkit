@@ -890,6 +890,26 @@ fn write_live_count(session_id: &str, count: usize) {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn bump_live_count(session_id: &str) {
+    const LIVE_COUNT_CAS_ATTEMPTS: usize = 64;
+    let path = live_count_path(session_id);
+    for _ in 0..LIVE_COUNT_CAS_ATTEMPTS {
+        let Some(raw) = crate::pkfs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(count) = raw.trim().parse::<usize>() else {
+            return;
+        };
+        if matches!(
+            crate::pkfs::cas_write(&path, &raw, &format!("{}\n", count + 1)),
+            crate::pkfs::CasWriteOutcome::Swapped
+        ) {
+            return;
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 fn recover_observations_tail(path: &str) -> Option<String> {
     let Some(raw) = crate::pkfs::read_to_string(path) else {
         return Some(String::new());
@@ -1511,9 +1531,7 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         return;
     };
     if crate::pkfs::append(&path, &format!("{line}\n")) {
-        if let Some(count) = read_live_count(session_id) {
-            write_live_count(session_id, count + 1);
-        }
+        bump_live_count(session_id);
     }
 }
 
@@ -1615,9 +1633,11 @@ fn automatic_replay(session_id: Option<&str>) -> Value {
             *dropped.entry("prd_count_unknown").or_default() += 1;
             continue;
         };
-        let cost = prd_open
-            + observation.mutable_open_count.unwrap_or(0)
-            + 1;
+        let Some(mutable_open) = observation.mutable_open_count else {
+            *dropped.entry("mutable_count_unknown").or_default() += 1;
+            continue;
+        };
+        let cost = prd_open + mutable_open + 1;
         let replay_score = quality - DEFAULT_CYCLE_BETA1 * cost as f64;
         replays.push(json!({ "dispatch_id": observation.dispatch_id, "verb": observation.verb, "fingerprint": observation.fingerprint, "score": replay_score, "quality": quality, "cost": cost }));
     }
