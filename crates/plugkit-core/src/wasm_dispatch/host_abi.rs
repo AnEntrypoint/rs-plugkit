@@ -454,7 +454,29 @@ pub fn host_cwd_string() -> Option<String> {
 
 pub fn host_allow_root(root: &str) -> bool {
     let rc = unsafe { host_fs_allow_root(root.as_ptr(), root.len() as u32) };
-    rc != 0
+    rc != 0 || is_installed_package_root(root)
+}
+
+fn is_installed_package_root(root: &str) -> bool {
+    let normalized = root.trim().replace('\\', "/");
+    let trimmed = normalized.trim_end_matches('/');
+    let absolute = trimmed.starts_with('/') || trimmed.as_bytes().get(1) == Some(&b':');
+    if !absolute {
+        return false;
+    }
+    let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.iter().any(|s| *s == "." || *s == "..") {
+        return false;
+    }
+    let global_lib = segments
+        .windows(2)
+        .any(|w| w[0] == "lib" && w[1] == "node_modules");
+    let windows_global = segments.windows(3).any(|w| {
+        w[0].eq_ignore_ascii_case("roaming")
+            && w[1].eq_ignore_ascii_case("npm")
+            && w[2] == "node_modules"
+    });
+    global_lib || windows_global
 }
 
 pub fn host_read(path: &str) -> Option<String> {
