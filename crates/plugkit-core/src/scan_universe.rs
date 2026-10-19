@@ -546,6 +546,7 @@ struct RuleRecordingWalk<'a> {
     noise: NoiseDirs,
     named_scope: bool,
     named_target: String,
+    granted_root: Option<String>,
     max_files: usize,
     deadline_ms: u64,
     reached_deadline: bool,
@@ -555,6 +556,7 @@ struct RuleRecordingWalk<'a> {
 
 impl RuleRecordingWalk<'_> {
     fn descend(&mut self, dir: &str) {
+        let children_of_granted_root = self.granted_root.as_deref() == Some(dir);
         for entry in list_dir(dir) {
             if self.files.len() >= self.max_files || self.reached_deadline {
                 return;
@@ -576,7 +578,7 @@ impl RuleRecordingWalk<'_> {
             let rule = if self.cfg.is_force_included(&next) {
                 None
             } else {
-                self.exclusion_rule(&name, &next, is_dir)
+                self.exclusion_rule(&name, &next, is_dir, children_of_granted_root)
             };
             match (rule, is_dir) {
                 (Some(rule), _) => self.excluded.push(RuleExclusion {
@@ -590,7 +592,7 @@ impl RuleRecordingWalk<'_> {
         }
     }
 
-    fn exclusion_rule(&self, name: &str, path: &str, is_dir: bool) -> Option<&'static str> {
+    fn exclusion_rule(&self, name: &str, path: &str, is_dir: bool, granted_child: bool) -> Option<&'static str> {
         if self.named_target_is_at_or_above(path) { return None; }
         if gitignore_excludes(&self.gitignore, path, is_dir) { return Some("gitignore"); }
         if !is_dir { return None; }
@@ -598,7 +600,7 @@ impl RuleRecordingWalk<'_> {
         let noise = match self.noise {
             NoiseDirs::ProjectNoiseList => is_skipped_dir_segment(name, self.cfg),
             NoiseDirs::DependencyStoresVcsCachesOnly => {
-                is_dependency_noise_dir_segment(name, self.cfg)
+                !granted_child && is_dependency_noise_dir_segment(name, self.cfg)
             }
         };
         noise.then_some("noise_dir_name")
@@ -778,6 +780,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         }
     };
     let policy = walk_policy(cause, origin, no_ignore);
+    let granted_root = (origin == TargetOrigin::CallerNamed && policy.noise == NoiseDirs::DependencyStoresVcsCachesOnly).then(|| target.clone());
     let mut walk = RuleRecordingWalk {
         cfg,
         gitignore: if policy.honour_gitignore {
@@ -788,6 +791,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         noise: policy.noise,
         named_scope,
         named_target: target.clone(),
+        granted_root,
         max_files,
         deadline_ms: unsafe { host_now_ms() }
             .saturating_add(cfg.wall_budget_ms.min(LISTING_WALK_ANSWERABLE_BUDGET_MS)),
