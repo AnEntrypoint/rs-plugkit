@@ -43,13 +43,23 @@ fn sweep_stale_spool_tmp(cwd: &str, now: u64) {
     sweep_stale_tmp_entries(&spool_dir(cwd), now, |name| name.contains(SPOOL_TMP_MARKER));
 }
 
-pub fn sweep_stale_tmp_beside(path: &str, now: u64) {
-    let (dir, base) = match path.rfind(['/', '\\']) {
+fn split_dir_and_name(path: &str) -> (&str, &str) {
+    match path.rfind(['/', '\\']) {
         Some(at) => (&path[..at], &path[at + 1..]),
         None => (".", path),
-    };
-    let prefix = format!("{base}{SPOOL_TMP_MARKER}");
-    sweep_stale_tmp_entries(dir, now, |name| name.starts_with(&prefix));
+    }
+}
+
+pub fn sweep_stale_tmp_beside(path: &str, now: u64) {
+    let (_, base) = split_dir_and_name(path);
+    sweep_stale_tmp_under(path, base, now);
+}
+
+pub fn sweep_stale_tmp_under(path: &str, family: &str, now: u64) {
+    let (dir, _) = split_dir_and_name(path);
+    sweep_stale_tmp_entries(dir, now, |name| {
+        name.starts_with(family) && name.contains(SPOOL_TMP_MARKER)
+    });
 }
 
 fn sweep_stale_tmp_entries(dir: &str, now: u64, owns: impl Fn(&str) -> bool) {
