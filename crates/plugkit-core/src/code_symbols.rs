@@ -757,7 +757,7 @@ pub(crate) fn sync_files(
             mark_store_busy();
             return json!({ "ok": false, "complete": false, "store_busy": true, "error": STORE_BUSY_REFRESH_NOTE });
         }
-        return json!({ "ok": false, "error": e });
+        return json!({ "ok": false, "error_code": "store_schema_failed", "error": e });
     }
     purge_legacy_edges(started_ms, budget_ms);
     let known: HashMap<String, (u64, u64, u64, u64, String)> = rows(
