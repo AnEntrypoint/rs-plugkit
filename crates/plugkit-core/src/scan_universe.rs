@@ -330,9 +330,14 @@ pub(crate) fn nested_worktree_dirs(dir: &str) -> Vec<String> {
             continue;
         }
         for child in child_names(&current) {
+            if is_hidden_segment(&child) {
+                continue;
+            }
             let path = join_under(&current, &child);
             if host_exists(&join_under(&path, ".git")) {
-                found.push(path);
+                if !nested_checkout_ignored(dir, &path) {
+                    found.push(path);
+                }
                 continue;
             }
             if host_stat_is_directory(&path) == Some(true) {
@@ -341,6 +346,11 @@ pub(crate) fn nested_worktree_dirs(dir: &str) -> Vec<String> {
         }
     }
     found
+}
+
+fn nested_checkout_ignored(dir: &str, checkout: &str) -> bool {
+    let rel = checkout.strip_prefix(dir).unwrap_or(checkout).trim_matches('/');
+    git_exit_code(&git_call_argv(&["check-ignore", "-q", "--", rel], git_cwd(dir))) == 0
 }
 
 fn gitlink_dirs(dir: &str, complete: &mut bool) -> (Vec<String>, bool) {
