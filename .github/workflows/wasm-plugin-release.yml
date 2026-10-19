@@ -166,12 +166,24 @@ jobs:
           git config user.email "lanmower@users.noreply.github.com"
           git add "$MANIFEST"
           git commit -m "chore: auto-bump version to $VER"
-          if git push origin HEAD:main; then
-            echo "version=$VER" >> "$GITHUB_OUTPUT"
-            echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "::error::main moved after the build of v$VER; refusing to re-bump because the uploaded wasm would report a version the tag does not carry"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "version=$VER" >> "$GITHUB_OUTPUT"
+              echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            [ "$attempt" -lt 3 ] || break
+            echo "::warning::push of v$VER rejected, main moved; rebasing the bump onto origin/main (attempt $attempt of 3)"
+            git fetch origin main
+            git reset --hard HEAD
+            git rebase origin/main
+            actual=$(grep '^version' "$MANIFEST" | head -1 | sed 's/.*= *"//;s/"//')
+            if [ "$actual" != "$VER" ]; then
+              echo "::error::origin/main carries version $actual after rebase; v$VER was built for a different manifest"
+              exit 1
+            fi
+          done
+          echo "::error::push of v$VER failed after 3 attempts; main kept moving"
           exit 1
 
       - name: Stage release assets with checksum
