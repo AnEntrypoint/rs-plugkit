@@ -2,9 +2,11 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const DEFAULT_ROOT = 'C:/dev/gm/rs-plugkit';
-const DEFAULT_SPOOL_ROOT = 'C:/dev/spoint/.gm/exec-spool';
+const WITNESS_ROOT = process.env.GM_WITNESS_ROOT || resolve(fileURLToPath(new URL('..', import.meta.url)));
+const DEFAULT_ROOT = WITNESS_ROOT;
+const DEFAULT_SPOOL_ROOT = join(WITNESS_ROOT, '.gm', 'exec-spool');
 const DEFAULT_BUDGET_MS = '90000';
 const DEFAULT_SESSION = 'callers-store-busy-witness';
 const SPOOL_IDLE_WAIT_MS = 120000;
