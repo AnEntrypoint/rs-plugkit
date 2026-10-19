@@ -501,7 +501,7 @@ const GIT_TRACKS_NOTHING_REASON: &str = "git tracks no file in this worktree (no
 
 pub const CORPUS_BLIND_SPOT_REASON: &str = "git tracks no file in this worktree, so its corpus is untracked files only; the disk walk that covers the rest did not finish, so the corpus does not hold every source file here and a zero over it is not a finding";
 
-pub const NESTED_WORKTREE_BLIND_SPOT_NOTE: &str = "this corpus was listed by git, which does not hold the untracked files written inside a nested worktree (a submodule checkout): those files belong to the nested repository, not to this one. The listing of at least one nested worktree did not finish, so files written into it are missing here and a zero over this corpus is not a finding for them -- pass \"refresh\": true to walk the disk instead, or scope \"path\" to the worktree itself, before concluding a name is absent";
+pub const NESTED_WORKTREE_BLIND_SPOT_NOTE: &str = "a nested worktree listing did not finish, so its untracked files are missing here and a zero is not a finding; pass \"refresh\": true or scope \"path\" to it before concluding a name is absent";
 
 fn walk_policy(cause: WalkCause, origin: TargetOrigin, no_ignore: bool) -> WalkPolicy {
     let project = |reason: String| WalkPolicy { honour_gitignore: true, noise: NoiseDirs::ProjectNoiseList, reason };
