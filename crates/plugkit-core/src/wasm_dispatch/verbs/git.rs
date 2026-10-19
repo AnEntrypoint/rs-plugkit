@@ -7296,6 +7296,7 @@ pub(super) fn ci_status_summarize(
         "ok": true, "verb": "ci-status", "data": {
             "status": overall, "repo": repo, "sha": sha,
             "failed_jobs": failed_jobs, "run_url": run_url, "run_count": counted_runs,
+            "sha_on_remote": true,
             "jobs": jobs, "jobs_unavailable": jobs_unavailable,
             "transport": source,
         },
