@@ -125,8 +125,8 @@ jobs:
         env:
           STEP_SCRIPT: ${{ inputs.pre_build_steps }}
         run: |
-          printf '%s\n' "$STEP_SCRIPT" > /tmp/pre_build_steps.sh
-          bash /tmp/pre_build_steps.sh
+          printf '%s\n' "$STEP_SCRIPT" > "${{ runner.temp }}/pre_build_steps.sh"
+          bash "${{ runner.temp }}/pre_build_steps.sh"
 
       - name: Compute the patch bump and write it into the manifest before build
         id: bump
@@ -146,12 +146,12 @@ jobs:
           BUILD_ENV_SCRIPT: ${{ inputs.build_env }}
           BUILD_COMMAND: ${{ inputs.build_command }}
         run: |
-          printf '%s\n' "$BUILD_ENV_SCRIPT" > /tmp/build_env.sh
+          printf '%s\n' "$BUILD_ENV_SCRIPT" > "${{ runner.temp }}/build_env.sh"
           set -a
-          source /tmp/build_env.sh
+          source "${{ runner.temp }}/build_env.sh"
           set +a
-          printf '%s\n' "$BUILD_COMMAND" > /tmp/build_command.sh
-          bash /tmp/build_command.sh
+          printf '%s\n' "$BUILD_COMMAND" > "${{ runner.temp }}/build_command.sh"
+          bash "${{ runner.temp }}/build_command.sh"
 
       - name: Commit and push the version bump after the build succeeds
         id: push
