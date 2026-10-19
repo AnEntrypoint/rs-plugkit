@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   publish:
+    if: "${{ !startsWith(github.event.head_commit.message, 'chore: auto-bump version') }}"
     uses: ./.github/workflows/wasm-plugin-release.yml
     with:
       wasm_artifact_name: rs_plugkit.wasm
