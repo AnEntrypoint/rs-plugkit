@@ -1797,8 +1797,8 @@ fn kv_get(body: &Value) -> u64 {
     let packed =
         unsafe { host_kv_get(ns.as_ptr(), ns.len() as u32, key.as_ptr(), key.len() as u32) };
     match unpack_to_string(packed) {
-        Some(s) => ok("kv_get", Value::String(s)),
-        None => ok("kv_get", Value::Null),
+        Some(s) => pack(json!({ "ok": true, "verb": "kv_get", "found": true, "data": s }).to_string()),
+        None => pack(json!({ "ok": true, "verb": "kv_get", "found": false, "data": Value::Null }).to_string()),
     }
 }
 
