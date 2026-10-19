@@ -1465,7 +1465,7 @@ pub(super) const GREP_ACCEPTED_FIELDS: &[&str] = &[
     "pattern", "query", "mode", "comments", "help",
     "path", "paths", "files",
     "glob", "include", "path_glob", "exclude", "exclude_glob", "exclude_globs",
-    "output_mode", "outputMode", "detail", "columns", "combine", "term_combination", "verbatim",
+    "output_mode", "outputMode", "output", "detail", "columns", "combine", "term_combination", "verbatim",
     "regex", "fixed_strings", "fixedStrings", "case_insensitive", "ignore_case", "whole_word",
     "context", "max_files",
     "no_ignore", "include_ignored",
@@ -2114,6 +2114,7 @@ pub(super) fn grep(body: &Value) -> u64 {
         .get("output_mode")
         .and_then(|v| v.as_str())
         .or_else(|| body.get("outputMode").and_then(|v| v.as_str()))
+        .or_else(|| body.get("output").and_then(|v| v.as_str()))
         .or(mode_output)
         .unwrap_or("content");
     if !GREP_OUTPUT_MODES.contains(&output_mode) {
