@@ -164,6 +164,7 @@ fn rename_batch(pairs: &[(String, String)]) -> usize {
 fn atomic_write(path: &str, content: &str) -> bool {
     let tmp = tmp_path_for(path);
     if !crate::wasm_dispatch::host_write(&tmp, content) {
+        let _ = crate::wasm_dispatch::host_remove_file_never_directory(&tmp);
         crate::wasm_dispatch::emit_event(
             "memory_md_write_failed",
             json!({
@@ -173,8 +174,9 @@ fn atomic_write(path: &str, content: &str) -> bool {
         );
         return false;
     }
-    let renamed = rename_batch(&[(tmp, path.to_string())]) == 1;
+    let renamed = rename_batch(&[(tmp.clone(), path.to_string())]) == 1;
     if !renamed {
+        let _ = crate::wasm_dispatch::host_remove_file_never_directory(&tmp);
         crate::wasm_dispatch::emit_event(
             "memory_md_write_failed",
             json!({
