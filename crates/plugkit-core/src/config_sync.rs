@@ -311,6 +311,7 @@ fn read_remote_record(paths: &RemoteProbePaths) -> RemoteRecord {
 fn write_remote_record(paths: &RemoteProbePaths, rec: &RemoteRecord) {
     remember_remote(&paths.key, rec);
     let path = paths.record();
+    crate::dispatch_ledger::sweep_stale_tmp_beside(&path, now_ms());
     let tmp = format!("{path}.tmp-{}", now_ms());
     if !crate::pkfs::write(&tmp, &rec.to_json()) {
         let _ = crate::wasm_dispatch::host_remove_file_never_directory(&tmp);
@@ -420,6 +421,7 @@ fn read_state(src: &RepoSource) -> SyncState {
 
 fn write_state(src: &RepoSource, st: &SyncState) {
     let path = state_path(src);
+    crate::dispatch_ledger::sweep_stale_tmp_beside(&path, now_ms());
     let tmp = format!("{}.tmp-{}", path, now_ms());
     if !crate::pkfs::write(&tmp, &st.to_json()) {
         let _ = crate::wasm_dispatch::host_remove_file_never_directory(&tmp);

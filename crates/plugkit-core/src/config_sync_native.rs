@@ -486,9 +486,43 @@ fn read_remote_record(paths: &ProbePaths) -> RemoteRecord {
     }
 }
 
+const TMP_STALE_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn sweep_stale_tmp_beside(path: &str) {
+    let target = std::path::Path::new(path);
+    let Some(base) = target.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let dir = match target.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => std::path::Path::new("."),
+    };
+    let prefix = format!("{base}.tmp-");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_str().is_some_and(|n| n.starts_with(&prefix)) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > TMP_STALE_AGE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn write_remote_record(paths: &ProbePaths, rec: &RemoteRecord) {
     remember_remote(&paths.key, rec);
     let path = paths.record();
+    sweep_stale_tmp_beside(&path);
     let tmp = format!("{path}.tmp-{}", std::process::id());
     if std::fs::write(&tmp, rec.to_json()).is_err() {
         let _ = std::fs::remove_file(&tmp);
