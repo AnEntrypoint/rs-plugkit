@@ -140,7 +140,20 @@ jobs:
           sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$NEW_VERSION\"/}" "$MANIFEST"
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Commit and push the version bump before the build starts
+      - name: Build
+        shell: bash
+        env:
+          BUILD_ENV_SCRIPT: ${{ inputs.build_env }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+        run: |
+          printf '%s\n' "$BUILD_ENV_SCRIPT" > /tmp/build_env.sh
+          set -a
+          source /tmp/build_env.sh
+          set +a
+          printf '%s\n' "$BUILD_COMMAND" > /tmp/build_command.sh
+          bash /tmp/build_command.sh
+
+      - name: Commit and push the version bump after the build succeeds
         id: push
         env:
           GH_TOKEN: ${{ secrets.publisher_token }}
@@ -172,19 +185,6 @@ jobs:
           done
           echo "::error::version bump push rejected after 5 attempts; main kept moving"
           exit 1
-
-      - name: Build
-        shell: bash
-        env:
-          BUILD_ENV_SCRIPT: ${{ inputs.build_env }}
-          BUILD_COMMAND: ${{ inputs.build_command }}
-        run: |
-          printf '%s\n' "$BUILD_ENV_SCRIPT" > /tmp/build_env.sh
-          set -a
-          source /tmp/build_env.sh
-          set +a
-          printf '%s\n' "$BUILD_COMMAND" > /tmp/build_command.sh
-          bash /tmp/build_command.sh
 
       - name: Stage release assets with checksum
         shell: bash
