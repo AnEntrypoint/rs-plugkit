@@ -2354,6 +2354,13 @@ fn prune_receipts(id: &str) {
     }
 }
 
+fn scratch_witness_root(root: &str) -> Option<String> {
+    let root = root.trim().trim_end_matches('/');
+    let inside_tmp = root.strip_prefix("/config/tmp/").is_some_and(|rest| !rest.is_empty());
+    let escapes = root.split('/').any(|segment| segment == "..");
+    (inside_tmp && !escapes).then(|| root.to_string())
+}
+
 pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -2367,6 +2374,9 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let resolution = parsed.5.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
     let commit_sha = parsed.6.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let requested_status = parsed.7.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let scratch_root = serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|v| v.get("witness_root").and_then(|s| s.as_str()).and_then(scratch_witness_root));
     if let Some(sha) = commit_sha.as_deref() {
         if !(7..=40).contains(&sha.len()) || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
             let body = serde_json::json!({
@@ -2537,6 +2547,11 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 }
                 if crate::dispatch_ledger::submodule_holding(root, dispatch_id)?.is_some() {
                     return Ok(Some("nested_ledger"));
+                }
+            }
+            if let Some(scratch) = scratch_root.as_deref() {
+                if crate::dispatch_ledger::lookup(scratch, dispatch_id)?.is_some() {
+                    return Ok(Some("scratch_ledger"));
                 }
             }
             Ok(None)
@@ -3042,6 +3057,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 "witness_binding": witness_binding.as_ref().map(VerifiedWitness::to_json),
                 "witness_dispatch_id_verified": dispatch_verified,
                 "witness_dispatch_id_verified_via": verified_via,
+                "witness_root": (if verified_via == Some("scratch_ledger") { scratch_root.clone() } else { None }),
                 "witness_dispatch_id_field": "witness_dispatch_id",
                 "witness_dispatch_id_in_evidence": witness_dispatch_id,
                 "witness_dispatch_id_in_ledger": bound_in_project,
