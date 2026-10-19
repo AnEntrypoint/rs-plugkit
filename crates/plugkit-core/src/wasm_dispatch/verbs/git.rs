@@ -5938,6 +5938,26 @@ fn union_append_only_log_conflicts(cwd: Option<&str>, conflicts: &[String], outp
     true
 }
 
+fn pull_blocked_by_dirty_paths(cwd: Option<&str>, remote: &str, dirty: &[String]) -> bool {
+    if !exec_git_in(cwd, "diff --cached --name-only").trim().is_empty() {
+        return true;
+    }
+    let fetched = git_call_argv(&["fetch", remote], cwd);
+    if fetched.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) != 0 {
+        return true;
+    }
+    let incoming = git_call_argv(&["diff", "--name-only", "HEAD...@{u}"], cwd);
+    if incoming.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) != 0 {
+        return true;
+    }
+    incoming
+        .get("stdout")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .lines()
+        .any(|path| dirty.iter().any(|d| d == path.trim()))
+}
+
 pub(super) fn git_pull(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields("git_pull", body, GIT_PULL_ACCEPTED_FIELDS) {
         return refusal;
@@ -6003,7 +6023,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
     let only_runtime_state_dirty =
         !dirty_tracked.is_empty() && dirty_tracked.iter().all(|path| path.starts_with(".gm/"));
     let autostash = autostash_requested || only_runtime_state_dirty;
-    if !autostash && !dirty_tracked.is_empty() {
+    if !autostash && !dirty_tracked.is_empty() && pull_blocked_by_dirty_paths(cwd, remote, &dirty_tracked) {
         return err_json(
             "git_pull",
             json!({
