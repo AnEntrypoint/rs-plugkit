@@ -2749,7 +2749,6 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         }
     }
     let identifier_route = mode == "dual"
-        && scope.is_none()
         && !rank_opts.verbose
         && !flag("rebuild")
         && !flag("auto_indexed")
