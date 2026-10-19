@@ -755,7 +755,7 @@ pub(crate) fn sync_files(
     if let Err(e) = ensure_schema(&db) {
         if is_store_busy_error(&e) {
             mark_store_busy();
-            return json!({ "ok": false, "complete": false, "store_busy": true, "error": STORE_BUSY_REFRESH_NOTE });
+            return json!({ "ok": false, "error_code": "store_busy", "complete": false, "store_busy": true, "error": STORE_BUSY_REFRESH_NOTE });
         }
         return json!({ "ok": false, "error_code": "store_schema_failed", "error": e });
     }
@@ -1030,7 +1030,7 @@ fn sync_tree_with_budget(
     ) {
         Ok(enumeration) => enumeration,
         Err(error) => {
-            return json!({ "ok": false, "complete": false, "listing_complete": false, "error": error })
+            return json!({ "ok": false, "error_code": "listing_failed", "complete": false, "listing_complete": false, "error": error })
         }
     };
     let listing_complete = enumeration.complete && enumeration.files.len() <= cfg.index.digest_max_files;

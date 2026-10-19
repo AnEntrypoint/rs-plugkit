@@ -4151,7 +4151,7 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
     let name_glob = if crate::path_glob::looks_like_glob(req.pattern) {
         match crate::path_glob::PathGlob::parse_with_case(req.pattern, req.case_insensitive) {
             Ok(parsed) => Some(parsed),
-            Err(error) => return json!({ "ok": false, "error": error, "mode": "filename" }),
+            Err(error) => return json!({ "ok": false, "error_code": "invalid_name_glob", "error": error, "mode": "filename" }),
         }
     } else {
         None
@@ -4165,11 +4165,11 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
     };
     let include_globs = match parse_globs(&req.include_globs) {
         Ok(parsed) => parsed,
-        Err(error) => return json!({ "ok": false, "error": error, "mode": "filename" }),
+        Err(error) => return json!({ "ok": false, "error_code": "invalid_include_glob", "error": error, "mode": "filename" }),
     };
     let exclude_globs = match parse_globs(&req.exclude_globs) {
         Ok(parsed) => parsed,
-        Err(error) => return json!({ "ok": false, "error": error, "mode": "filename" }),
+        Err(error) => return json!({ "ok": false, "error_code": "invalid_exclude_glob", "error": error, "mode": "filename" }),
     };
     let admitted = |path: &str| {
         (include_globs.is_empty()
@@ -4183,7 +4183,7 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
     let file_cap = cfg.index.digest_max_files.max(20000).min(LITERAL_SCAN_MAX_FILES).max(1);
     let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, false, false, false) {
         Ok(e) => e,
-        Err(e) => return json!({ "ok": false, "error": e, "mode": "filename" }),
+        Err(e) => return json!({ "ok": false, "error_code": "universe_listing_failed", "error": e, "mode": "filename" }),
     };
     let listed = universe.files;
     if listed.is_empty() && !crate::scan_universe::scope_has_no_entries(root, scope) {
@@ -5305,7 +5305,7 @@ fn scan_uncovered_files(
 
 pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
     if req.pattern.is_empty() {
-        return json!({ "ok": false, "error": "pattern required -- an exhaustive scan needs something to match" });
+        return json!({ "ok": false, "error_code": "pattern_required", "error": "pattern required -- an exhaustive scan needs something to match" });
     }
     let matcher = match build_matcher(req.pattern, req.regex, req.case_insensitive, req.whole_word)
     {
@@ -5328,11 +5328,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     };
     let include_globs = match parse_globs(&req.include_globs) {
         Ok(parsed) => parsed,
-        Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
+        Err(e) => return json!({ "ok": false, "error_code": "invalid_include_glob", "error": e, "pattern": req.pattern }),
     };
     let exclude_globs = match parse_globs(&req.exclude_globs) {
         Ok(parsed) => parsed,
-        Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
+        Err(e) => return json!({ "ok": false, "error_code": "invalid_exclude_glob", "error": e, "pattern": req.pattern }),
     };
     let has_glob_filter = !include_globs.is_empty() || !exclude_globs.is_empty();
     let admitted = |path: &str| -> bool {
@@ -5343,7 +5343,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let listing_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore, true) {
         Ok(u) => u,
-        Err(e) => return json!({ "ok": false, "error": e, "pattern": req.pattern }),
+        Err(e) => return json!({ "ok": false, "error_code": "universe_listing_failed", "error": e, "pattern": req.pattern }),
     };
     let listed = universe.files;
     if listed.is_empty() && !crate::scan_universe::scope_has_no_entries(root, scope) {

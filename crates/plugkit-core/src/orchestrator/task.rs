@@ -68,7 +68,7 @@ fn ensure_current_insight() -> Value {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn ensure_current_insight() -> Value {
-    json!({ "ok": false, "ready": false, "error": "code insight unavailable on native target" })
+    json!({ "ok": false, "error_code": "code_insight_unavailable", "ready": false, "error": "code insight unavailable on native target" })
 }
 
 pub fn handle_spawn(content: &str) -> (String, String, i32) {
