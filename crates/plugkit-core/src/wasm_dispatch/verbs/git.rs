@@ -6445,10 +6445,35 @@ pub(super) fn ci_status_resolve_sha(
     Err(err(
         "ci-status",
         &format!(
-            "{} \"{}\" is neither a 40-char commit sha nor a ref git can resolve here -- refusing to report local HEAD in its place, because an answer about HEAD is not an answer about the rev that was asked for; pass a full 40-char sha, or a ref git knows such as HEAD or a branch name",
+            "{} \"{}\" is neither a 40-char commit sha nor a ref git can resolve here, and origin did not resolve it as a short sha -- refusing to report local HEAD in its place, because an answer about HEAD is not an answer about the rev that was asked for; pass a full 40-char sha, a ref git knows such as HEAD or a branch name, or a short sha that origin has (run git fetch origin first if it is only local)",
             field, requested
         ),
     ))
+}
+
+fn is_short_sha(candidate: &str) -> bool {
+    (7..40).contains(&candidate.len()) && candidate.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn ci_status_resolve_short_sha_on_remote(
+    body: &Value,
+    repo: &str,
+    rest_opts: &str,
+) -> Option<CiStatusShaResolution> {
+    let (field, requested) = ci_status_requested_rev(body);
+    let requested = requested.filter(|rev| is_short_sha(rev))?;
+    let path = format!("repos/{}/commits/{}", repo, requested);
+    let sha = ci_status_rest_api_json(&path, rest_opts)
+        .ok()?
+        .get("sha")
+        .and_then(Value::as_str)
+        .filter(|sha| is_full_sha(sha))?
+        .to_string();
+    Some(CiStatusShaResolution {
+        sha,
+        field,
+        requested: Some(requested.to_string()),
+    })
 }
 
 pub(super) fn ci_status_annotate_sha_resolution(
@@ -6987,11 +7012,6 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
     let cwd = body_cwd(body);
     let repo = ci_status_resolve_repo_preferring_unambiguous_github_repo_field(body, cwd)
         .map_err(|packed| unpack_to_value(packed))?;
-    let resolution = ci_status_resolve_sha(body, cwd).map_err(|packed| unpack_to_value(packed))?;
-    let sha = resolution.sha.clone();
-    let repo = ci_status_repo_for_sha(cwd, &sha, repo);
-    let runs_path = format!("repos/{}/actions/runs?head_sha={}&per_page=20", repo, sha);
-    let tree_path = format!("repos/{}/git/trees/{}?recursive=1", repo, sha);
     let token = body
         .get("token")
         .and_then(|v| v.as_str())
@@ -7005,6 +7025,17 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
         headers["Authorization"] = json!(format!("Bearer {}", t));
     }
     let rest_opts = json!({ "timeoutMs": FETCH_DEFAULT_TIMEOUT_MS, "headers": headers }).to_string();
+    let resolution = match ci_status_resolve_sha(body, cwd) {
+        Ok(resolution) => resolution,
+        Err(packed) => match ci_status_resolve_short_sha_on_remote(body, &repo, &rest_opts) {
+            Some(resolution) => resolution,
+            None => return Err(unpack_to_value(packed)),
+        },
+    };
+    let sha = resolution.sha.clone();
+    let repo = ci_status_repo_for_sha(cwd, &sha, repo);
+    let runs_path = format!("repos/{}/actions/runs?head_sha={}&per_page=20", repo, sha);
+    let tree_path = format!("repos/{}/git/trees/{}?recursive=1", repo, sha);
     let mut ordered_transports: Vec<CiStatusTransport> = Vec::new();
     let mut failures: Vec<CiStatusAttemptFailure> = Vec::new();
     match ci_status_gh_unusable_reason() {
