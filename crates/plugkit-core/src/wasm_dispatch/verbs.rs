@@ -3245,10 +3245,18 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         } else {
             ERR_CODE_FAILED
         };
+        let error = if err_msg.is_empty() {
+            serde_json::from_str::<Value>(&out)
+                .ok()
+                .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_owned))
+                .unwrap_or_default()
+        } else {
+            err_msg
+        };
         return err_json_coded(
             verb,
             error_code,
-            json!({ "error": err_msg, "stdout": out, "exitCode": code }),
+            json!({ "error": error, "stdout": out, "exitCode": code }),
         );
     }
     let body = match default_git_root(verb, body) {
