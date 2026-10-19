@@ -1266,7 +1266,10 @@ pub struct Outcome {
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn outcome(result: &Value) -> Outcome {
-    let exit_code = if result.get("ok").and_then(Value::as_bool).unwrap_or(true) { 0 } else { 1 };
+    let data = result.get("data").filter(|value| value.is_object()).unwrap_or(result);
+    let ok = result.get("ok").and_then(Value::as_bool).unwrap_or(true)
+        && data.get("ok").and_then(Value::as_bool).unwrap_or(true);
+    let exit_code = data.get("exit_code").and_then(Value::as_i64).unwrap_or(if ok { 0 } else { 1 });
     let failure = failure_class(result, exit_code);
     Outcome {
         exit_code,
