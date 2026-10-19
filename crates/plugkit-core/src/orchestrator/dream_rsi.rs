@@ -1381,7 +1381,7 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         fingerprint: Some(fingerprint.to_string()),
         exit_code: Some(exit_code),
         gate_drift: Some(gate_drift),
-        prd_open_count: Some(prd_open_count),
+        prd_open_count,
         mutable_open_count: Some(mutable_open_count),
         quality: Some(outcome_score(exit_code, failure.no_match(), output_bytes)),
         ts: Some(ts),
@@ -1744,7 +1744,7 @@ fn register_policy(content: &str) -> Result<Value, String> {
         }
     }
     let deployed_at = deployed.then(|| super::state::now_ms() as i64);
-    let new_policy = json!({ "id": policy.id, "owner_session_id": owner_session_id, "roots": policy.roots, "max_nodes": policy.max_nodes, "deployed": deployed, "deployed_at": deployed_at, "max_online_rounds": max_online_rounds, "online_rounds": Vec::<u64>::new() });
+    let new_policy = json!({ "id": policy.id, "owner_session_id": owner_session_id, "roots": policy.roots, "max_nodes": policy.max_nodes, "attempt": policy.attempt, "group_size": policy.group_size, "stop": policy.stop.map(Stop::name), "deployed": deployed, "deployed_at": deployed_at, "max_online_rounds": max_online_rounds, "online_rounds": Vec::<u64>::new() });
     policies.push(new_policy);
     let signed = policies
         .into_iter()
