@@ -582,7 +582,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
     let wanted_ids = request_strings(&request, PRD_ROW_ID_FIELDS);
     let id_prefixes = request_strings(&request, PRD_ID_PREFIX_FIELDS);
     let requested_statuses = request_strings(&request, PRD_ROW_STATUS_FIELDS);
-    let limit = limit.or(if wanted_ids.is_empty() && requested_statuses.is_empty() {
+    let limit = limit.or(if wanted_ids.is_empty() {
         Some(PRD_LIST_DEFAULT_PAGE)
     } else {
         None
