@@ -220,6 +220,7 @@ jobs:
 
       - name: Verify every uploaded asset is actually fetchable, not just reported as uploaded
         env:
+          GH_TOKEN: ${{ secrets.publisher_token }}
           VER: ${{ steps.push.outputs.version }}
           REPO: ${{ inputs.release_repo }}
         working-directory: ${{ inputs.crate_dir }}
@@ -229,14 +230,18 @@ jobs:
           base="https://github.com/$REPO/releases/download/v$VER"
           for f in release-assets/*; do
             name=$(basename "$f")
-            for attempt in 1 2 3 4 5; do
-              code=$(curl -sL -o /dev/null -w '%{http_code}' "$base/$name")
+            delay=5
+            code=000
+            for attempt in $(seq 1 10); do
+              code=$(curl -sL -o /dev/null -w '%{http_code}' "$base/$name") || code=000
               [ "$code" = "200" ] && break
-              echo "[retry] $name HTTP $code (attempt $attempt)"
-              sleep $((attempt * 5))
+              echo "[retry] $name HTTP $code (attempt $attempt of 10; download routes can lag a fresh upload, next check in ${delay}s)"
+              [ "$attempt" -lt 10 ] && sleep "$delay"
+              delay=$((delay * 2)); [ "$delay" -gt 60 ] && delay=60
             done
             if [ "$code" != "200" ]; then
-              echo "::error::published release v$VER's $name is not fetchable (HTTP $code) -- the upload did not actually land"
+              state=$(gh api "repos/$REPO/releases/tags/v$VER" --jq ".assets[] | select(.name == \"$name\") | .state" 2>/dev/null || true)
+              echo "::error::published release v$VER's $name is not fetchable at $base after 10 attempts (last HTTP $code; API asset state: ${state:-missing})"
               exit 1
             fi
           done
