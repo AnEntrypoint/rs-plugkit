@@ -2093,7 +2093,6 @@ fn project_status(body: &Value) -> u64 {
                 "heartbeat_stale": heartbeat_age_ms.map_or(true, |age| age > STATUS_HEARTBEAT_STALE_MS),
             },
             "lifecycle": lifecycle_liveness(),
-            "note": "no taskId was passed, so this is daemon/session state for the project at cwd, not task state -- pass {\"taskId\": <n>} for one task's status",
         }),
     )
 }
