@@ -586,7 +586,13 @@ pub fn read_log(store: &Store) -> Result<LogRead, String> {
                 }
                 entries.push(entry)
             }
-            Err(_) => dropped_torn_lines += 1,
+            Err(_) => {
+                return Err(format!(
+                    "prd_log_corrupt_line: {} line {} is not valid JSON; repair or remove that line before reading the log",
+                    store.log,
+                    index + 1
+                ))
+            }
         }
     }
     Ok(LogRead {
