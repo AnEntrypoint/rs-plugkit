@@ -1824,10 +1824,6 @@ pub(super) fn code_exclusion_count(out: &serde_json::Map<String, Value>) -> u64 
 
 pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Option<String> {
     let reply_cut_by_hit_cap = out.get("matches_truncated").and_then(|v| v.as_bool()) == Some(true);
-    let coverage_incomplete = out.get("exhaustive").and_then(|v| v.as_bool()) == Some(false);
-    if !coverage_incomplete && !reply_cut_by_hit_cap {
-        return None;
-    }
     let num = |key: &str| out.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
     let mut bounds: Vec<String> = Vec::new();
     if out.get("budget_exhausted").and_then(|v| v.as_bool()) == Some(true) {
@@ -1893,11 +1889,10 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
             "{outside} glob alternatives name a directory outside path and were not scanned"
         ));
     }
-    let reason = if bounds.is_empty() {
-        "the scan did not cover the whole scope".to_string()
-    } else {
-        bounds.join("; ")
-    };
+    if bounds.is_empty() {
+        return None;
+    }
+    let reason = bounds.join("; ");
     Some(format!(
         "{reason} -- the matches below are NOT every match in the scope"
     ))
@@ -2609,10 +2604,11 @@ fn add_match_accounting(body: &Value, v: &mut Value) {
             .unwrap_or(listed)
             .max(listed);
         let files_scanned = source.get("files_scanned").and_then(|n| n.as_u64()).unwrap_or(0);
-        let scan_truncated = source.get("matches_truncated").and_then(|b| b.as_bool()) == Some(true);
+        let scan_truncated = source.get("matches_truncated").and_then(|b| b.as_bool()) == Some(true)
+            || source.get("files_truncated").and_then(|b| b.as_bool()) == Some(true);
         (listed, total, files_scanned, scan_truncated)
     };
-    let truncated = scan_truncated || v.get("partial").and_then(|b| b.as_bool()) == Some(true);
+    let truncated = scan_truncated;
     let scoped = PathScope::from_body(body).ok().flatten().is_some();
     let named = scan_target_paths(body).unwrap_or_default().join(", ");
     let Some(map) = v.as_object_mut() else {
