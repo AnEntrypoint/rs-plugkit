@@ -3814,7 +3814,15 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             }
             if git_commit_failed_for_missing_identity(sout, serr) {
                 let git_said = if serr.trim().is_empty() { sout.trim() } else { serr.trim() };
-                return Ok(err("git_commit", &format!("{} git said: {}", MISSING_COMMIT_IDENTITY, git_said)));
+                return Ok(err_json(
+                    "git_commit",
+                    json!({
+                        "error": format!("{} git said: {}", MISSING_COMMIT_IDENTITY, git_said),
+                        "error_code": "identity_unknown",
+                        "identity_attempted": format!("{} <{}>", identity.0, identity.1),
+                        "git_stderr": serr.trim(),
+                    }),
+                ));
             }
             return Ok(err("git_commit", if serr.is_empty() { sout } else { serr }));
         }
@@ -6292,7 +6300,8 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         !dirty_tracked.is_empty() && dirty_tracked.iter().all(|path| path.starts_with(".gm/"));
     let autostash = autostash_requested || only_runtime_state_dirty;
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
-    let mut argv: Vec<String> = identity_config_argv(&pull_identity(body));
+    let pull_id = pull_identity(body);
+    let mut argv: Vec<String> = identity_config_argv(&pull_id);
     argv.push("pull".to_string());
     argv.push("--no-edit".to_string());
     argv.push(String::from(if rebase { "--rebase" } else { "--no-rebase" }));
@@ -6388,6 +6397,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
                 json!({
                     "error": output,
                     "error_code": "git_identity_required",
+                    "identity_attempted": format!("{} <{}>", pull_id.0, pull_id.1),
                     "remote": remote,
                     "branch": if branch.is_empty() { Value::Null } else { json!(branch) },
                     "ff_only": ff_only,
