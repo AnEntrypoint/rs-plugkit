@@ -3499,6 +3499,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         }
         let mut stage_stderr = String::new();
         let mut force_added_ignored_paths: Vec<String> = Vec::new();
+        let mut index_removed_paths: Vec<String> = Vec::new();
         let mut write_steps: Vec<Value> = Vec::new();
         if let Some(filter) = own_rows_filter.as_mut() {
             if !filter.apply() {
@@ -3508,6 +3509,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         if add_all || !paths.is_empty() {
             let staged_paths: &[String] = if add_all { &[] } else { &paths };
             let deleted = deleted_tracked_paths(cwd, staged_paths);
+            index_removed_paths = deleted.clone();
             if !deleted.is_empty() {
                 let mut rm: Vec<String> = vec!["rm".to_string(), "--cached".to_string(), "--ignore-unmatch".to_string(), "-q".to_string(), "--".to_string()];
                 rm.extend(deleted.iter().cloned());
@@ -3568,9 +3570,10 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd, &commit_note_paths(cwd, scoped_paths));
         let bundled_message = bundle_prd_commit_comments(message, &commit_notes);
         let identity = commit_identity(body);
+        let commit_pathspec: Vec<String> = scoped_paths.iter().filter(|p| !index_removed_paths.contains(p)).cloned().collect();
         let r = git_step_replayed_by_call_order(
             plan,
-            &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, scoped_paths, &identity)),
+            &as_argv(&git_commit_argv(&bundled_message, allow_empty, amend, &commit_pathspec, &identity)),
             cwd,
         )?;
         write_steps.push(r.clone());
