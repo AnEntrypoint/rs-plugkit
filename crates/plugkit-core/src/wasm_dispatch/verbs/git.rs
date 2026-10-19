@@ -6097,6 +6097,23 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         .into_iter()
         .filter(|path| !gitlink_paths.contains(path))
         .collect();
+    let dirty_runtime_logs: Vec<String> = dirty_tracked
+        .iter()
+        .filter(|path| path.starts_with(".gm/") && path.ends_with("-log.jsonl"))
+        .cloned()
+        .collect();
+    if !dirty_runtime_logs.is_empty() {
+        return err_json(
+            "git_pull",
+            json!({
+                "error": "a tracked append-only runtime log under .gm/ is dirty; git_pull would shelve it under autostash and conflict on pop",
+                "error_code": "dirty_worktree",
+                "dirty_paths": dirty_runtime_logs,
+                "remote": remote,
+                "hint": "Nothing was fetched or merged. Commit or revert these logs from their own writer, then re-dispatch git_pull.",
+            }),
+        );
+    }
     let only_runtime_state_dirty =
         !dirty_tracked.is_empty() && dirty_tracked.iter().all(|path| path.starts_with(".gm/"));
     let autostash = autostash_requested || only_runtime_state_dirty;
