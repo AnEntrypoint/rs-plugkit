@@ -1169,7 +1169,7 @@ pub(super) fn pushed_commits_published(repo: Option<&str>, from: Option<&str>, t
     })
 }
 
-fn bin_drift_check_js(base: &str, repo: &str, include: &[String]) -> String {
+fn bin_drift_check_js(base: &str, repo: &str, rev: &str, include: &[String]) -> String {
     format!(
         r#"(() => {{
   const cp = require('child_process');
@@ -1177,6 +1177,7 @@ fn bin_drift_check_js(base: &str, repo: &str, include: &[String]) -> String {
   const os = require('os');
   const path = require('path');
   const repoDir = path.resolve({base}, {repo});
+  const rev = {rev};
   const include = {include};
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-bin-drift-'));
   const head = path.join(tmp, 'head');
@@ -1184,6 +1185,10 @@ fn bin_drift_check_js(base: &str, repo: &str, include: &[String]) -> String {
   try {{
     const clone = cp.spawnSync('git', ['clone', '-q', '--no-hardlinks', repoDir, head], {{ encoding: 'utf8' }});
     if (clone.status !== 0) throw new Error('git clone of HEAD failed: ' + String(clone.stderr || ''));
+    if (rev !== 'HEAD') {{
+      const co = cp.spawnSync('git', ['-C', head, 'checkout', '-q', '--detach', rev], {{ encoding: 'utf8' }});
+      if (co.status !== 0) throw new Error('git checkout of ' + rev + ' failed: ' + String(co.stderr || ''));
+    }}
     for (const rel of include) {{
       const from = path.join(repoDir, rel);
       const to = path.join(head, rel);
@@ -1205,6 +1210,7 @@ fn bin_drift_check_js(base: &str, repo: &str, include: &[String]) -> String {
 }})();"#,
         base = serde_json::to_string(base).unwrap_or_else(|_| "\"\"".to_string()),
         repo = serde_json::to_string(repo).unwrap_or_else(|_| "\"\"".to_string()),
+        rev = serde_json::to_string(rev).unwrap_or_else(|_| "\"HEAD\"".to_string()),
         include = serde_json::to_string(include).unwrap_or_else(|_| "[]".to_string()),
     )
 }
@@ -1227,10 +1233,10 @@ fn bin_drift_tracks_gate(repo: Option<&str>, rev: &str) -> bool {
         == 0
 }
 
-fn bin_drift_run(repo: Option<&str>, include: &[String]) -> Result<(), String> {
+fn bin_drift_run(repo: Option<&str>, rev: &str, include: &[String]) -> Result<(), String> {
     let checkout = repo.unwrap_or("the checkout");
     let base = super::host_abi::host_cwd_string().unwrap_or_default();
-    let code = bin_drift_check_js(&base, repo.unwrap_or(""), include);
+    let code = bin_drift_check_js(&base, repo.unwrap_or(""), rev, include);
     let opts = json!({ "timeoutMs": 150000 }).to_string();
     let packed = unsafe {
         super::host_abi::host_exec_js(
@@ -1281,21 +1287,11 @@ fn bin_drift_run(repo: Option<&str>, include: &[String]) -> Result<(), String> {
     Err(message)
 }
 
-fn bin_drift_refusal(
-    repo: Option<&str>,
-    source_sha: &str,
-    gate_inputs_dirty: bool,
-) -> Option<String> {
+fn bin_drift_refusal(repo: Option<&str>, source_sha: &str) -> Option<String> {
     if !bin_drift_tracks_gate(repo, source_sha) {
         return None;
     }
-    let head_sha = resolve_ref(repo, "HEAD").unwrap_or_default();
-    if gate_inputs_dirty || source_sha != head_sha.as_str() {
-        return Some(format!(
-            "bin drift gate cannot certify {source_sha}: check-bin-drift reads bin/, src/ and the build inputs from the checkout, so the push must be HEAD ({head_sha}) with no uncommitted changes under those paths. Commit or revert them, then push again. After the commit, run: node scripts/check-bin-drift.mjs; if it reports STALE, run: npm run build, then commit bin/gm-mcp-server.js with the src/ change."
-        ));
-    }
-    bin_drift_run(repo, &[])
+    bin_drift_run(repo, source_sha, &[])
         .err()
         .map(|detail| format!("bin drift gate refused the push: {detail}"))
 }
@@ -1350,7 +1346,7 @@ fn bin_drift_commit_refusal(repo: Option<&str>, paths: &[String], add_all: bool)
             listed.join(", ")
         ));
     }
-    bin_drift_run(repo, &committed_inputs)
+    bin_drift_run(repo, "HEAD", &committed_inputs)
         .err()
         .map(|detail| format!("bin drift gate refused the commit: {detail}"))
 }
@@ -1561,14 +1557,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
             return pack(refusal.to_string());
         }
     }
-    let gate_inputs_dirty = porcelain.lines().any(|line| {
-        let path = line.get(3..).unwrap_or("").trim().trim_matches('"');
-        let staged = line.as_bytes().first().map_or(false, |&x| x != b' ' && x != b'?');
-        staged && bin_drift_gate_input(path)
-    });
-    if let Some(reason) =
-        bin_drift_refusal(repo.as_deref(), &local_source_before, gate_inputs_dirty)
-    {
+    if let Some(reason) = bin_drift_refusal(repo.as_deref(), &local_source_before) {
         log_deviation_push("push-bin-drift", &branch);
         return pack(
             json!({
