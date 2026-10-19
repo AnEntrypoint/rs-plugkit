@@ -1089,9 +1089,11 @@ pub(super) fn resolve_scan_target(body: &Value) -> Result<(Option<String>, Vec<S
             root = Some(candidate);
         } else {
             let scope = candidate.strip_prefix("./").unwrap_or(&candidate);
-            if crate::pkfs::is_absolute(scope)
-                && crate::scan_universe::scope_inside_root(".", &scope.replace('\\', "/")).is_none()
-            {
+            let inside_project = crate::scan_universe::scope_inside_root(".", &scope.replace('\\', "/"));
+            let scope = inside_project.as_deref().unwrap_or(scope);
+            if scope.is_empty() {
+                root = None;
+            } else if crate::pkfs::is_absolute(scope) {
                 match marked_ancestor_for_root(scope) {
                     Some((ancestor, remainder)) => {
                         root = Some(ancestor);
