@@ -7396,6 +7396,18 @@ pub(super) fn ci_status_summarize(
 ) -> Value {
     let source = transport.label();
     if runs.is_empty() {
+        let sha_on_remote = ci_status_gh_api_json(&format!("repos/{}/commits/{}", repo, sha)).is_ok();
+        if !sha_on_remote {
+            return json!({
+                "ok": true, "verb": "ci-status", "data": {
+                    "status": "unknown", "repo": repo, "sha": sha,
+                    "failed_jobs": [], "run_url": Value::Null,
+                    "reason": format!("no workflow runs found for sha {} and that commit could not be read back from GitHub, so it is unpushed or otherwise absent from {} -- CI state for it is unknown, never success", sha, repo),
+                    "sha_on_remote": false,
+                    "transport": source,
+                }
+            });
+        }
         let tree_result = ci_status_attempt(transport, tree_path, rest_opts, 1);
         let tree = tree_result.as_ref().ok().cloned().unwrap_or(Value::Null);
         let complete_tree = tree.get("truncated").and_then(Value::as_bool) == Some(false);
@@ -7436,7 +7448,6 @@ pub(super) fn ci_status_summarize(
                         }
                     });
                 }
-                let sha_on_remote = ci_status_gh_api_json(&format!("repos/{}/commits/{}", repo, sha)).is_ok();
                 return json!({
                     "ok": true, "verb": "ci-status", "data": {
                         "status": "unknown", "repo": repo, "sha": sha,
@@ -7449,16 +7460,11 @@ pub(super) fn ci_status_summarize(
                 });
             }
         }
-        let sha_on_remote = ci_status_gh_api_json(&format!("repos/{}/commits/{}", repo, sha)).is_ok();
         return json!({
             "ok": true, "verb": "ci-status", "data": {
                 "status": "unknown", "repo": repo, "sha": sha,
                 "failed_jobs": [], "run_url": Value::Null,
-                "reason": if sha_on_remote {
-                    format!("no workflow runs found for sha {} although {} has that commit -- CI state for it is unknown, never success", sha, repo)
-                } else {
-                    format!("no workflow runs found for sha {} and that commit could not be read back from GitHub, so it is unpushed or otherwise absent from {} -- CI state for it is unknown, never success", sha, repo)
-                },
+                "reason": format!("no workflow runs found for sha {} although {} has that commit -- CI state for it is unknown, never success", sha, repo),
                 "workflow_tree_error": tree_result.err().map(|f| f.reason).unwrap_or_default(),
                 "sha_on_remote": sha_on_remote,
                 "transport": source,
