@@ -6424,6 +6424,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
 pub struct CommentScan<'a> {
     pub root: Option<&'a str>,
     pub paths: &'a [&'a str],
+    pub pattern: Option<&'a str>,
     pub include_globs: Vec<String>,
     pub exclude_globs: Vec<String>,
     pub omit_hits: bool,
@@ -7374,11 +7375,12 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
         let file_lines: Vec<&str> = if req.context > 0 { content.lines().collect() } else { Vec::new() };
         if file_comments.is_empty() && file_directives.is_empty() { continue; }
         if !file_comments.is_empty() { files_with_comments += 1; }
-        for span in &file_comments {
+        let admits = |span: &CommentSpan| req.pattern.map_or(true, |p| span.text.contains(p));
+        for span in file_comments.iter().filter(|span| admits(span)) {
             if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
             comments.push(comment_span_json(path, span.syntax, span, req.context, &file_lines));
         }
-        for span in &file_directives {
+        for span in file_directives.iter().filter(|span| admits(span)) {
             if comments.len() + directives.len() >= max_matches { matches_truncated = true; break; }
             directives.push(comment_span_json(path, span.syntax, span, req.context, &file_lines));
         }

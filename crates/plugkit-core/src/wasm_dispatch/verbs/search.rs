@@ -2317,9 +2317,15 @@ pub(super) fn grep_comments(body: &Value, cfg: &crate::ragconfig::RagConfig) -> 
         Some(n) => n as usize,
         None => 0,
     };
+    let pattern = body
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("query").and_then(|v| v.as_str()))
+        .filter(|p| !p.is_empty());
     let scan = crate::code_index::CommentScan {
         root: root.as_deref(),
         paths: &path_refs,
+        pattern,
         include_globs,
         exclude_globs,
         omit_hits: output_mode != "content",
