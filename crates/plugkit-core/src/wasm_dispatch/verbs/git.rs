@@ -5887,6 +5887,57 @@ fn git_pull_record_own_merge(cwd: Option<&str>, head_before: &str, head_after: &
     }
 }
 
+const APPEND_ONLY_STATE_LOGS: &[&str] = &[".gm/prd-log.jsonl", ".gm/mutables-log.jsonl"];
+
+fn union_append_only_log_conflicts(cwd: Option<&str>, conflicts: &[String], output: &str) -> bool {
+    let Some(root) = cwd else { return false };
+    if conflicts.is_empty()
+        || !conflicts
+            .iter()
+            .all(|path| APPEND_ONLY_STATE_LOGS.contains(&path.as_str()))
+    {
+        return false;
+    }
+    for path in conflicts {
+        let theirs = exec_git_in(cwd, &format!("show :2:{path}"));
+        let shelved = exec_git_in(cwd, &format!("show :3:{path}"));
+        let mut seen: std::collections::HashSet<&str> = theirs.lines().collect();
+        let mut merged = theirs.clone();
+        if !merged.is_empty() && !merged.ends_with('\n') {
+            merged.push('\n');
+        }
+        for line in shelved.lines() {
+            if !line.is_empty() && seen.insert(line) {
+                merged.push_str(line);
+                merged.push('\n');
+            }
+        }
+        if !crate::pkfs::write(&format!("{}/{}", root.trim_end_matches('/'), path), &merged) {
+            return false;
+        }
+        let add = git_call_argv(&["add", "--", path.as_str()], cwd);
+        if add.get("exit_code").and_then(|x| x.as_i64()) != Some(0) {
+            return false;
+        }
+    }
+    let shelved_sha = output
+        .lines()
+        .find_map(|line| line.strip_prefix("Created autostash: "))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !shelved_sha.is_empty() {
+        let stash_index = exec_git_in(cwd, "stash list --format=%H")
+            .lines()
+            .position(|sha| sha.starts_with(&shelved_sha));
+        if let Some(index) = stash_index {
+            let stash_ref = format!("stash@{{{index}}}");
+            git_call_argv(&["stash", "drop", stash_ref.as_str()], cwd);
+        }
+    }
+    true
+}
+
 pub(super) fn git_pull(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields("git_pull", body, GIT_PULL_ACCEPTED_FIELDS) {
         return refusal;
@@ -5995,14 +6046,50 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
         .collect();
-    if output.contains("Applying autostash resulted in conflicts") {
+    let autostash_conflicted = output.contains("Applying autostash resulted in conflicts");
+    if autostash_conflicted && union_append_only_log_conflicts(cwd, &conflicts, &output) {
         let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
         git_pull_record_own_merge(cwd, &head_before, &head_after);
+        return ok(
+            "git_pull",
+            json!({
+                "remote": remote,
+                "branch": if branch.is_empty() { Value::Null } else { json!(branch) },
+                "ff_only": ff_only,
+                "head_before": head_before,
+                "head_after": head_after,
+                "already_up_to_date": head_before == head_after,
+                "output": output,
+                "union_merged_append_only_logs": conflicts,
+            }),
+        );
+    }
+    if autostash_conflicted {
+        let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+        git_pull_record_own_merge(cwd, &head_before, &head_after);
+        let residue: Vec<String> = format!(
+            "{}{}",
+            exec_git_in(cwd, "diff --name-only"),
+            exec_git_in(cwd, "diff --cached --name-only")
+        )
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|path| !path.is_empty() && !conflicts.contains(path))
+        .collect::<std::collections::BTreeSet<String>>()
+        .into_iter()
+        .collect();
+        if !residue.is_empty() {
+            let mut restore_argv: Vec<&str> =
+                vec!["restore", "--source=HEAD", "--staged", "--worktree", "--"];
+            restore_argv.extend(residue.iter().map(|path| path.as_str()));
+            git_call_argv(&restore_argv, cwd);
+        }
         return err_json(
             "git_pull",
             json!({
                 "error": output,
                 "error_code": "autostash_pop_conflicted",
+                "residue_restored": residue,
                 "remote": remote,
                 "branch": if branch.is_empty() { Value::Null } else { json!(branch) },
                 "ff_only": ff_only,
