@@ -671,16 +671,6 @@ fn split_inline_scripts(text: &str) -> (String, Vec<(&str, char)>) {
     (code, scripts)
 }
 
-fn script_runs_git(script: &str) -> bool {
-    let bytes = script.as_bytes();
-    script.match_indices("git").any(|(at, _)| {
-        let before = at.checked_sub(1).map(|i| bytes[i]);
-        let after = bytes.get(at + 3).copied();
-        matches!(before, Some(b'\'' | b'"' | b'`' | b'/' | b'\\'))
-            && matches!(after, Some(b'\'' | b'"' | b'`' | b' '))
-    })
-}
-
 fn substitutions_invoke_git(
     text: &str,
     is_git_token: &dyn Fn(&str) -> bool,
@@ -696,12 +686,13 @@ fn text_invokes_git(text: &str, is_git_token: &dyn Fn(&str) -> bool, depth: usiz
         return true;
     }
     let (code, scripts) = split_inline_scripts(text);
-    scripts.iter().any(|&(script, quote)| {
-        script_runs_git(script)
-            || (quote == '"' && substitutions_invoke_git(script, is_git_token, depth))
-    }) || code
-        .split([';', '\n', '|', '&'])
-        .any(|segment| segment_invokes_git(segment, is_git_token, depth))
+    let quoted_substitution = scripts.iter().any(|&(script, quote)| {
+        quote == '"' && substitutions_invoke_git(script, is_git_token, depth)
+    });
+    quoted_substitution
+        || code
+            .split([';', '\n', '|', '&'])
+            .any(|segment| segment_invokes_git(segment, is_git_token, depth))
         || substitutions_invoke_git(&code, is_git_token, depth)
 }
 
