@@ -8791,7 +8791,15 @@ fn git_remote_list(body: &Value) -> u64 {
     })
 }
 
-pub(super) fn git_checkout_pathspec(raw: &str, top: &str, prefix: &str) -> Result<(String, bool), &'static str> {
+const PROTECTED_PATH_REFUSAL: &str = "the project's own .gm/ and .agentplug* are never restored";
+
+pub(super) enum CheckoutPathspec {
+    Regular(String),
+    Transient(String),
+    RuntimeFile(String),
+}
+
+pub(super) fn git_checkout_pathspec(raw: &str, top: &str, prefix: &str) -> Result<CheckoutPathspec, &'static str> {
     let spec = raw.trim();
     if spec.is_empty() {
         return Err("empty pathspec");
@@ -8829,25 +8837,36 @@ pub(super) fn git_checkout_pathspec(raw: &str, top: &str, prefix: &str) -> Resul
         .find(|segment| !segment.is_empty() && *segment != ".")
         .unwrap_or("")
         .to_ascii_lowercase();
-    if GIT_PROTECTED_PATHSPECS.iter().any(|(name, _)| {
+    if is_restorable_transient_generated_path(&from_top) {
+        return Ok(CheckoutPathspec::Transient(for_git));
+    }
+    let protected = GIT_PROTECTED_PATHSPECS.iter().any(|(name, _)| {
         top_segment == name.trim_end_matches('*')
             || (name.ends_with('*') && top_segment.starts_with(name.trim_end_matches('*')))
-    }) && !is_restorable_transient_generated_path(&from_top)
-    {
-        return Err("the project's own .gm/ and .agentplug* are never restored");
+    });
+    if !protected {
+        return Ok(CheckoutPathspec::Regular(for_git));
     }
-    let restorable = is_restorable_transient_generated_path(&from_top);
-    Ok((for_git, restorable))
+    if spec.contains(['*', '?', '[']) {
+        return Err(PROTECTED_PATH_REFUSAL);
+    }
+    let repo_path = from_top
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+    Ok(CheckoutPathspec::RuntimeFile(repo_path))
 }
 
-fn checkout_diff(source: Option<&str>, scope: &[&str], cwd: Option<&str>) -> Result<Vec<String>, String> {
-    let mut argv: Vec<&str> = vec!["diff", "--name-only"];
-    if let Some(s) = source {
-        argv.push(s);
-    }
-    argv.push("--");
-    argv.extend(scope.iter().copied());
-    let r = git_call_argv(&argv, cwd);
+fn refused_pathspec(raw: &str, reason: &str) -> u64 {
+    err_json(
+        "git_checkout",
+        json!({ "error": format!("refused pathspec {:?}: {}", raw, reason), "path": raw }),
+    )
+}
+
+fn checkout_names(argv: &[&str], cwd: Option<&str>) -> Result<Vec<String>, String> {
+    let r = git_call_argv(argv, cwd);
     let stdout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
     if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0 {
         let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
@@ -8858,6 +8877,34 @@ fn checkout_diff(source: Option<&str>, scope: &[&str], cwd: Option<&str>) -> Res
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .collect())
+}
+
+fn checkout_diff(source: Option<&str>, scope: &[&str], cwd: Option<&str>) -> Result<Vec<String>, String> {
+    let mut argv: Vec<&str> = vec!["diff", "--name-only"];
+    if let Some(s) = source {
+        argv.push(s);
+    }
+    argv.push("--");
+    argv.extend(scope.iter().copied());
+    checkout_names(&argv, cwd)
+}
+
+fn checkout_listing(source: Option<&str>, scope: &str, top: &str) -> Result<Vec<String>, String> {
+    let mut argv: Vec<&str> = match source {
+        Some(s) => vec!["ls-tree", "-r", "--name-only", "--full-name", s],
+        None => vec!["ls-files", "--full-name"],
+    };
+    argv.extend(["--", scope]);
+    checkout_names(&argv, Some(top))
+}
+
+fn runtime_file_prior_bytes(repo_path: &str, source: Option<&str>, top: &str) -> Result<Option<u64>, String> {
+    let listed = checkout_listing(source, repo_path, top)?;
+    if listed.len() != 1 || listed[0] != repo_path {
+        return Err(PROTECTED_PATH_REFUSAL.to_string());
+    }
+    Ok(crate::pkfs::stat(&format!("{}/{}", top, repo_path))
+        .and_then(|stat| stat.get("size").and_then(Value::as_u64)))
 }
 
 fn checkout_restore(source_arg: Option<&str>, scope: &[&str], cwd: Option<&str>) -> Result<String, String> {
@@ -8916,19 +8963,21 @@ pub(super) fn git_checkout_paths(body: &Value, cwd: Option<&str>, requested: &Va
         .replace('\\', "/");
     let mut regular: Vec<String> = vec![];
     let mut exempt: Vec<String> = vec![];
+    let mut runtime: Vec<(String, Option<u64>)> = vec![];
     for item in items {
         let Some(raw) = item.as_str() else {
             return err("git_checkout", "every entry of paths must be a string");
         };
         match git_checkout_pathspec(raw, &top, &prefix) {
-            Ok((spec, true)) => exempt.push(spec),
-            Ok((spec, false)) => regular.push(spec),
-            Err(reason) => {
-                return err_json(
-                    "git_checkout",
-                    json!({ "error": format!("refused pathspec {:?}: {}", raw, reason), "path": raw }),
-                )
+            Ok(CheckoutPathspec::Regular(spec)) => regular.push(spec),
+            Ok(CheckoutPathspec::Transient(spec)) => exempt.push(spec),
+            Ok(CheckoutPathspec::RuntimeFile(repo_path)) => {
+                match runtime_file_prior_bytes(&repo_path, source, &top) {
+                    Ok(prior_bytes) => runtime.push((repo_path, prior_bytes)),
+                    Err(reason) => return refused_pathspec(raw, &reason),
+                }
             }
+            Err(reason) => return refused_pathspec(raw, reason),
         }
     }
     let protected: Vec<&str> = GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec).collect();
@@ -8992,8 +9041,20 @@ pub(super) fn git_checkout_paths(body: &Value, cwd: Option<&str>, requested: &Va
             Err(e) => return err("git_checkout", &e),
         }
     }
+    if !runtime.is_empty() {
+        let runtime_scope: Vec<&str> = runtime.iter().map(|(path, _)| path.as_str()).collect();
+        match checkout_restore(source_arg.as_deref(), &runtime_scope, Some(top.as_str())) {
+            Ok(o) => outputs.push(o),
+            Err(e) => return err("git_checkout", &e),
+        }
+    }
     let mut restored = guarded;
     restored.extend(exempt_differing);
+    restored.extend(runtime.iter().map(|(path, _)| path.clone()));
+    let runtime_restored: Vec<Value> = runtime
+        .iter()
+        .map(|(path, prior_bytes)| json!({ "path": path, "prior_bytes": prior_bytes }))
+        .collect();
     let output = outputs
         .into_iter()
         .filter(|o| !o.is_empty())
@@ -9001,7 +9062,12 @@ pub(super) fn git_checkout_paths(body: &Value, cwd: Option<&str>, requested: &Va
         .join("\n");
     ok(
         "git_checkout",
-        json!({ "restored": restored, "source": source.unwrap_or("index"), "output": output }),
+        json!({
+            "restored": restored,
+            "runtime_restored": runtime_restored,
+            "source": source.unwrap_or("index"),
+            "output": output
+        }),
     )
 }
 
