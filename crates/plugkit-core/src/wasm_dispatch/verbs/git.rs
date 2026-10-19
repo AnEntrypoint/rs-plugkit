@@ -7588,6 +7588,10 @@ pub(super) fn ci_log_steps(repo: &str, run_id: u64) -> Result<Vec<CiLogStep>, St
         let any_failed_step = listed
             .iter()
             .any(|s| failed(s.get("conclusion").and_then(Value::as_str)));
+        let job_name = ci_log_table_field(job.get("name").and_then(Value::as_str).unwrap_or(""));
+        let job_id = job.get("id").and_then(Value::as_u64);
+        let job_url = job.get("html_url").and_then(Value::as_str).map(String::from);
+        let before = steps.len();
         for step in &listed {
             let started = ci_log_second_prefix(step.get("started_at").and_then(Value::as_str));
             if started.is_empty() {
@@ -7595,14 +7599,26 @@ pub(super) fn ci_log_steps(repo: &str, run_id: u64) -> Result<Vec<CiLogStep>, St
             }
             let step_failed = failed(step.get("conclusion").and_then(Value::as_str));
             steps.push(CiLogStep {
-                job: ci_log_table_field(job.get("name").and_then(Value::as_str).unwrap_or("")),
-                job_id: job.get("id").and_then(Value::as_u64),
-                job_url: job.get("html_url").and_then(Value::as_str).map(String::from),
+                job: job_name.clone(),
+                job_id,
+                job_url: job_url.clone(),
                 name: ci_log_table_field(step.get("name").and_then(Value::as_str).unwrap_or("")),
                 number: step.get("number").and_then(Value::as_u64),
                 started,
                 completed: ci_log_second_prefix(step.get("completed_at").and_then(Value::as_str)),
                 failing: job_failed && (step_failed || !any_failed_step),
+            });
+        }
+        if job_failed && steps.len() == before {
+            steps.push(CiLogStep {
+                job: job_name,
+                job_id,
+                job_url,
+                name: String::new(),
+                number: None,
+                started: String::new(),
+                completed: String::new(),
+                failing: true,
             });
         }
     }
