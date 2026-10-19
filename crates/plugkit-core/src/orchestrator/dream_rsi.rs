@@ -902,8 +902,14 @@ fn reply_dispatch_ids(text: &str) -> impl Iterator<Item = String> + '_ {
 #[cfg(target_arch = "wasm32")]
 impl LedgerCheck {
     fn load() -> Self {
-        let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
-        let Some(raw) = crate::pkfs::read_to_string(&crate::dispatch_ledger::ledger_path(&cwd)) else {
+        let Some(cwd) = crate::wasm_dispatch::host_cwd_string().filter(|cwd| !cwd.is_empty()) else {
+            return LedgerCheck { unreadable: Some("cwd_unavailable"), ..Default::default() };
+        };
+        let path = crate::dispatch_ledger::ledger_path(&cwd);
+        let Some(raw) = crate::pkfs::read_to_string(&path) else {
+            if crate::pkfs::exists(&path) {
+                return LedgerCheck { unreadable: Some("ledger_unreadable"), ..Default::default() };
+            }
             return LedgerCheck::default();
         };
         let Ok(parsed) = serde_json::from_str::<Vec<Value>>(&raw) else {
