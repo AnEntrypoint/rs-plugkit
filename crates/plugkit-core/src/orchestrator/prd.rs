@@ -2926,9 +2926,10 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 Some((
                     "self_witness",
                     format!(
-                        "prd-resolve refused: witness_dispatch_id {} was produced by session {}, the session resolving {} or its executor session -- a row cannot be witnessed by the session that resolves or executed it",
+                        "prd-resolve refused: witness_dispatch_id {} was produced by session {}, the session resolving {} or its executor session. Pass witness_dispatch_id as the dispatch id of a live run made under a different SESSION_ID; get a verifier brief with prd-witness-request {{\"id\":\"{}\"}}",
                         dispatch_id,
                         dispatch_session.as_deref().unwrap_or_default(),
+                        id_target,
                         id_target
                     ),
                 ))
@@ -2961,7 +2962,10 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 .to_string();
                 return (
                     body,
-                    format!("prd-resolve refused: self-witness for {}", id_target),
+                    format!(
+                        "prd-resolve refused: self-witness for {}: witness_dispatch_id {} is from the resolving or executor session. Pass witness_dispatch_id = a dispatch id from a different SESSION_ID (field name: witness_dispatch_id)",
+                        id_target, dispatch_id
+                    ),
                     1,
                 );
             }
