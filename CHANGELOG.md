@@ -349,7 +349,7 @@ Force a non-`[skip ci]` build so the cascade rebuilds plugkit with the rs-exec c
 
 ## 2026-05-02 - prompt_submit: parallelize search + codeinsight subprocess spawns
 
-prompt_submit.rs witnessed at 7007ms end-to-end in gm-log 5-min window. search and codeinsight subprocess spawns now run in parallel std::thread::spawn handles, joined after recall finishes. Output ordering preserved (search → recall → codeinsight). Expected reduction in hook latency for sessions where both contribute is roughly the cost of the shorter spawn.
+prompt_submit.rs witnessed at 7007ms end-to-end in gm-log 5-min window. search and codeinsight subprocess spawns now run in parallel std::thread::spawn handles, joined after recall finishes. Output ordering preserved (search, then recall, then codeinsight). Expected reduction in hook latency for sessions where both contribute is roughly the cost of the shorter spawn.
 
 ## 2026-05-02 - hook obs: pre-tool autonomy field + dedupe prompt-submit fallback
 
