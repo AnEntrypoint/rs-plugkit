@@ -2976,7 +2976,8 @@ let patch=I.patch;const selected=[];
 if(patch==null){patch='';for(const [file,wanted] of Object.entries(I.hunks)){const d=must('diff',git(['diff','--no-color','--no-ext-diff','-U3','HEAD','--',file]));const lines=d.split('\n');const at=lines.findIndex(l=>l.startsWith('@@'));if(at<0)throw {stage:'hunks',stderr:'no diff against HEAD for '+file};const header=lines.slice(0,at);const hunks=[];let cur=null;for(const l of lines.slice(at)){if(l.startsWith('@@')){cur=[l];hunks.push(cur);}else if(cur){cur.push(l);}}
 while(hunks.length&&hunks[hunks.length-1].length&&hunks[hunks.length-1][hunks[hunks.length-1].length-1]==='')hunks[hunks.length-1].pop();
 const bad=wanted.filter(n=>!Number.isInteger(n)||n<1||n>hunks.length);if(bad.length)throw {stage:'hunks',stderr:file+' has '+hunks.length+' hunk(s) against HEAD; refused hunk number(s) '+bad.join(','),hunk_headers:hunks.map(h=>h[0])};
-patch+=header.join('\n')+'\n'+wanted.map(n=>hunks[n-1].join('\n')).join('\n')+'\n';for(const n of wanted)selected.push({path:file,hunk:n,header:hunks[n-1][0]});}}
+const ordered=wanted.slice().sort((a,b)=>a-b);const dup=ordered.filter((n,i)=>i>0&&n===ordered[i-1]);if(dup.length)throw {stage:'hunks',stderr:file+' names hunk number(s) more than once: '+dup.join(',')};
+patch+=header.join('\n')+'\n'+ordered.map(n=>hunks[n-1].join('\n')).join('\n')+'\n';for(const n of ordered)selected.push({path:file,hunk:n,header:hunks[n-1][0]});}}
 idx=P.join(gitdir,'gm-patch-index-'+process.pid+'-'+Date.now());const E={GIT_INDEX_FILE:idx};
 must('read_tree',git(['read-tree',head],E));
 if(patch){must('apply',git(['apply','--cached','--whitespace=nowarn','-'],E,patch));}
@@ -7183,12 +7184,14 @@ pub(super) fn ci_status_summarize(
                         }
                     });
                 }
+                let sha_on_remote = ci_status_gh_api_json(&format!("repos/{}/commits/{}", repo, sha)).is_ok();
                 return json!({
                     "ok": true, "verb": "ci-status", "data": {
                         "status": "unknown", "repo": repo, "sha": sha,
                         "failed_jobs": [], "run_url": Value::Null,
                         "reason": "no workflow runs found for this sha; workflow definitions are present",
                         "workflow_paths": workflow_paths,
+                        "sha_on_remote": sha_on_remote,
                         "transport": source,
                     }
                 });
@@ -10604,15 +10607,44 @@ pub(super) fn git_worktree_remove(body: &Value) -> u64 {
 }
 
 pub(super) fn git_worktree_prune(body: &Value) -> u64 {
-    if let Some(refusal) = refuse_unknown_fields("git_worktree_prune", body, &[]) { return refusal; }
+    if let Some(refusal) = refuse_unknown_fields("git_worktree_prune", body, &["base"]) { return refusal; }
     let cwd = body_cwd(body);
+    let base = body
+        .get("base")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty() && !s.starts_with('-'))
+        .unwrap_or("HEAD");
     let r = git_call_argv(&["worktree", "prune"], cwd);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let output = format!("{}{}",
         r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
         r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
     if code != 0 { return err("git_worktree_prune", &output); }
-    ok("git_worktree_prune", json!({ "pruned": true, "output": output.trim() }))
+    let listing = git_call_argv(&["worktree", "list", "--porcelain"], cwd);
+    let listed = listing.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    let mut removed: Vec<String> = vec![];
+    let mut kept: Vec<String> = vec![];
+    for (index, block) in listed.split("\n\n").filter(|b| !b.trim().is_empty()).enumerate() {
+        let Some(path) = block.lines().find_map(|l| l.strip_prefix("worktree ")) else { continue };
+        if index == 0 { continue; }
+        let Some(head) = block.lines().find_map(|l| l.strip_prefix("HEAD ")) else {
+            kept.push(path.to_string());
+            continue;
+        };
+        let merged = git_call_argv(&["merge-base", "--is-ancestor", head, base], cwd)
+            .get("exit_code")
+            .and_then(|x| x.as_i64())
+            .unwrap_or(1)
+            == 0;
+        let gone = merged
+            && git_call_argv(&["worktree", "remove", path], cwd)
+                .get("exit_code")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(1)
+                == 0;
+        if gone { removed.push(path.to_string()) } else { kept.push(path.to_string()) }
+    }
+    ok("git_worktree_prune", json!({ "pruned": true, "output": output.trim(), "base": base, "removed": removed, "kept": kept }))
 }
 
 pub(super) fn rebase_failed(out: &str) -> bool {
