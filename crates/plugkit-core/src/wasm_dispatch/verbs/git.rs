@@ -1193,15 +1193,11 @@ fn bin_drift_check_js(base: &str, repo: &str, rev: &str, include: &[String], fro
     for (const rel of include) {{
       const from = path.join(repoDir, rel);
       const to = path.join(head, rel);
-      if (fromIndex) {{
-        const blob = cp.spawnSync('git', ['-C', repoDir, 'show', ':' + rel], {{ maxBuffer: 1 << 30 }});
-        if (blob.status === 0) {{
-          fs.mkdirSync(path.dirname(to), {{ recursive: true }});
-          fs.writeFileSync(to, blob.stdout);
-        }} else fs.rmSync(to, {{ force: true }});
-      }} else if (fs.existsSync(from)) {{
+      const blob = fromIndex ? cp.spawnSync('git', ['-C', repoDir, 'show', ':' + rel], {{ maxBuffer: 64 * 1024 * 1024 }}) : null;
+      if (fromIndex ? blob.status === 0 : fs.existsSync(from)) {{
         fs.mkdirSync(path.dirname(to), {{ recursive: true }});
-        fs.copyFileSync(from, to);
+        if (fromIndex) fs.writeFileSync(to, blob.stdout);
+        else fs.copyFileSync(from, to);
       }} else fs.rmSync(to, {{ force: true }});
     }}
     fs.symlinkSync(path.join(repoDir, 'node_modules'), path.join(head, 'node_modules'), 'junction');
@@ -1219,7 +1215,7 @@ fn bin_drift_check_js(base: &str, repo: &str, rev: &str, include: &[String], fro
         repo = serde_json::to_string(repo).unwrap_or_else(|_| "\"\"".to_string()),
         rev = serde_json::to_string(rev).unwrap_or_else(|_| "\"HEAD\"".to_string()),
         include = serde_json::to_string(include).unwrap_or_else(|_| "[]".to_string()),
-        from_index = from_index,
+        from_index = if from_index { "true" } else { "false" },
     )
 }
 
@@ -7274,6 +7270,10 @@ pub(super) fn ci_status_summarize(
     } else if any_cancelled {
         overall = "cancelled";
     }
+    let run_url = failed_jobs
+        .first()
+        .and_then(|job| job.get("run_url").and_then(Value::as_str).map(String::from))
+        .or(run_url);
     json!({
         "ok": true, "verb": "ci-status", "data": {
             "status": overall, "repo": repo, "sha": sha,
@@ -7801,9 +7801,6 @@ pub(super) fn ci_log_regex_mode(body: &Value) -> Result<bool, Value> {
 }
 
 pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Value> {
-    if let Some(run_id) = ci_log_id(body, &["run_id", "run"]) {
-        return Ok(run_id);
-    }
     if let Some(job_id) = ci_log_id(body, &["job_id"]) {
         let parsed = ci_status_gh_api_json(&format!("repos/{}/actions/jobs/{}", repo, job_id))
             .map_err(|reason| {
@@ -7819,6 +7816,9 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
                 "repo": repo, "job_id": job_id,
             })),
         };
+    }
+    if let Some(run_id) = ci_log_id(body, &["run_id", "run"]) {
+        return Ok(run_id);
     }
     let sha = ci_log_string(body, &["sha", "rev", "ref"]);
     if sha.is_empty() {
