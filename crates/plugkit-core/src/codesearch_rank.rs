@@ -636,12 +636,17 @@ fn commit_hit(
     let short = &hash[..hash.len().min(8)];
     let message = squeeze(message, SNIPPET_CHARS);
     match located {
-        Some((path, line)) => json!({
-            "at": format!("{path}:{line}"),
-            "sym": format!("commit {short}"),
-            "snip": tree_snippet(opts, path, line, files).unwrap_or_else(|| text_snippet(&message)),
-            "message": message,
-        }),
+        Some((path, line)) => {
+            let mut hit = json!({
+                "at": format!("{path}:{line}"),
+                "sym": format!("commit {short}"),
+                "message": message,
+            });
+            if let Some(lines) = tree_snippet(opts, path, line, files) {
+                hit["snip"] = json!(lines);
+            }
+            hit
+        }
         None => json!({ "at": short, "message": message }),
     }
 }
