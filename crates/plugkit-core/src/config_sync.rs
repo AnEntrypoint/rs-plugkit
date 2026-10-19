@@ -478,7 +478,17 @@ fn try_lock(src: &RepoSource) -> LockProbe {
         .parent()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
-    try_lock_at(&lock_path(src), &mkdir_dir)
+    let lock = lock_path(src);
+    let mut waited_ms = 0;
+    loop {
+        match try_lock_at(&lock, &mkdir_dir) {
+            LockProbe::Held if waited_ms < SHARED_PROBE_WAIT_MS => {
+                crate::orchestrator::sleep_ms(SHARED_PROBE_POLL_MS);
+                waited_ms += SHARED_PROBE_POLL_MS;
+            }
+            probe => return probe,
+        }
+    }
 }
 
 fn try_lock_at(lock_path: &str, mkdir_dir: &str) -> LockProbe {
@@ -831,7 +841,11 @@ pub fn ensure_current(src: &RepoSource, debounce_ms: u64, forced: bool) -> Resul
     let lock = match try_lock(src) {
         LockProbe::Acquired(lock) => lock,
         LockProbe::Held => {
-            let detail = "another refresh in progress; serving current checkout".to_string();
+            let detail = format!(
+                "config refresh lock {} stayed held by another process for {} ms; the guest gave up waiting, serving current checkout",
+                lock_path(src),
+                SHARED_PROBE_WAIT_MS
+            );
             return match have_local {
                 Some(sha) => {
                     if forced {
