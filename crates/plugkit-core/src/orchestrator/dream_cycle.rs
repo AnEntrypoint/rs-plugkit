@@ -45,9 +45,7 @@ fn evaluate(content: &str) -> Result<Value, String> {
     let round = match super::dream_rsi::history_round(owner, after.or(stored.as_deref()), beta1, beta2) {
         Ok(round) => round,
         Err(error) if error.starts_with(super::dream_rsi::POSTCONDITION_FAILED) => {
-            let mut reply = refused(owner, cycle_id, error);
-            reply["dampened_probe"] = json!(dampen_session_probe(owner));
-            return Ok(reply);
+            return Ok(refused(owner, cycle_id, error));
         }
         Err(error) => return Err(error),
     };
@@ -109,12 +107,6 @@ fn refused(owner: &str, cycle_id: Option<&str>, error: String) -> Value {
         "ok": false, "error_code": "postcondition_failed", "kind": "observations",
         "status": "refused", "owner_session_id": owner, "cycle_id": cycle_id, "error": error
     })
-}
-
-#[cfg(target_arch = "wasm32")]
-fn dampen_session_probe(owner: &str) -> Option<String> {
-    let path = format!(".gm/dream-rsi/{owner}/{}.json", super::dream_rsi::CYCLE_RESULT_FILE);
-    crate::pkfs::remove_file(&path).then_some(path)
 }
 
 #[cfg(target_arch = "wasm32")]
