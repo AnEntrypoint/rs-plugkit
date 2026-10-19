@@ -8137,6 +8137,8 @@ pub(super) fn ci_log(body: &Value) -> u64 {
         Ok(run_id) => run_id,
         Err(detail) => return err_json("ci-log", detail),
     };
+    let run_selected_by_sha = ci_log_id(body, &["run_id", "run"]).is_none()
+        && ci_log_id(body, &["job_id"]).is_none();
     let job_id = match ci_log_optional_id(body, "job_id") {
         Ok(job_id) => job_id,
         Err(detail) => return err_json("ci-log", detail),
@@ -8412,7 +8414,13 @@ pub(super) fn ci_log(body: &Value) -> u64 {
                 "max_chars"
             });
         }
-        if failures.is_empty() {
+        if failures.is_empty() && run_selected_by_sha {
+            data["run_selected_by"] = json!("sha");
+            data["hint"] = json!(format!(
+                "run {} was picked from the sha and has no failing step; pass its run_id from ci-status failing_jobs (or job_id) to read the failing workflow run",
+                run_id
+            ));
+        } else if failures.is_empty() {
             data["hint"] = json!("no job in this run failed; drop failed_only to read the whole log");
         } else if matched == 0 {
             data["hint"] = json!(format!(
