@@ -970,6 +970,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
             &marker.to_string(),
         );
     }
+    #[cfg(target_arch = "wasm32")]
     prune_last_instruction_files();
     let instruction_for_payload = if instruction_unchanged {
         String::new()
@@ -1261,8 +1262,10 @@ const FIELDS_ALWAYS_RESTATED_IN_A_DELTA_REPLY: &[&str] = &[
 #[cfg(target_arch = "wasm32")]
 const FIELDS_PRESENT_ONLY_WHEN_THEIR_OWN_HASH_IS_UNASSERTED: &[&str] = &["discipline_policies"];
 
+#[cfg(target_arch = "wasm32")]
 const LAST_INSTRUCTION_FILES_KEEP: usize = 64;
 
+#[cfg(target_arch = "wasm32")]
 fn prune_last_instruction_files() {
     let spool = super::gm_dir().join("exec-spool").to_string_lossy().to_string();
     let Some(serde_json::Value::Array(entries)) = pkfs::readdir(&spool) else {
