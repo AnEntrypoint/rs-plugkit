@@ -3341,7 +3341,76 @@ pub(super) fn index_equals_session_staging(cwd: Option<&str>, session: &str, ind
     recorded == now_staged
 }
 
+pub(super) fn git_commit_untrack(body: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let paths = body_pathspecs(body);
+    if paths.is_empty() {
+        return err("git_commit", "untrack requires paths naming the .agentplug* entries to remove from the index");
+    }
+    for key in ["patch", "hunks", "add_all", "amend"] {
+        if body.get(key).is_some_and(|v| !v.is_null() && v.as_bool() != Some(false)) {
+            return err("git_commit", &format!("untrack cannot be combined with {key}: an untrack commit removes index entries and nothing else"));
+        }
+    }
+    let specs = match untrack_plan(&paths, cwd) {
+        Ok(specs) => specs,
+        Err(reason) => return err_json("git_commit", json!({
+            "error": reason,
+            "error_code": ERR_CODE_INVALID_ARGS,
+            "reason": reason,
+            "requested_paths": paths,
+            "next_dispatch": "git_commit",
+        })),
+    };
+    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if message.is_empty() {
+        return err("git_commit", "message required");
+    }
+    if let Err(reason) = commit_message_shape(message) {
+        return err("git_commit", &reason);
+    }
+    if let Some(reason) = commit_author_override_refusal(body) {
+        return err("git_commit", &reason);
+    }
+    let root = body_cwd(body).map(|c| if crate::pkfs::is_absolute(c) { c.to_string() } else { crate::pkfs::anchor(c) });
+    let input = json!({
+        "cwd": root,
+        "patch": "",
+        "remove": specs,
+        "message": message,
+        "identity": identity_config_argv(&commit_identity(body)),
+    });
+    let result = match run_git_patch_commit(&input) {
+        Ok(result) => result,
+        Err(detail) => return err_json("git_commit", detail),
+    };
+    if result.get("ok").and_then(Value::as_bool) != Some(true) {
+        let stage = result.get("stage").and_then(Value::as_str).unwrap_or("internal");
+        let mut detail = result.clone();
+        detail["error"] = json!(format!("untrack commit failed at {stage}: {}", result.get("stderr").and_then(Value::as_str).unwrap_or("")));
+        detail["untracked"] = json!(specs);
+        detail["reason"] = json!("nothing was committed; the work tree is untouched");
+        return err_json("git_commit", detail);
+    }
+    let sha_full = result.get("sha_full").and_then(Value::as_str).unwrap_or("").to_string();
+    ok("git_commit", json!({
+        "committed": true,
+        "untrack": true,
+        "untracked": specs,
+        "removed": result.get("paths").cloned().unwrap_or(Value::Null),
+        "index_synced": result.get("index_synced").cloned().unwrap_or(Value::Null),
+        "sha": sha_full.chars().take(10).collect::<String>(),
+        "sha_full": sha_full,
+        "summary": message.lines().next().unwrap_or(""),
+        "work_tree_touched": false,
+        "next_dispatch": "git_push",
+    }))
+}
+
 pub(super) fn git_commit(body: &Value) -> u64 {
+    if body.get("untrack").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return git_commit_untrack(body);
+    }
     if let Some(reply) = git_commit_hunk_scoped(body) {
         return reply;
     }
@@ -11237,7 +11306,7 @@ pub(super) fn hard_excluded_pathspecs(paths: &[String]) -> Vec<String> {
 }
 
 pub(super) fn protected_pathspec_refusal(verb: &str, blocked: &[String]) -> Value {
-    let reason = ".agentplug* is runtime state: it is never added or modified. A tracked .agentplug* path can only be untracked (index removal, files stay on disk) through git_finalize with untrack:true and paths naming only .agentplug* entries";
+    let reason = ".agentplug* is runtime state: it is never added or modified. A tracked .agentplug* path can only be untracked (index removal, files stay on disk) through git_commit or git_finalize with untrack:true and paths naming only .agentplug* entries";
     json!({
         "error": format!("refusing to stage protected pathspec(s): {} -- {}", blocked.join(", "), reason),
         "error_code": ERR_CODE_INVALID_ARGS,
