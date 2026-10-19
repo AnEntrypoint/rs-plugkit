@@ -1218,7 +1218,7 @@ fn bin_drift_check_js(base: &str, repo: &str, rev: &str, include: &[String]) -> 
 fn bin_drift_gate_input(path: &str) -> bool {
     path.starts_with("bin/")
         || path.starts_with("src/")
-        || path == "package.json"
+        || path == "package-lock.json"
         || path == "scripts/"
         || path == "scripts/build.mjs"
         || path == "scripts/check-bin-drift.mjs"
