@@ -404,8 +404,12 @@ fn evaluate_worlds(
         }
         let cost = replays
             .iter()
-            .filter_map(|replay| replay.get("cost").and_then(Value::as_u64))
-            .sum::<u64>();
+            .map(|replay| {
+                replay.get("cost").and_then(Value::as_u64).ok_or_else(|| {
+                    format!("dream-replay policy {} replay lacks a numeric cost", policy.id)
+                })
+            })
+            .sum::<Result<u64, String>>()?;
         rankings.push(json!({
             "policy_id": policy.id,
             "score": score,
@@ -463,17 +467,20 @@ fn evaluate_worlds(
         .cloned()
         .unwrap_or(baseline.clone());
     let declared = |key: &str| selected.get(key).cloned().unwrap_or(Value::Null);
+    let selected_score = selected.get("score").and_then(Value::as_f64);
+    let improved = selected.get("policy_id") != baseline.get("policy_id")
+        && selected_score.unwrap_or(f64::NEG_INFINITY) > baseline_score;
     Ok(json!({
         "ok": true,
         "baseline_policy_id": baseline_id,
         "selected_policy_id": selected.get("policy_id").and_then(Value::as_str),
         "baseline_score": baseline_score,
-        "selected_score": selected.get("score").and_then(Value::as_f64),
+        "selected_score": selected_score,
         "attempt": declared("attempt"),
         "group_size": declared("group_size"),
         "stop": declared("stop"),
-        "improved": selected.get("policy_id") != baseline.get("policy_id"),
-        "promotion_reason": if selected.get("policy_id") != baseline.get("policy_id") {
+        "improved": improved,
+        "promotion_reason": if improved {
             "improved"
         } else if worlds.len() < PROMOTION_MIN_WORLDS {
             "insufficient_worlds"
@@ -720,6 +727,9 @@ const OBSERVATIONS_ARCHIVE_MAX_CHUNKS: usize = 32;
 const OBSERVATIONS_ARCHIVE_PREFIX: &str = "observations-archive-";
 
 #[cfg(target_arch = "wasm32")]
+const OBSERVATIONS_LIVE_COUNT_FILE: &str = "observations.count";
+
+#[cfg(target_arch = "wasm32")]
 fn dir_entry_names(dir: &str) -> Vec<String> {
     let Some(Value::Array(entries)) = crate::pkfs::readdir(dir) else {
         return Vec::new();
@@ -766,16 +776,36 @@ fn archive_observations(session_id: &str, ts: i64, raw: &str) -> Option<String> 
 }
 
 #[cfg(target_arch = "wasm32")]
+fn live_count_path(session_id: &str) -> String {
+    format!(".gm/dream-rsi/{session_id}/{OBSERVATIONS_LIVE_COUNT_FILE}")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn read_live_count(session_id: &str) -> Option<usize> {
+    crate::pkfs::read_to_string(&live_count_path(session_id))?.trim().parse().ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn write_live_count(session_id: &str, count: usize) {
+    crate::pkfs::write(&live_count_path(session_id), &format!("{count}\n"));
+}
+
+#[cfg(target_arch = "wasm32")]
 fn rotate_observations_if_full(session_id: &str, path: &str, ts: i64) {
+    if read_live_count(session_id).is_some_and(|count| count < OBSERVATIONS_LIVE_CAP) {
+        return;
+    }
     let Some(raw) = crate::pkfs::read_to_string(path) else {
         return;
     };
     if raw.trim().is_empty() {
+        write_live_count(session_id, 0);
         return;
     }
     let legacy_array = raw.trim_start().starts_with('[');
     let live_lines = raw.lines().filter(|line| !line.trim().is_empty()).count();
     if !legacy_array && live_lines < OBSERVATIONS_LIVE_CAP {
+        write_live_count(session_id, live_lines);
         return;
     }
     let Some(archive) = archive_observations(session_id, ts, &raw) else {
@@ -787,7 +817,10 @@ fn rotate_observations_if_full(session_id: &str, path: &str, ts: i64) {
     );
     if !swapped {
         crate::pkfs::remove_file(&archive);
+        write_live_count(session_id, OBSERVATIONS_LIVE_CAP);
+        return;
     }
+    write_live_count(session_id, 0);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1137,7 +1170,7 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
     let replay = evaluate_worlds(incumbent.id.clone(), candidates.clone(), scan.worlds, beta1, beta2)?;
     let baseline_score = replay.get("baseline_score").and_then(Value::as_f64).ok_or("dream-replay-cycle baseline score missing")?;
     let selected_id = replay.get("selected_policy_id").and_then(Value::as_str).unwrap_or(&incumbent.id).to_string();
-    let selected_score = replay.get("selected_score").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY);
+    let selected_score = replay.get("selected_score").and_then(Value::as_f64).ok_or("dream-replay-cycle selected score missing")?;
     let ranked_score = |id: &str| {
         replay
             .get("rankings")
@@ -1145,10 +1178,13 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
             .and_then(|rankings| rankings.iter().find(|ranking| ranking.get("policy_id").and_then(Value::as_str) == Some(id)))
             .and_then(|ranking| ranking.get("score").and_then(Value::as_f64))
     };
-    let never_worse = match (ranked_score(&selected_id), ranked_score(&incumbent.id)) {
-        (Some(selected), Some(incumbent_score)) => selected >= incumbent_score && selected_score >= baseline_score,
-        _ => false,
-    };
+    let never_worse = matches!(
+        (ranked_score(&selected_id), ranked_score(&incumbent.id)),
+        (Some(selected), Some(incumbent_score)) if selected >= incumbent_score && selected_score >= baseline_score
+    );
+    if !never_worse {
+        defects.push("postcondition_selected_below_incumbent");
+    }
     let mut rankings: Vec<Value> = replay
         .get("rankings")
         .and_then(Value::as_array)
@@ -1287,7 +1323,11 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
     let Ok(line) = serde_json::to_string(&record) else {
         return;
     };
-    let _ = crate::pkfs::append(&path, &format!("{line}\n"));
+    if crate::pkfs::append(&path, &format!("{line}\n")) {
+        if let Some(count) = read_live_count(session_id) {
+            write_live_count(session_id, count + 1);
+        }
+    }
 }
 
 fn is_failure_reply(map: &serde_json::Map<String, Value>) -> bool {
@@ -1516,7 +1556,7 @@ fn verify_record(kind: &str, record: &Value) -> Result<Value, String> {
     if kind == "evaluator" {
         let dispatch_id = string_field(&record, "dispatch_id")?;
         let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
-        let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id)
+        let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id)?
             .ok_or_else(|| "Dream-RSI evaluator dispatch is absent".to_string())?;
         if dispatch.get("session_id").and_then(Value::as_str) != Some(owner) {
             return Err("Dream-RSI evaluator dispatch belongs to another session".to_string());
@@ -1685,7 +1725,7 @@ fn evaluator_receipt(content: &str) -> Result<Value, String> {
         .transpose()?;
     let owner_session_id = session_id()?;
     let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
-    let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id).ok_or_else(|| {
+    let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id)?.ok_or_else(|| {
         "dream-evaluator-receipt dispatch_id is not a completed GM dispatch".to_string()
     })?;
     if dispatch.get("session_id").and_then(Value::as_str) != Some(owner_session_id.as_str()) {
@@ -1817,7 +1857,7 @@ fn record_discovery(content: &str) -> Result<Value, String> {
         }
     }
     let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
-    let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id).ok_or_else(|| {
+    let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id)?.ok_or_else(|| {
         "dream-discovery-record dispatch_id is not a completed gm dispatch".to_string()
     })?;
     if dispatch.get("exit_code").and_then(Value::as_i64) != Some(0) {
