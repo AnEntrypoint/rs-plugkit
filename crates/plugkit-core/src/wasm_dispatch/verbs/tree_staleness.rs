@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const STALE_FETCH_MS: u64 = 24 * 60 * 60 * 1000;
+const STALE_COMPLETE_REASON: &str = "stale_tree: results may miss remote symbols, see stale_tree.note";
 
 fn scope_dir(body: &Value) -> String {
     let root = body_cwd(body).unwrap_or(".").trim_end_matches(['/', '\\']).to_string();
@@ -70,10 +71,12 @@ pub(super) fn tree_staleness(body: &Value) -> Option<Value> {
     if behind == 0 && !fetch_old {
         return None;
     }
-    let note = if behind > 0 {
-        format!("checkout {dir} is {behind} commit(s) behind its upstream as of the last fetch, so these results miss symbols on the remote")
+    let note = if behind > 0 && ahead > 0 {
+        format!("checkout {dir} has diverged from its upstream: {ahead} commit(s) ahead and {behind} behind as of the last fetch, so these results miss symbols on the remote; a plain git_pull cannot fast-forward it, so rebase or merge onto the upstream tip {} first", short(upstream))
+    } else if behind > 0 {
+        format!("checkout {dir} is {behind} commit(s) behind its upstream as of the last fetch, so these results miss symbols on the remote; git_pull, then re-run")
     } else {
-        format!("upstream of {dir} not fetched for over 24 h, so a behind count of 0 is unproven")
+        format!("upstream of {dir} not fetched for over 24 h, so a behind count of 0 is unproven; git_pull, then re-run")
     };
     Some(json!({
         "behind": behind,
@@ -93,23 +96,20 @@ pub(super) fn stamp_tree_staleness_packed(body: &Value, packed: u64) -> u64 {
     let Some(map) = v.as_object_mut() else {
         return packed;
     };
-    mark_incomplete(map);
+    mark_incomplete(map, STALE_COMPLETE_REASON);
     if let Some(data) = map.get_mut("data").and_then(Value::as_object_mut) {
-        mark_incomplete(data);
+        mark_incomplete(data, STALE_COMPLETE_REASON);
     }
     map.insert("stale_tree".to_string(), stale);
     pack(v.to_string())
 }
 
-fn mark_incomplete(map: &mut serde_json::Map<String, Value>) {
+fn mark_incomplete(map: &mut serde_json::Map<String, Value>, reason: &str) {
     for key in ["complete", "exhaustive"] {
         if map.contains_key(key) {
             map.insert(key.to_string(), json!(false));
         }
     }
     map.insert("complete".to_string(), json!(false));
-    map.insert(
-        "complete_reason".to_string(),
-        json!("stale_tree: checkout behind upstream or fetch older than 24 h, results may miss remote symbols"),
-    );
+    map.insert("complete_reason".to_string(), json!(reason));
 }
