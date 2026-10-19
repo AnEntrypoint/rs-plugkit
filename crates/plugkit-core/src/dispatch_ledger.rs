@@ -151,7 +151,11 @@ pub fn record(
     let mut attempt = 0;
     loop {
         attempt += 1;
-        let existing = host_read(&path).unwrap_or_default();
+        let existing = match host_read(&path) {
+            Some(text) => text,
+            None if host_stat(&path).is_none() => String::new(),
+            None => return Err(ledger_unavailable(&path)),
+        };
         let parsed: Option<Vec<Value>> = if existing.trim().is_empty() {
             Some(vec![])
         } else {
