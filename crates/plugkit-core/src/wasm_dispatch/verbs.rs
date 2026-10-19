@@ -1486,7 +1486,14 @@ fn fs_stat(body: &Value) -> u64 {
     }
     match super::host_abi::host_stat(path) {
         Some(v) if !v.is_null() => ok("fs_stat", v),
-        _ => err("fs_stat", "not found"),
+        _ => err_json_coded(
+            "fs_stat",
+            "not_found",
+            json!({
+                "error": format!("fs_stat could not stat '{path}': no such file under the project root (not found)"),
+                "path": path,
+            }),
+        ),
     }
 }
 
