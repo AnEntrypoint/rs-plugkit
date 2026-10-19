@@ -675,7 +675,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         "truncated": truncated,
         "brief": !want_full,
         "full": want_full,
-        "hint": "pass {\"id\":\"<row id>\"} for one full row (repeated blocks of an id fold to the last one), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), {\"status\":\"all\",\"limit\":<n>,\"offset\":<n>} to page every status (next_offset names the next page, null when done), or {\"full\":true} for every full body. .gm/prd/ holds OPEN work only: a resolved row is moved to .gm/prd-log.jsonl, and an id or a closed status asked for here is answered from that log.",
+        "hint": "pass {\"id\":\"<row id>\"} for one row in full (repeated blocks of an id fold to the last one); {\"status\":\"pending\"} to filter; {\"status\":\"pending\",\"limit\":<n>} to cap (total counts every match); {\"status\":\"all\",\"limit\":<n>,\"offset\":<n>} to page (next_offset is null when done); {\"full\":true} for every full body. .gm/prd/ holds open work only; resolved rows live in .gm/prd-log.jsonl and are answered from it.",
     });
     if log.dropped_torn_lines > 0 {
         reply["dropped_torn_lines"] = serde_json::json!(log.dropped_torn_lines);
@@ -2876,6 +2876,22 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                 }
             }
             if !found {
+                if let Some(logged) = row_store::log_row(&store, &id_target) {
+                    let status = logged.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let body = serde_json::json!({
+                        "error": format!(
+                            "prd-resolve refused: {} is already resolved (status {}); its record is in .gm/prd-log.jsonl, read it with prd-list id={}",
+                            id_target, status, id_target
+                        ),
+                        "deviation_kind": "prd-resolve-already-resolved",
+                        "deviation_severity": "deny",
+                        "prd_id": id_target,
+                        "status": status,
+                        "resolved_at": logged.get("resolved_at").cloned().unwrap_or(serde_json::Value::Null),
+                    })
+                    .to_string();
+                    return cas::CasOutcome::Abort(body, format!("prd-resolve refused: {} already resolved", id_target), 1);
+                }
                 let mut known_ids: Vec<String> = Vec::new();
                 if let Some(seq) = doc.as_sequence() {
                     for item in seq {
