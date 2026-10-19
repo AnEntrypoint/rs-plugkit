@@ -79,11 +79,11 @@ fn pin_history_commits(path: &str) -> Vec<String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn submodule_head_sha(path: &str) -> Option<String> {
+fn submodule_rev_sha(path: &str, rev: &str) -> Option<String> {
     if !crate::pkfs::exists(&format!("{}/.git", path)) {
         return None;
     }
-    let result = crate::wasm_dispatch::git_call_argv(&["rev-parse", "HEAD"], Some(path));
+    let result = crate::wasm_dispatch::git_call_argv(&["rev-parse", rev], Some(path));
     let exit_code = result
         .get("exit_code")
         .and_then(|value| value.as_i64())
@@ -125,7 +125,7 @@ fn commit_present(path: &str, sha: &str) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn submodule_head_sha(_path: &str) -> Option<String> {
+fn submodule_rev_sha(_path: &str, _rev: &str) -> Option<String> {
     None
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -238,7 +238,7 @@ pub fn drifted_submodules() -> Vec<DriftedSubmodule> {
         let Some(gm_tracked_sha) = gm_tracked_gitlink_sha(&path) else {
             continue;
         };
-        let Some(submodule_head_sha) = submodule_head_sha(&path) else {
+        let Some(submodule_head_sha) = submodule_rev_sha(&path, "HEAD") else {
             continue;
         };
         if gm_tracked_sha != submodule_head_sha
@@ -259,22 +259,46 @@ pub fn submodules_clean() -> bool {
     drifted_submodules().is_empty()
 }
 
-pub fn handle_check(_content: &str) -> (String, String, i32) {
-    let drifted = drifted_submodules();
-    let regressions = pin_regressions();
-    let recovery_command = if drifted.is_empty() {
-        None
-    } else {
-        let drifted_paths = drifted
+fn recovery_for(drifted: &[DriftedSubmodule]) -> Option<String> {
+    if drifted.is_empty() {
+        return None;
+    }
+    let (stageable, refused): (Vec<&DriftedSubmodule>, Vec<&DriftedSubmodule>) =
+        drifted.iter().partition(|entry| {
+            submodule_rev_sha(&entry.path, "origin/main").as_deref()
+                == Some(entry.submodule_head_sha.as_str())
+        });
+    let mut parts = Vec::new();
+    if !stageable.is_empty() {
+        let paths = stageable
             .iter()
             .map(|entry| entry.path.as_str())
             .collect::<Vec<_>>()
             .join(" ");
-        Some(format!(
-            "cd back to gm root, `git add {}`, then git_commit/git_finalize to update gm's own tracked pointer(s) to match each submodule's current real HEAD.",
-            drifted_paths,
-        ))
-    };
+        parts.push(format!(
+            "cd back to gm root, `git add {}`, then git_commit/git_finalize to update gm's own tracked pointer(s) to each submodule's origin main tip.",
+            paths,
+        ));
+    }
+    if !refused.is_empty() {
+        let paths = refused
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        parts.push(format!(
+            "Not staged: {} -- the checkout HEAD is not that submodule's origin/main tip (run `git -C <path> fetch origin` first if origin/main looks stale). Where the checkout is behind its gitlink, run `git submodule update -- {}` to sync it to the pin, then re-check; where it is ahead, publish that commit to the submodule's main first.",
+            paths,
+            paths,
+        ));
+    }
+    Some(parts.join(" "))
+}
+
+pub fn handle_check(_content: &str) -> (String, String, i32) {
+    let drifted = drifted_submodules();
+    let regressions = pin_regressions();
+    let recovery_command = recovery_for(&drifted);
     let warnings: Vec<String> = regressions.iter().map(pin_regression_message).collect();
     let payload = serde_json::json!({
         "ok": true,
