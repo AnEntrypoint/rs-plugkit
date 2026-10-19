@@ -1099,8 +1099,11 @@ const FS_READ_DIRECTORY_MAX_LIMIT: usize = 500;
 const FS_READ_DIRECTORY_ENTRY_CAP_KEYS: &[&str] = &["max_entries", "entries_limit", "entry_limit"];
 
 fn fs_read_directory(path: &str, body: &Value) -> u64 {
-    let packed = unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) };
-    let entries = match unpack_to_value(packed) {
+    let listing = match host_abi::host_readdir(path) {
+        Some(entries) => Value::Array(entries),
+        None => unpack_to_value(unsafe { host_fs_readdir(path.as_ptr(), path.len() as u32) }),
+    };
+    let entries = match listing {
         Value::Array(entries) => entries,
         other => {
             return pack(
