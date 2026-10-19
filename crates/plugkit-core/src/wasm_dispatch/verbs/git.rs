@@ -519,12 +519,11 @@ pub(super) fn git_status(body: &Value) -> u64 {
             "--porcelain=v2",
             "--branch",
             "--untracked-files=all",
+            "--",
         ];
-        if !paths.is_empty() {
-            argv.push("--");
-            for p in &paths {
-                argv.push(p.as_str());
-            }
+        argv.extend(GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
+        for p in &paths {
+            argv.push(p.as_str());
         }
         let r = git_step_replayed_by_call_order(plan, &argv, cwd)?;
         let st = super::host_abi::porcelain_from(&r);
@@ -660,6 +659,12 @@ pub(super) fn git_status(body: &Value) -> u64 {
             }
             l
         };
+        if let Some(map) = lists.as_object_mut() {
+            map.insert(
+                "excluded".to_string(),
+                json!(GIT_PROTECTED_PATHSPECS.iter().map(|(name, _)| *name).collect::<Vec<_>>()),
+            );
+        }
         if let Some(run) = &eol_run {
             let code = run.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
             if code != 0 {
@@ -2998,7 +3003,26 @@ finally{if(idx){try{fs.unlinkSync(idx);}catch(_){}try{fs.unlinkSync(idx+'.lock')
 
 pub(super) fn patch_commit_paths(patch: &str) -> Vec<String> {
     let mut paths: Vec<String> = Vec::new();
+    let (mut old_left, mut new_left) = (0usize, 0usize);
     for line in patch.lines() {
+        if old_left > 0 || new_left > 0 {
+            match line.as_bytes().first() {
+                Some(b'-') => old_left = old_left.saturating_sub(1),
+                Some(b'+') => new_left = new_left.saturating_sub(1),
+                Some(b'\\') => {}
+                _ => {
+                    old_left = old_left.saturating_sub(1);
+                    new_left = new_left.saturating_sub(1);
+                }
+            }
+            continue;
+        }
+        if let Some(range) = line.strip_prefix("@@ ") {
+            let mut counts = range.split_whitespace().take(2).map(|r| r.split_once(',').map_or(1, |(_, n)| n.parse().unwrap_or(0)));
+            old_left = counts.next().unwrap_or(0);
+            new_left = counts.next().unwrap_or(0);
+            continue;
+        }
         let Some(rest) = line.strip_prefix("+++ ").or_else(|| line.strip_prefix("--- ")) else {
             continue;
         };
@@ -6777,7 +6801,7 @@ pub(super) fn ci_status_rate_limit_wait_ms(rate: &CiStatusRateLimit) -> Option<u
         return None;
     }
     match rate.reset_epoch {
-        None => Some(CI_STATUS_RATE_LIMIT_BACKOFF_MS),
+        None => None,
         Some(reset) => {
             let delta_ms = (reset - now).saturating_mul(1000);
             if delta_ms <= 0 {
