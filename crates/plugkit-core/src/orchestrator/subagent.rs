@@ -215,7 +215,7 @@ fn run_start(cwd: &str, parent: &str, subagent: &str, slice_id: &str) -> (String
     });
     match append_event(&ledger_path(cwd), now, |_| Ok(Some(event.clone()))) {
         Ok(_) => {
-            match crate::dispatch_ledger::record(cwd, "subagent-start", slice_id, "", 0, Some(subagent), None) {
+            match crate::dispatch_ledger::record(cwd, "subagent-start", &event.to_string(), slice_id, 0, Some(subagent), None) {
                 Ok(_) => accept(json!({ "ok": true, "subagent_session_id": subagent, "ts": now })),
                 Err(reason) => accept(json!({ "ok": false, "error_code": "dispatch_ledger_unavailable", "error": reason })),
             }
