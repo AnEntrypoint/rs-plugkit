@@ -367,7 +367,7 @@ fn gitlink_dirs(dir: &str, complete: &mut bool) -> (Vec<String>, bool) {
                     (!path.is_empty()).then(|| join_under(dir, path))
                 })
                 .collect();
-            (dirs, false)
+            (dirs, !c)
         }
         Err(_) => {
             *complete = false;
