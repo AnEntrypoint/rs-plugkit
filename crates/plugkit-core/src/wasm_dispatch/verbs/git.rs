@@ -6466,7 +6466,8 @@ pub(super) fn ci_status_conclusion_to_status(conclusion: &str, gh_status: &str) 
     }
     match conclusion {
         "success" => "success",
-        "failure" | "timed_out" | "cancelled" | "action_required" | "startup_failure" => "failure",
+        "cancelled" => "cancelled",
+        "failure" | "timed_out" | "action_required" | "startup_failure" => "failure",
         _ => "unknown",
     }
 }
@@ -7149,6 +7150,7 @@ pub(super) fn ci_status_summarize(
     let mut run_url: Option<String> = None;
     let mut any_pending = false;
     let mut any_failure = false;
+    let mut any_cancelled = false;
     let mut counted_runs = 0usize;
     let mut jobs: Vec<Value> = vec![];
     let mut jobs_unavailable: Vec<Value> = vec![];
@@ -7185,6 +7187,9 @@ pub(super) fn ci_status_summarize(
         if per_run_status == "pending" {
             any_pending = true;
         }
+        if per_run_status == "cancelled" {
+            any_cancelled = true;
+        }
         if per_run_status == "failure" {
             any_failure = true;
             failed_jobs.push(json!({
@@ -7198,6 +7203,8 @@ pub(super) fn ci_status_summarize(
         overall = "failure";
     } else if any_pending {
         overall = "pending";
+    } else if any_cancelled {
+        overall = "cancelled";
     }
     json!({
         "ok": true, "verb": "ci-status", "data": {
@@ -7258,6 +7265,7 @@ pub(super) fn ci_status_job_entry(workflow: &str, run_id: u64, job: &Value) -> V
     let conclusion = match (status, github_conclusion) {
         ("completed", Some("success" | "neutral")) => "success",
         ("completed", Some("skipped")) => "skipped",
+        ("completed", Some("cancelled")) => "cancelled",
         ("completed", _) => "failure",
         _ => "pending",
     };
@@ -7320,6 +7328,7 @@ pub(super) fn ci_status_reply_shape(mut reply: Value) -> Value {
                 "total": jobs.len(),
                 "success": count("success"),
                 "failure": count("failure"),
+                "cancelled": count("cancelled"),
                 "pending": count("pending"),
                 "skipped": count("skipped"),
             }),
