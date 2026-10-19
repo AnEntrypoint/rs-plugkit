@@ -7906,18 +7906,33 @@ pub(super) fn ci_log_command(
     failed_only: bool,
     tail_lines: usize,
     step_table: &str,
+    fallback_jobs: &[u64],
 ) -> String {
     let job_flag = match job_id {
         Some(job_id) => format!(" --job {}", ci_status_shell_quote(&job_id.to_string())),
         None => String::new(),
     };
-    let target = format!(
-        "gh run view {}{} {} --repo {}",
-        ci_status_shell_quote(&run_id.to_string()),
-        job_flag,
-        if failed_only { "--log-failed" } else { "--log" },
-        ci_status_shell_quote(repo)
-    );
+    let target = if fallback_jobs.is_empty() {
+        format!(
+            "gh run view {}{} {} --repo {}",
+            ci_status_shell_quote(&run_id.to_string()),
+            job_flag,
+            if failed_only { "--log-failed" } else { "--log" },
+            ci_status_shell_quote(repo)
+        )
+    } else {
+        let ids = fallback_jobs
+            .iter()
+            .map(|id| ci_status_shell_quote(&id.to_string()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "for j in {ids}; do gh run view {run} --job \"$j\" --log --repo {repo} || true; done",
+            ids = ids,
+            run = ci_status_shell_quote(&run_id.to_string()),
+            repo = ci_status_shell_quote(repo)
+        )
+    };
     let env = format!(
         "GMCLOG_JOB={} GMCLOG_STEP={} GMCLOG_PAT={} GMCLOG_RX={} GMCLOG_IC={} GMCLOG_CAP={} GMCLOG_BCAP={} GMCLOG_FO={} GMCLOG_TAIL={} GMCLOG_STEPS={}",
         ci_status_shell_quote(job_filter),
@@ -7960,6 +7975,11 @@ pub(super) fn ci_log_gh_failure_class(detail: &str) -> (Option<&'static str>, Op
         (
             Some("log_expired"),
             Some("logs are retained for a limited time and are gone once expired"),
+        )
+    } else if lower.contains("log not found") {
+        (
+            Some("log_unavailable"),
+            Some("gh has no log for a job of this run; a cancelled or skipped job produces none"),
         )
     } else if lower.contains("http 404") || lower.contains("not found") {
         (Some("run_not_found"), None)
@@ -8066,21 +8086,25 @@ pub(super) fn ci_log(body: &Value) -> u64 {
         }
     }
     let (step_table, steps_labelled) = ci_log_step_table(&steps);
-    let command = ci_log_command(
-        &repo,
-        run_id,
-        job_id,
-        &job_filter,
-        &step_filter,
-        &pattern,
-        regex_mode,
-        ignore_case,
-        max_lines,
-        max_chars,
-        failed_only,
-        tail_lines,
-        &step_table,
-    );
+    let build_command = |fallback_jobs: &[u64]| {
+        ci_log_command(
+            &repo,
+            run_id,
+            job_id,
+            &job_filter,
+            &step_filter,
+            &pattern,
+            regex_mode,
+            ignore_case,
+            max_lines,
+            max_chars,
+            failed_only,
+            tail_lines,
+            &step_table,
+            fallback_jobs,
+        )
+    };
+    let command = build_command(&[]);
     let mut attempts = 1u32;
     let mut result = ci_log_shell_result(&command);
     while attempts < CI_LOG_TRANSIENT_MAX_ATTEMPTS
@@ -8097,6 +8121,22 @@ pub(super) fn ci_log(body: &Value) -> u64 {
         ));
         attempts += 1;
         result = ci_log_shell_result(&command);
+    }
+    let mut fallback_jobs: Vec<u64> = Vec::new();
+    if job_id.is_none()
+        && ci_status_shell_stream(&result, "stderr").contains("log not found")
+    {
+        for step in &steps {
+            if let Some(id) = step.job_id {
+                if !fallback_jobs.contains(&id) {
+                    fallback_jobs.push(id);
+                }
+            }
+        }
+        if !fallback_jobs.is_empty() {
+            result = ci_log_shell_result(&build_command(&fallback_jobs));
+            attempts += 1;
+        }
     }
     if result.get("timed_out").and_then(Value::as_bool) == Some(true) {
         return err_json(
@@ -8304,6 +8344,7 @@ pub(super) fn ci_log(body: &Value) -> u64 {
         "step_labels": step_labels,
         "transport": "gh_cli",
         "attempts": attempts,
+        "log_source": if fallback_jobs.is_empty() { "run" } else { "per_job" },
     });
     if lines.is_empty() {
         let hint = if matched == 0 && filtered {
@@ -10797,7 +10838,13 @@ pub(super) fn deleted_tracked_paths(cwd: Option<&str>, paths: &[String]) -> Vec<
     }
     let mut argv: Vec<String> = vec!["ls-files".to_string(), "--deleted".to_string(), "--".to_string()];
     argv.extend(paths.iter().cloned());
-    parse_ignore_list(git_call_argv(&as_argv(&argv), cwd).get("stdout").and_then(|v| v.as_str()).unwrap_or(""))
+    let mut deleted = parse_ignore_list(git_call_argv(&as_argv(&argv), cwd).get("stdout").and_then(|v| v.as_str()).unwrap_or(""));
+    let mut staged: Vec<String> = vec!["diff".to_string(), "--cached".to_string(), "--name-only".to_string(), "--diff-filter=D".to_string(), "--".to_string()];
+    staged.extend(paths.iter().cloned());
+    deleted.extend(parse_ignore_list(git_call_argv(&as_argv(&staged), cwd).get("stdout").and_then(|v| v.as_str()).unwrap_or("")));
+    deleted.sort();
+    deleted.dedup();
+    deleted
 }
 
 pub(super) fn parse_ignore_list(stdout: &str) -> Vec<String> {
