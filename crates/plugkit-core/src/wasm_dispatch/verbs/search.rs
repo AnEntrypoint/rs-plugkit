@@ -2920,24 +2920,23 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         .filter(|a| !a.is_empty())
         .map(|a| {
             a.iter()
-                .take(shown_k)
                 .map(|row| with_corpus_symbol(&corpus, row))
                 .collect()
         })
         .unwrap_or_else(|| {
             vec_ids
                 .iter()
-                .take(shown_k)
                 .map(|key| build_hit(&mut corpus, key, None, None))
                 .collect()
         });
     let mut bm25_ranked_response: Vec<Value> = bm25_ranked
         .iter()
-        .take(shown_k)
         .map(|(key, score)| build_hit(&mut corpus, key, Some(*score), None))
         .collect();
     retain_hits_in_scope(&mut vector_ranked, ".", scope.as_ref());
     retain_hits_in_scope(&mut bm25_ranked_response, ".", scope.as_ref());
+    vector_ranked.truncate(shown_k);
+    bm25_ranked_response.truncate(shown_k);
     if scope.is_some() {
         retain_hits_in_scope(&mut phrase_hits, ".", scope.as_ref());
         phrase_total = phrase_hits.len() as u64;
