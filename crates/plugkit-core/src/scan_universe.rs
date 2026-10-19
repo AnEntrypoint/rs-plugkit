@@ -133,6 +133,7 @@ pub struct ScanUniverse {
     pub git_untracked_files: usize,
     pub git_nested_worktrees: usize,
     pub git_nested_untracked_failed: bool,
+    pub git_nested_failed_paths: Vec<String>,
     target: String,
 }
 
@@ -364,8 +365,9 @@ fn gitlink_dirs(dir: &str, complete: &mut bool) -> (Vec<String>, bool) {
     }
 }
 
-fn nested_untracked(dir: &str, nesting: usize, no_ignore: bool) -> (Vec<String>, bool) {
+fn nested_untracked(dir: &str, nesting: usize, no_ignore: bool, failed: &mut Vec<String>) -> (Vec<String>, bool) {
     if nesting >= NESTED_REPO_DEPTH_LIMIT {
+        failed.push(dir.to_string());
         return (Vec::new(), false);
     }
     let others_mode: &[&str] = if no_ignore {
@@ -378,12 +380,15 @@ fn nested_untracked(dir: &str, nesting: usize, no_ignore: bool) -> (Vec<String>,
         Ok(c) => c,
         Err(_) => false,
     };
+    if !complete {
+        failed.push(dir.to_string());
+    }
     let mut files = Vec::with_capacity(listed.len());
     for entry in listed {
         match entry.strip_suffix('/') {
             Some(nested_repo) => {
                 let (nested_files, nested_complete) =
-                    nested_untracked(&join_under(dir, nested_repo), nesting + 1, no_ignore);
+                    nested_untracked(&join_under(dir, nested_repo), nesting + 1, no_ignore, failed);
                 files.extend(nested_files);
                 complete &= nested_complete;
             }
@@ -393,16 +398,17 @@ fn nested_untracked(dir: &str, nesting: usize, no_ignore: bool) -> (Vec<String>,
     let (gitlink_nested, gitlink_failed) = gitlink_dirs(dir, &mut complete);
     if gitlink_failed {
         complete = false;
+        failed.push(dir.to_string());
     }
     for nested_dir in gitlink_nested {
-        let (nested_files, nested_complete) = nested_untracked(&nested_dir, nesting + 1, no_ignore);
+        let (nested_files, nested_complete) = nested_untracked(&nested_dir, nesting + 1, no_ignore, failed);
         files.extend(nested_files);
         complete &= nested_complete;
     }
     (files, complete)
 }
 
-fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec<String>, bool, usize, usize, usize, bool), String> {
+fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool, failed: &mut Vec<String>) -> Result<(Vec<String>, bool, usize, usize, usize, bool), String> {
     let mut tracked = Vec::new();
     let mut untracked = Vec::new();
     let others_mode: &[&str] = if no_ignore { &["--others"] } else { &["--others", "--exclude-standard"] };
@@ -418,7 +424,7 @@ fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec
             continue;
         };
         let nested_dir = join_under(dir, nested_repo);
-        match (nesting < NESTED_REPO_DEPTH_LIMIT).then(|| git_worktree_files(&nested_dir, nesting + 1, no_ignore)) {
+        match (nesting < NESTED_REPO_DEPTH_LIMIT).then(|| git_worktree_files(&nested_dir, nesting + 1, no_ignore, failed)) {
             Some(Ok((nested_files, nested_complete, nested_tracked, _, nested_dirs, nested_failed))) => {
                 files.extend(nested_files);
                 complete &= nested_complete;
@@ -429,6 +435,7 @@ fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec
             _ => {
                 complete = false;
                 nested_untracked_failed = true;
+                failed.push(nested_dir.clone());
             }
         }
     }
@@ -438,10 +445,14 @@ fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool) -> Result<(Vec
             nested_dirs.push(found);
         }
     }
-    nested_untracked_failed |= gitlink_failed || nested_dirs.len() >= MAX_NESTED_WORKTREES;
+    let nested_set_capped = nested_dirs.len() >= MAX_NESTED_WORKTREES;
+    if gitlink_failed || nested_set_capped {
+        failed.push(dir.to_string());
+    }
+    nested_untracked_failed |= gitlink_failed || nested_set_capped;
     nested_worktrees += nested_dirs.len();
     for nested_dir in nested_dirs {
-        let (nested_files, nested_complete) = nested_untracked(&nested_dir, nesting + 1, no_ignore);
+        let (nested_files, nested_complete) = nested_untracked(&nested_dir, nesting + 1, no_ignore, failed);
         if !nested_complete {
             nested_untracked_failed = true;
         }
@@ -501,7 +512,7 @@ const GIT_TRACKS_NOTHING_REASON: &str = "git tracks no file in this worktree (no
 
 pub const CORPUS_BLIND_SPOT_REASON: &str = "git tracks no file in this worktree, so its corpus is untracked files only; the disk walk that covers the rest did not finish, so the corpus does not hold every source file here and a zero over it is not a finding";
 
-pub const NESTED_WORKTREE_BLIND_SPOT_NOTE: &str = "a nested worktree listing did not finish, so its untracked files are missing here and a zero is not a finding; pass \"refresh\": true or scope \"path\" to it before concluding a name is absent";
+pub const NESTED_WORKTREE_BLIND_SPOT_NOTE: &str = "a nested worktree's untracked listing is incomplete, so a zero is not a finding; pass \"refresh\": true or scope \"path\"";
 
 fn walk_policy(cause: WalkCause, origin: TargetOrigin, no_ignore: bool) -> WalkPolicy {
     let project = |reason: String| WalkPolicy { honour_gitignore: true, noise: NoiseDirs::ProjectNoiseList, reason };
@@ -686,6 +697,7 @@ pub fn list_scan_universe(root: &str, scopes: &[&str], max_files: usize, cfg: &I
         acc.git_untracked_files = acc.git_untracked_files.saturating_add(next.git_untracked_files);
         acc.git_nested_worktrees = acc.git_nested_worktrees.saturating_add(next.git_nested_worktrees);
         acc.git_nested_untracked_failed |= next.git_nested_untracked_failed;
+        acc.git_nested_failed_paths.extend(next.git_nested_failed_paths);
         if acc.walk_reason.is_none() { acc.walk_reason = next.walk_reason; }
         if acc.source != next.source { acc.source = FileSource::Walk; }
     }
@@ -703,7 +715,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
     };
     let named_scope = rel.is_some();
     let target = rel.as_deref().map(|r| join_under(root, r)).unwrap_or_else(|| root.to_string());
-    let universe = |files: Vec<String>, source: FileSource, listing_complete: bool, excluded: Vec<RuleExclusion>, walk_reason: Option<String>, tracked: usize, untracked: usize, nested: usize, nested_failed: bool| ScanUniverse {
+    let universe = |files: Vec<String>, source: FileSource, listing_complete: bool, excluded: Vec<RuleExclusion>, walk_reason: Option<String>, tracked: usize, untracked: usize, nested: usize, nested_failed: bool, nested_failed_paths: Vec<String>| ScanUniverse {
         files,
         source,
         listing_complete: listing_complete && !nested_failed,
@@ -713,6 +725,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         git_untracked_files: untracked,
         git_nested_worktrees: nested,
         git_nested_untracked_failed: nested_failed,
+        git_nested_failed_paths: nested_failed_paths,
         target: target.clone(),
     };
     if named_scope {
@@ -722,16 +735,17 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
                 scope.unwrap_or(""),
                 absolute_root_for_message(root),
             )),
-            Some(false) => return Ok(universe(vec![target.clone()], FileSource::SingleFile, true, Vec::new(), None, 0, 0, 0, false)),
+            Some(false) => return Ok(universe(vec![target.clone()], FileSource::SingleFile, true, Vec::new(), None, 0, 0, 0, false, Vec::new())),
             Some(true) => {}
         }
     }
     let mut git_join: Option<(Vec<String>, bool, usize, bool)> = None;
+    let mut nested_failed_paths: Vec<String> = Vec::new();
     let cause = if force_disk {
         WalkCause::CallerForcedDisk
     } else {
         match directory_is_gitignored(&target) {
-            Ok(false) => match git_worktree_files(&target, 0, no_ignore) {
+            Ok(false) => match git_worktree_files(&target, 0, no_ignore, &mut nested_failed_paths) {
                 Ok((files, complete, tracked, untracked, nested_dirs, nested_failed)) => {
                     let (files, mut pruned) = if named_scope {
                         (files, Vec::new())
@@ -752,7 +766,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
                         }
                     }
                     if tracked > 0 {
-                        return Ok(universe(kept, FileSource::Git, complete, pruned, None, tracked, untracked, nested_dirs, nested_failed));
+                        return Ok(universe(kept, FileSource::Git, complete, pruned, None, tracked, untracked, nested_dirs, nested_failed, std::mem::take(&mut nested_failed_paths)));
                     }
                     git_join = Some((kept, complete, nested_dirs, nested_failed));
                     WalkCause::GitTracksNothing
@@ -810,6 +824,7 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
         untracked,
         nested,
         nested_failed,
+        nested_failed_paths,
     ))
 }
 
