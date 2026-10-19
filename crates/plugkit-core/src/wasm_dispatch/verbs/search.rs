@@ -2233,7 +2233,7 @@ pub(super) fn grep(body: &Value) -> u64 {
     match output_mode {
         "files_with_matches" => {
             out.remove("matches");
-            out.insert("counts".to_string(), Value::Array(counts.clone()));
+            out.remove("counts");
             out.insert(
                 "output".to_string(),
                 Value::Array(counts.iter().map(|c| json!(grep_hit_path(c))).collect()),
