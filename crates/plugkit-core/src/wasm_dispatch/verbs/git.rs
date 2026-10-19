@@ -6052,6 +6052,25 @@ pub(super) fn git_pull(body: &Value) -> u64 {
             .filter_map(|line| line.split_once('\t').map(|(_, path)| path.to_string()))
             .collect()
     };
+    let staged_gitlinks: Vec<String> = status_probe
+        .porcelain
+        .lines()
+        .filter(|line| !line.starts_with("??") && !line.starts_with(' ') && line.len() > 3)
+        .filter_map(|line| line.get(3..).map(|path| path.trim().to_string()))
+        .filter(|path| gitlink_paths.contains(path))
+        .collect();
+    if !staged_gitlinks.is_empty() {
+        return err_json(
+            "git_pull",
+            json!({
+                "error": "a submodule pin is staged in the index; git_pull would shelve it under autostash and conflict on pop",
+                "error_code": "dirty_worktree",
+                "dirty_paths": staged_gitlinks,
+                "remote": remote,
+                "hint": "Nothing was fetched or merged. Commit or unstage these submodule pins from their own writer, then re-dispatch git_pull.",
+            }),
+        );
+    }
     let dirty_tracked: Vec<String> = dirty_tracked
         .into_iter()
         .filter(|path| !gitlink_paths.contains(path))
