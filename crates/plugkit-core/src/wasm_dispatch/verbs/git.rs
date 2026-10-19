@@ -7726,9 +7726,6 @@ pub(super) fn ci_log_regex_mode(body: &Value) -> Result<bool, Value> {
 }
 
 pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Value> {
-    if let Some(run_id) = ci_log_id(body, &["run_id", "run"]) {
-        return Ok(run_id);
-    }
     if let Some(job_id) = ci_log_id(body, &["job_id"]) {
         let parsed = ci_status_gh_api_json(&format!("repos/{}/actions/jobs/{}", repo, job_id))
             .map_err(|reason| {
@@ -7744,6 +7741,9 @@ pub(super) fn ci_log_resolve_run_id(body: &Value, repo: &str) -> Result<u64, Val
                 "repo": repo, "job_id": job_id,
             })),
         };
+    }
+    if let Some(run_id) = ci_log_id(body, &["run_id", "run"]) {
+        return Ok(run_id);
     }
     let sha = ci_log_string(body, &["sha", "rev", "ref"]);
     if sha.is_empty() {
