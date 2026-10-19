@@ -970,6 +970,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
             &marker.to_string(),
         );
     }
+    prune_last_instruction_files();
     let instruction_for_payload = if instruction_unchanged {
         String::new()
     } else {
@@ -1259,6 +1260,46 @@ const FIELDS_ALWAYS_RESTATED_IN_A_DELTA_REPLY: &[&str] = &[
 
 #[cfg(target_arch = "wasm32")]
 const FIELDS_PRESENT_ONLY_WHEN_THEIR_OWN_HASH_IS_UNASSERTED: &[&str] = &["discipline_policies"];
+
+const LAST_INSTRUCTION_FILES_KEEP: usize = 64;
+
+fn prune_last_instruction_files() {
+    let spool = super::gm_dir().join("exec-spool").to_string_lossy().to_string();
+    let Some(serde_json::Value::Array(entries)) = pkfs::readdir(&spool) else {
+        return;
+    };
+    let mut files: Vec<(f64, String)> = entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry
+                .as_str()
+                .or_else(|| entry.get("name").and_then(serde_json::Value::as_str))?;
+            let is_file = entry
+                .get("is_file")
+                .or_else(|| entry.get("isFile"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            if !is_file || !name.starts_with(".last-instruction-") || !name.ends_with(".json") {
+                return None;
+            }
+            let mtime_ms = pkfs::stat(&format!("{spool}/{name}"))
+                .and_then(|s| {
+                    s.get("mtime_ms")
+                        .or_else(|| s.get("mtimeMs"))
+                        .and_then(serde_json::Value::as_f64)
+                })
+                .unwrap_or(0.0);
+            Some((mtime_ms, name.to_string()))
+        })
+        .collect();
+    if files.len() <= LAST_INSTRUCTION_FILES_KEEP {
+        return;
+    }
+    files.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    for (_, name) in files.into_iter().skip(LAST_INSTRUCTION_FILES_KEEP) {
+        let _ = pkfs::remove_file(&format!("{spool}/{name}"));
+    }
+}
 
 #[cfg(target_arch = "wasm32")]
 fn last_reply_path(sid: &str) -> String {
