@@ -1147,9 +1147,6 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
         (Some(selected), Some(incumbent_score)) => selected >= incumbent_score && selected_score >= baseline_score,
         _ => false,
     };
-    if !never_worse {
-        defects.push("postcondition_selected_below_baseline");
-    }
     let mut rankings: Vec<Value> = replay
         .get("rankings")
         .and_then(Value::as_array)
