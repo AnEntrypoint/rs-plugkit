@@ -5973,10 +5973,20 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         Ok(v) => v,
         Err(detail) => return err_json("git_pull", detail),
     };
-    let dirty_tracked: Vec<String> = super::host_abi::porcelain_or_dirty(git_call_argv(
-        &["status", "--porcelain"],
-        cwd,
-    ))
+    let status_probe = super::host_abi::porcelain_from(&git_call_argv(&["status", "--porcelain"], cwd));
+    if status_probe.partial {
+        return err_json(
+            "git_pull",
+            json!({
+                "error": format!("git status failed (exit_code={}): {}", status_probe.exit_code, status_probe.stderr.trim()),
+                "error_code": "git_status_failed",
+                "remote": remote,
+                "hint": "Nothing was fetched or merged. Fix the git error named above, then re-dispatch git_pull.",
+            }),
+        );
+    }
+    let dirty_tracked: Vec<String> = status_probe
+        .porcelain
         .lines()
         .filter(|line| !line.starts_with("??"))
         .filter_map(|line| line.get(3..).map(|path| path.trim().to_string()))
