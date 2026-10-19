@@ -6425,6 +6425,35 @@ fn ci_status_head_sha(cwd: Option<&str>, failure: &str) -> Result<CiStatusShaRes
     })
 }
 
+fn ci_status_submodule_head_for_github_repo(
+    body: &Value,
+    cwd: Option<&str>,
+) -> Option<CiStatusShaResolution> {
+    let wanted = body
+        .get("github_repo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let root = cwd.unwrap_or(".");
+    for line in exec_git_in(cwd, "config --file .gitmodules --get-regexp path").lines() {
+        let Some(path) = line.split_whitespace().nth(1) else {
+            continue;
+        };
+        let sub = format!("{}/{}", root, path);
+        let Ok(repo) =
+            ci_status_resolve_repo_preferring_unambiguous_github_repo_field(&json!({}), Some(&sub))
+        else {
+            continue;
+        };
+        if repo != wanted {
+            continue;
+        }
+        return ci_status_head_sha(Some(&sub), "unable to resolve submodule HEAD")
+            .ok();
+    }
+    None
+}
+
 pub(super) fn ci_status_resolve_sha(
     body: &Value,
     cwd: Option<&str>,
@@ -6433,10 +6462,13 @@ pub(super) fn ci_status_resolve_sha(
     let requested = match requested {
         Some(requested) => requested,
         None => {
+            if let Some(resolution) = ci_status_submodule_head_for_github_repo(body, cwd) {
+                return Ok(resolution);
+            }
             return ci_status_head_sha(
                 cwd,
                 "rev/sha/ref not provided and unable to resolve local HEAD",
-            )
+            );
         }
     };
     if is_full_sha(requested) {
