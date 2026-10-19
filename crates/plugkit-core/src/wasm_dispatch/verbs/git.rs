@@ -278,6 +278,7 @@ pub(super) fn git_async_reenter(verb: &str, body: &Value) -> u64 {
         "git_diff" => git_diff(body),
         "git_remote" => git_remote(body),
         "git_submodule_add" => git_submodule_add(body),
+        "git_submodule_update" => git_submodule_update(body),
         _ => err(
             "git_poll",
             "parked plan names a verb with no async-resume support",
@@ -8893,6 +8894,18 @@ pub(super) fn git_submodule_update(body: &Value) -> u64 {
             ));
         }
         let recursive = body.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+        if body.get("remote").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let branch = body
+                .get("branch")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|b| !b.is_empty())
+                .unwrap_or("main");
+            if !valid_submodule_branch(branch) {
+                return Ok(err("git_submodule_update", "branch must be a plain git branch name"));
+            }
+            return git_submodule_update_remote(plan, cwd, &path, branch, recursive);
+        }
         let mut argv: Vec<&str> = vec!["submodule", "update", "--init"];
         if recursive {
             argv.push("--recursive");
@@ -8912,6 +8925,73 @@ pub(super) fn git_submodule_update(body: &Value) -> u64 {
             json!({ "path": path, "recursive": recursive }),
         ))
     })
+}
+
+fn git_submodule_update_remote(
+    plan: &mut GitPendingTokenReplayPlan,
+    cwd: Option<&str>,
+    path: &str,
+    branch: &str,
+    recursive: bool,
+) -> Result<u64, u64> {
+    let failed = |r: &Value| r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0) != 0;
+    let stdout_of = |r: &Value| r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let reason_of = |r: &Value| {
+        let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
+        if stderr.is_empty() {
+            "git submodule update failed".to_string()
+        } else {
+            stderr.to_string()
+        }
+    };
+    let listing = git_step_replayed_by_call_order(plan, &["ls-files", "--stage", "--", path], cwd)?;
+    let gitlink = stdout_of(&listing);
+    if failed(&listing) || !gitlink.starts_with("160000 ") {
+        return Ok(err(
+            "git_submodule_update",
+            "path is not a submodule: the parent index holds no gitlink (mode 160000) at it",
+        ));
+    }
+    let previous = gitlink.split_whitespace().nth(1).unwrap_or("").to_string();
+    let init = git_step_replayed_by_call_order(plan, &["submodule", "update", "--init", "--", path], cwd)?;
+    if failed(&init) {
+        return Ok(err("git_submodule_update", &reason_of(&init)));
+    }
+    let fetch = git_step_replayed_by_call_order(plan, &["-C", path, "fetch", "--quiet", "origin", branch], cwd)?;
+    if failed(&fetch) {
+        return Ok(err("git_submodule_update", &reason_of(&fetch)));
+    }
+    let tip_r = git_step_replayed_by_call_order(plan, &["-C", path, "rev-parse", "--verify", "FETCH_HEAD^{commit}"], cwd)?;
+    if failed(&tip_r) {
+        return Ok(err("git_submodule_update", &reason_of(&tip_r)));
+    }
+    let tip = stdout_of(&tip_r);
+    let checkout = git_step_replayed_by_call_order(plan, &["-C", path, "checkout", "--quiet", "--detach", tip.as_str()], cwd)?;
+    if failed(&checkout) {
+        return Ok(err("git_submodule_update", &reason_of(&checkout)));
+    }
+    if recursive {
+        let nested = git_step_replayed_by_call_order(plan, &["-C", path, "submodule", "update", "--init", "--recursive"], cwd)?;
+        if failed(&nested) {
+            return Ok(err("git_submodule_update", &reason_of(&nested)));
+        }
+    }
+    let staged = git_step_replayed_by_call_order(plan, &["add", "--", path], cwd)?;
+    if failed(&staged) {
+        return Ok(err("git_submodule_update", &reason_of(&staged)));
+    }
+    Ok(ok(
+        "git_submodule_update",
+        json!({
+            "path": path,
+            "recursive": recursive,
+            "remote": true,
+            "branch": branch,
+            "previous_gitlink": previous,
+            "tip": tip,
+            "staged": true,
+        }),
+    ))
 }
 
 fn git_remote_list(body: &Value) -> u64 {
