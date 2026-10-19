@@ -11010,6 +11010,20 @@ pub(super) fn git_worktree_remove(body: &Value) -> u64 {
     ok("git_worktree_remove", json!({ "removed": true, "path": path, "output": output.trim() }))
 }
 
+fn worktree_dirt_is_gm_state_only(path: &str) -> bool {
+    let r = git_call_argv(&["status", "--porcelain", "--untracked-files=all"], Some(path));
+    if r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(1) != 0 { return false; }
+    let stdout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    let mut any = false;
+    for line in stdout.lines().filter(|l| !l.is_empty()) {
+        let Some(entry) = line.get(3..) else { return false };
+        if entry.starts_with('"') || entry.contains(" -> ") { return false; }
+        if !(entry == ".gm" || entry.starts_with(".gm/")) { return false; }
+        any = true;
+    }
+    any
+}
+
 pub(super) fn git_worktree_prune(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields("git_worktree_prune", body, &["base"]) { return refusal; }
     let cwd = body_cwd(body);
@@ -11028,6 +11042,7 @@ pub(super) fn git_worktree_prune(body: &Value) -> u64 {
     let listed = listing.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
     let mut removed: Vec<String> = vec![];
     let mut kept: Vec<String> = vec![];
+    let mut forced_gm_only: Vec<String> = vec![];
     for (index, block) in listed.split("\n\n").filter(|b| !b.trim().is_empty()).enumerate() {
         let Some(path) = block.lines().find_map(|l| l.strip_prefix("worktree ")) else { continue };
         if index == 0 { continue; }
@@ -11040,15 +11055,22 @@ pub(super) fn git_worktree_prune(body: &Value) -> u64 {
             .and_then(|x| x.as_i64())
             .unwrap_or(1)
             == 0;
+        let gm_only_dirt = merged && worktree_dirt_is_gm_state_only(path);
+        let remove_argv: &[&str] = if gm_only_dirt {
+            &["worktree", "remove", "--force", path]
+        } else {
+            &["worktree", "remove", path]
+        };
         let gone = merged
-            && git_call_argv(&["worktree", "remove", path], cwd)
+            && git_call_argv(remove_argv, cwd)
                 .get("exit_code")
                 .and_then(|x| x.as_i64())
                 .unwrap_or(1)
                 == 0;
+        if gone && gm_only_dirt { forced_gm_only.push(path.to_string()) }
         if gone { removed.push(path.to_string()) } else { kept.push(path.to_string()) }
     }
-    ok("git_worktree_prune", json!({ "pruned": true, "output": output.trim(), "base": base, "removed": removed, "kept": kept }))
+    ok("git_worktree_prune", json!({ "pruned": true, "output": output.trim(), "base": base, "removed": removed, "kept": kept, "forced_gm_only": forced_gm_only }))
 }
 
 pub(super) fn rebase_failed(out: &str) -> bool {
