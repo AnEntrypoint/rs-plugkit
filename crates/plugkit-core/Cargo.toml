@@ -2,6 +2,7 @@
 name = "rs-plugkit"
 version = "0.1.1853"
 edition.workspace = true
+license = "MIT"
 
 [lib]
 name = "rs_plugkit"
