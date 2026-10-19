@@ -4327,7 +4327,7 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
 
 pub const LITERAL_SCAN_MAX_FILES: usize = 50_000;
 
-const LITERAL_SCAN_MAX_LINE_BYTES: usize = 512;
+const LITERAL_SNIPPET_MAX_CHARS: usize = 160;
 
 const LITERAL_SCAN_MINIFIED_LINE_BYTES: usize = 300;
 
@@ -5272,9 +5272,9 @@ fn scan_uncovered_files(
             }
             this_file_hits += 1;
             let (start, end) = found[0];
-            let text_truncated = line.len() > LITERAL_SCAN_MAX_LINE_BYTES;
+            let text_truncated = line.len() > LITERAL_SNIPPET_MAX_CHARS;
             let shown: String = if text_truncated {
-                line.chars().take(LITERAL_SCAN_MAX_LINE_BYTES).collect()
+                line.chars().take(LITERAL_SNIPPET_MAX_CHARS).collect()
             } else {
                 line.to_string()
             };
@@ -5609,7 +5609,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                         split_form_truncated = true;
                         continue;
                     }
-                    let shown: String = line.chars().take(LITERAL_SCAN_MAX_LINE_BYTES).collect();
+                    let shown: String = line.chars().take(LITERAL_SNIPPET_MAX_CHARS).collect();
                     split_form_matches.push(json!({
                         "path": path,
                         "line": idx + 1,
@@ -5696,9 +5696,9 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 continue;
             }
             let (start, end) = found[0];
-            let text_truncated = line.len() > LITERAL_SCAN_MAX_LINE_BYTES;
+            let text_truncated = line.len() > LITERAL_SNIPPET_MAX_CHARS;
             let shown: String = if text_truncated {
-                line.chars().take(LITERAL_SCAN_MAX_LINE_BYTES).collect()
+                line.chars().take(LITERAL_SNIPPET_MAX_CHARS).collect()
             } else {
                 line.to_string()
             };
