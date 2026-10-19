@@ -9,8 +9,7 @@ sessions don't re-litigate them.
 
 gm's memory system is compiled Rust in `crates/plugkit-core/src/`:
 
-- Verbs: `memorize`, `memorize-fire`, `recall`, `auto_recall`, `memorize-prune`
-  (`wasm_dispatch/verbs.rs`, `orchestrator/memorize.rs`, `orchestrator/recall.rs`).
+- Verbs: no memory verb is registered in this build; the memory entry point in source is `memorize_at` (`crates/plugkit-core/src/code_index.rs`).
 - Storage: raw markdown files at `.gm/memories/<key>.md` for the `default`
   namespace (`.gm/disciplines/<ns>/memories/<key>.md` otherwise), key format
   `mem-{fnv1a64(ns|text):016x}-{text.len()}` (`memory_md.rs`). The `.md` corpus
@@ -87,7 +86,7 @@ Tencent's actual schema, uses whatever dimension the source system's
 - `codesearch`/`code_chunks` indexing is unrelated to this work and is not
   touched - it already indexes directly into `gm.db` rows (no separate file
   corpus) and that's out of scope here.
-- The existing `memorize`/`recall`/`memorize-fire`/`memorize-prune` verb
+- The existing memory verb
   *surface* (function names, request/response shape) does not change for
   existing callers. Backend selection is transparent and config-gated,
   default-disabled, so unmodified projects see zero behavior change.
@@ -110,7 +109,7 @@ conflated at first read:
    `memory_md`/`rssearch_vectors`) into a project's `tencentdb_backend`
    store, so a project that later opts a namespace into the new backend
    doesn't lose what was already recalled through the old path. This is the
-   `tencentdb-memory-import` verb (`wasm_dispatch/verbs.rs`): reads
+   import step (no verb is registered for it in this build): reads
    `memory_md::flat_kv_entries(source_namespace)`, re-embeds every doc
    through gm's own `embed::embed_text_json_passage` (fixed 384-dim), and
    writes via `tencentdb_memory::write_cfg` with an **explicit 384-dim
@@ -122,14 +121,14 @@ conflated at first read:
 
 ## Session verification: real bugs found and fixed by an actual end-to-end run
 
-Building `tencentdb-memory-import` and running it for real (release wasm
+Building the import step and running it for real (release wasm
 built and dispatched directly through `agentplug-runner`, not just
 `cargo check`) surfaced two defects a compile-clean check could not catch:
 
 1. **`flat_kv_entries`/`host_kv_query` is NOT the `.md` memory corpus.** It
    reads an unrelated discipline-KV JSON store
    (`.gm/disciplines/<ns>/*.json`, `agentplug-host`'s
-   `kv_namespace_dir`) -- initial `tencentdb-memory-import` used it and
+   `kv_namespace_dir`) -- initial import step used it and
    silently imported zero docs even with real `.md` files present. Fixed by
    listing `memory_md::md_dir(ns)` via `pkfs::readdir` and parsing each
    `.md` file directly with `memory_md::parse`.
@@ -150,11 +149,11 @@ built and dispatched directly through `agentplug-runner`, not just
 Verified live (scratch git repo, real release wasm built via
 `cargo build --release --target wasm32-wasip1 --no-default-features
 --features slim --lib`, dispatched with `agentplug-runner dispatch gm
-<verb> <body>`): `memorize-fire` into `default` -> `tencentdb-memory-import`
+<verb> <body>`): a memory write into `default` -> the import step
 into a `vectors_db_dims: 384`-configured namespace (1 doc imported) ->
 `recall` against that namespace (real cosine-similarity hit, 0.845,
 correct `file_path`, content lazily read from the pointer file, not stored
-inline in the index row) -> `memorize-prune` (index row marked deleted,
+inline in the index row) -> a memory prune (index row marked deleted,
 file removed from disk). Full CRUD round trip confirmed against the actual
 compiled artifact, not a mock or a narrated claim.
 
