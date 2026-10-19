@@ -3039,7 +3039,7 @@ pub(super) const GIT_PATCH_COMMIT_JS: &str = r#"const {spawnSync}=require('child
 const I=__INPUT__;const out=(o)=>process.stdout.write(JSON.stringify(o));
 const git=(args,env,input)=>{const r=spawnSync('git',args,{cwd:I.cwd,env:Object.assign({},process.env,env||{}),input:input==null?undefined:input,encoding:'utf8',windowsHide:true,maxBuffer:1<<28});return {code:r.status==null?-1:r.status,stdout:r.stdout||'',stderr:(r.stderr||'')+(r.error?String(r.error):'')};};
 const must=(stage,r)=>{if(r.code!==0){throw {stage,stderr:r.stderr.trim()};}return r.stdout;};
-let idx=null;
+let idx=null;let moved=null;
 try{
 const gitdir=must('git_dir',git(['rev-parse','--absolute-git-dir'])).trim();
 const head=must('head',git(['rev-parse','--verify','HEAD'])).trim();
@@ -3057,14 +3057,14 @@ const tree=must('write_tree',git(['write-tree'],E)).trim();
 const headTree=must('head_tree',git(['rev-parse',head+'^{tree}'])).trim();
 if(tree===headTree)throw {stage:'nothing',stderr:'the commit changes nothing against HEAD'};
 const commit=must('commit_tree',git(I.identity.concat(['commit-tree',tree,'-p',head,'-F','-']),{},I.message)).trim();
-must('update_ref',git(['update-ref','-m','gm git_commit patch','HEAD',commit,head]));
+must('update_ref',git(['update-ref','-m','gm git_commit patch','HEAD',commit,head]));moved={sha_full:commit,head_before:head};
 const paths=must('paths',git(['diff-tree','--no-commit-id','--name-only','-r','-z',head,commit])).split('\0').filter(Boolean);
 const synced=[];const leftStaged=[];
 for(const p of paths){const entry=git(['ls-files','-s','-z','--',p]).stdout.split('\0')[0]||'';const m=/^(\d+) ([0-9a-f]+) 0\t/.exec(entry);const oldBlob=git(['rev-parse','--verify','--quiet',head+':'+p]).stdout.trim();const newBlob=git(['rev-parse','--verify','--quiet',commit+':'+p]).stdout.trim();
 const clean=m?m[2]===oldBlob:oldBlob==='';if(!clean){leftStaged.push(p);continue;}
 if(newBlob){const mode=git(['ls-tree',commit,'--',p]).stdout.split(' ')[0]||'100644';must('index_sync',git(['update-index','--add','--cacheinfo',mode+','+newBlob+','+p]));}else{must('index_sync',git(['update-index','--force-remove','--',p]));}synced.push(p);}
 out({ok:true,sha_full:commit,head_before:head,paths,index_synced:synced,index_left_staged:leftStaged,selected_hunks:selected});
-}catch(e){out(Object.assign({ok:false},e&&e.stage?e:{stage:'internal',stderr:String(e)}));}
+}catch(e){out(Object.assign({ok:false},moved?{sha_full:moved.sha_full,head_before:moved.head_before,head_after:moved.sha_full}:{},e&&e.stage?e:{stage:'internal',stderr:String(e)}));}
 finally{if(idx){try{fs.unlinkSync(idx);}catch(_){}try{fs.unlinkSync(idx+'.lock');}catch(_){}}}"#;
 
 pub(super) fn patch_commit_paths(patch: &str) -> Vec<String> {
