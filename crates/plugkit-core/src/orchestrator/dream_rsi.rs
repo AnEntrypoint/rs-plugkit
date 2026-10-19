@@ -1203,14 +1203,7 @@ pub struct Outcome {
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn outcome(result: &Value) -> Outcome {
-    let data = result.get("data");
-    let top_ok = result.get("ok").and_then(Value::as_bool).unwrap_or(true);
-    let data_ok = data.and_then(|d| d.get("ok")).and_then(Value::as_bool).unwrap_or(true);
-    let exit_code = if top_ok && data_ok {
-        0
-    } else {
-        data.and_then(|d| d.get("exit_code")).and_then(Value::as_i64).filter(|code| *code != 0).unwrap_or(1)
-    };
+    let exit_code = if result.get("ok").and_then(Value::as_bool).unwrap_or(true) { 0 } else { 1 };
     let failure = failure_class(result, exit_code);
     Outcome {
         exit_code,
@@ -2549,7 +2542,7 @@ fn persist_sealed_replay(source: &'static str, replay: &mut Value) {
         "n_observations": replay.get("n_observations"),
         "domain": replay.get("domain"),
         "improved": replay.get("improved"),
-        "never_worse": replay.get("never_worse"),
+        "never_worse": matches!((baseline_score, selected_score), (Some(base), Some(sel)) if sel >= base),
         "beta1": replay.get("beta1"),
         "beta2": replay.get("beta2"),
         "rankings": rankings,
