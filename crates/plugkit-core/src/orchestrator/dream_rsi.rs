@@ -601,6 +601,28 @@ fn reply_field(result: &Value, key: &str) -> Option<String> {
 }
 
 #[cfg(target_arch = "wasm32")]
+const ERROR_LINE_KEYS: [&str; 5] = ["stderr", "error", "message", "reason", "output"];
+
+#[cfg(target_arch = "wasm32")]
+const ERROR_LINE_MAX_CHARS: usize = 240;
+
+#[cfg(target_arch = "wasm32")]
+fn error_line(result: &Value, exit_code: i64) -> Option<String> {
+    if exit_code == 0 {
+        return None;
+    }
+    reply_layers(result).iter().flatten().find_map(|layer| {
+        ERROR_LINE_KEYS.iter().find_map(|key| {
+            layer
+                .get(*key)
+                .and_then(Value::as_str)
+                .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+                .map(|line| line.chars().take(ERROR_LINE_MAX_CHARS).collect::<String>())
+        })
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
 #[derive(Debug, Clone, PartialEq)]
 pub enum FailureClass {
     Ok,
@@ -693,6 +715,8 @@ struct ObservationRecord {
     no_match: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_error_line: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     run_end: bool,
 }
@@ -781,6 +805,7 @@ pub struct ObservedDispatch<'a> {
     pub gate_drift: bool,
     pub gate_id: Option<&'a str>,
     pub predicate: Option<&'a str>,
+    pub first_error_line: Option<&'a str>,
     pub reply: &'a str,
     pub lean_node: Option<&'a str>,
     pub failure: FailureClass,
@@ -1364,6 +1389,7 @@ pub struct Outcome {
     gate_drift: bool,
     gate_id: Option<String>,
     predicate: Option<String>,
+    first_error_line: Option<String>,
     failure: FailureClass,
 }
 
@@ -1380,6 +1406,7 @@ pub(crate) fn outcome(result: &Value) -> Outcome {
         gate_drift: failure.error_code().is_some_and(is_gate_drift_code),
         gate_id: reply_field(result, "gate_id"),
         predicate: reply_field(result, "predicate"),
+        first_error_line: error_line(result, exit_code),
         failure,
     }
 }
@@ -1406,6 +1433,7 @@ pub(crate) fn observe_recorded(
         gate_drift: outcome.gate_drift,
         gate_id: outcome.gate_id.as_deref(),
         predicate: outcome.predicate.as_deref(),
+        first_error_line: outcome.first_error_line.as_deref(),
         reply,
         lean_node,
         failure: outcome.failure,
@@ -1437,6 +1465,7 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         gate_drift,
         gate_id,
         predicate,
+        first_error_line,
         reply,
         lean_node,
         failure,
@@ -1461,6 +1490,7 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         gate_drift: Some(gate_drift),
         gate_id: gate_id.map(str::to_owned),
         predicate: predicate.map(str::to_owned),
+        first_error_line: first_error_line.map(str::to_owned),
         prd_open_count: Some(prd_open_count),
         mutable_open_count: Some(mutable_open_count),
         quality: Some(outcome_score(exit_code, failure.no_match(), output_bytes)),
