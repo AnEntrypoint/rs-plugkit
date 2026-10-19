@@ -1592,14 +1592,27 @@ fn env_get(body: &Value) -> u64 {
 }
 
 fn lang(body: &Value) -> u64 {
-    let project_dir = body
+    let explicit_project_dir = body
         .get("projectDir")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let project_dir_owned = if explicit_project_dir.is_empty() {
+        body_cwd(body)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string)
+            .or_else(|| super::host_abi::host_cwd_string().filter(|c| !c.is_empty()))
+            .unwrap_or_default()
+    } else {
+        explicit_project_dir.to_string()
+    };
+    let project_dir = project_dir_owned.as_str();
     let command = body.get("command").and_then(|v| v.as_str()).unwrap_or("");
     let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
     if project_dir.is_empty() {
-        return err("lang", "projectDir required");
+        return err(
+            "lang",
+            "projectDir required: pass projectDir, or cwd (the dispatch working directory) when projectDir is absent; neither was present",
+        );
     }
     if command.is_empty() {
         return err("lang", "command required");
