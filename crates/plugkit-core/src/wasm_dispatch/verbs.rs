@@ -655,6 +655,31 @@ fn ok_partial(verb: &str, data: Value, partial_reason: &str) -> u64 {
     pack(json!({ "ok": true, "verb": verb, "partial": true, "partial_reason": partial_reason, "data": data }).to_string())
 }
 
+fn timed_git(f: fn(&Value) -> u64, body: &Value) -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let started = unsafe { host_now_ms() };
+        let packed = f(body);
+        with_duration_ms(packed, unsafe { host_now_ms() }.saturating_sub(started))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    f(body)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn with_duration_ms(packed: u64, ms: u64) -> u64 {
+    let Some(text) = unpack_to_string(packed) else {
+        return packed;
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(mut map)) => {
+            map.insert("duration_ms".to_string(), json!(ms));
+            pack(Value::Object(map).to_string())
+        }
+        _ => pack(text),
+    }
+}
+
 const READ_OUTSIDE_ROOT_OPT_IN_FIELDS: &[&str] =
     &["allowOutsideRoot", "allow_outside_root", "allowAbsolute"];
 const READ_ONLY_OUTSIDE_ROOT_VERBS: &[&str] = &["fs_read", "fs_readdir", "fs_stat"];
@@ -1707,7 +1732,7 @@ fn exec_js(body: &Value, body_s: &str) -> u64 {
             }),
         );
     }
-    let opts = match prefix_timeout_ms {
+    let mut opts = match prefix_timeout_ms {
         Some(n) if n >= crate::validation::MIN_TIMEOUT_MS => json!({"timeoutMs": n}),
         Some(n) => {
             return err_json(
@@ -1721,8 +1746,11 @@ fn exec_js(body: &Value, body_s: &str) -> u64 {
             )
         }
         None => json!({}),
+    };
+    if let Some(sid) = crate::wasm_dispatch::current_dispatch_session_id() {
+        opts["session_id"] = json!(sid);
     }
-    .to_string();
+    let opts = opts.to_string();
     let packed = unsafe {
         host_exec_js(
             code.as_ptr(),
@@ -3291,25 +3319,25 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "wait" | "sleep" => err_coded(&verb, ERR_CODE_UNSUPPORTED, "verb not supported: wasm has no real timer/async-sleep primitive here; use exec:sleep (bash `sleep N`, JS setTimeout via exec_js, or PowerShell Start-Sleep) for an actual wait"),
         "close" => close(&body),
         "filter" => filter(&body, &body_s),
-        "git_status" => git_status(&body),
-        "branch_status" => branch_status(&body),
-        "git_push" => git_push(&body),
-        "git_add" => git_add(&body),
-        "git_commit" => git_commit(&body),
-        "git_amend" => git_amend(&body),
-        "git_rewrite_authors" => git_rewrite_authors(&body),
-        "git_finalize" => git_finalize(&body),
-        "git_log" => git_log(&body),
-        "git_diff" => git_diff(&body),
-        "git_show" => git_show(&body),
-        "git_fetch" => git_fetch(&body),
-        "git_pull" => git_pull(&body),
+        "git_status" => timed_git(git_status, &body),
+        "branch_status" => timed_git(branch_status, &body),
+        "git_push" => timed_git(git_push, &body),
+        "git_add" => timed_git(git_add, &body),
+        "git_commit" => timed_git(git_commit, &body),
+        "git_amend" => timed_git(git_amend, &body),
+        "git_rewrite_authors" => timed_git(git_rewrite_authors, &body),
+        "git_finalize" => timed_git(git_finalize, &body),
+        "git_log" => timed_git(git_log, &body),
+        "git_diff" => timed_git(git_diff, &body),
+        "git_show" => timed_git(git_show, &body),
+        "git_fetch" => timed_git(git_fetch, &body),
+        "git_pull" => timed_git(git_pull, &body),
         "ci-status" | "ci_status" => ci_status(&body),
         "ci-log" | "ci_log" => ci_log(&body),
-            "git_branch" => git_branch(&body),
-            "git_remote" => git_remote(&body),
-            "git_submodule_add" => git_submodule_add(&body),
-            "git_submodule_update" => git_submodule_update(&body),
+            "git_branch" => timed_git(git_branch, &body),
+            "git_remote" => timed_git(git_remote, &body),
+            "git_submodule_add" => timed_git(git_submodule_add, &body),
+            "git_submodule_update" => timed_git(git_submodule_update, &body),
             "git_worktree" => git_worktree(&body),
             "git_checkout" => git_checkout(&body),
         "git_merge" => git_merge(&body),
