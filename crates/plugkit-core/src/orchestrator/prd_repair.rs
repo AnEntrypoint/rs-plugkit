@@ -10,6 +10,38 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn prune_older_backups(path_s: &str, keep_path: &str) -> usize {
+    let (dir, base) = match path_s.rfind('/') {
+        Some(i) => (&path_s[..i], &path_s[i + 1..]),
+        None => (".", path_s),
+    };
+    let keep_name = keep_path.rsplit('/').next().unwrap_or(keep_path);
+    let prefix = format!("{base}.bak-");
+    let Some(serde_json::Value::Array(entries)) = pkfs::readdir(dir) else {
+        return 0;
+    };
+    let mut pruned = 0;
+    for entry in &entries {
+        let Some(name) = entry
+            .as_str()
+            .or_else(|| entry.get("name").and_then(serde_json::Value::as_str))
+        else {
+            continue;
+        };
+        let suffix = match name.strip_prefix(prefix.as_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) || name == keep_name {
+            continue;
+        }
+        if pkfs::remove_file(&format!("{dir}/{name}")) {
+            pruned += 1;
+        }
+    }
+    pruned
+}
+
 fn fault_json(faults: &[YamlFault]) -> serde_json::Value {
     serde_json::Value::Array(
         faults
@@ -184,10 +216,12 @@ pub fn repair_prd_store(
     if let Some(err) = last_err {
         return Err((String::new(), err, 1));
     }
+    let pruned_backups = prune_older_backups(path_s, &backup_path);
     Ok(serde_json::json!({
         "ok": true,
         "path": path_s,
         "backup": backup_path,
+        "pruned_backups": pruned_backups,
         "repaired": true,
         "rows_after": plan.rows_after,
         "bytes_before": before.len(),
