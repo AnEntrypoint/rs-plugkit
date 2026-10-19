@@ -563,6 +563,8 @@ fn nearest_ids(ids: &[String], want: &str, n: usize) -> Vec<String> {
 
 pub const LOOKUP_MISS_EXIT: i32 = 4;
 
+const PRD_LIST_DEFAULT_PAGE: usize = 10;
+
 pub fn handle_list(content: &str) -> (String, String, i32) {
     let request = request_object(content);
     let limit = match request_limit(&request) {
@@ -575,6 +577,11 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
     };
     let store_total = rows.len();
     let wanted_ids = request_strings(&request, PRD_ROW_ID_FIELDS);
+    let limit = limit.or(if wanted_ids.is_empty() {
+        Some(PRD_LIST_DEFAULT_PAGE)
+    } else {
+        None
+    });
     let requested_statuses = request_strings(&request, PRD_ROW_STATUS_FIELDS);
     let every_status = requested_statuses
         .iter()
@@ -681,7 +688,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         "truncated": truncated,
         "brief": !want_full,
         "full": want_full,
-        "hint": "pass {\"id\":\"<row id>\"} for one row in full (repeated blocks of an id fold to the last one); {\"status\":\"pending\"} to filter; {\"status\":\"pending\",\"limit\":<n>} to cap (total counts every match); {\"status\":\"all\",\"limit\":<n>,\"offset\":<n>} to page (next_offset is null when done); {\"full\":true} for every full body. .gm/prd/ holds open work only; resolved rows live in .gm/prd-log.jsonl and are answered from it.",
+        "hint": "pass {\"id\":\"<row id>\"} for one row in full (repeated ids fold to the last); {\"status\":\"pending\"} to filter; {\"status\":\"pending\",\"limit\":<n>} to cap; {\"status\":\"all\",\"limit\":<n>,\"offset\":<n>} to page (next_offset null when done); {\"full\":true} for every full body. .gm/prd/ holds open work only; resolved rows are in .gm/prd-log.jsonl.",
     });
     if log.dropped_torn_lines > 0 {
         reply["dropped_torn_lines"] = serde_json::json!(log.dropped_torn_lines);
