@@ -220,7 +220,7 @@ pub fn pin_regressions() -> Vec<PinRegression> {
 
 pub fn pin_regression_message(entry: &PinRegression) -> String {
     format!(
-        "[submodule-pin-regression] SUBMODULE PIN MOVED BACKWARDS: {} -- old {}, new {}, and {} is NOT a descendant of {} ({}). This repo is pointing at a commit that does not contain one it already pointed at, which is what a stale read of the submodule tip looks like when another lane published after this one read it: that lane's commit is dropped from the pin. Not refused -- the pin is written as asked. Re-read the tip (git -C {} fetch origin, then git -C {} rev-parse origin/main) and bump the pin forward, or leave it if the older commit is deliberate.",
+        "[submodule-pin-regression] SUBMODULE PIN MOVED BACKWARDS: {} -- old {}, new {}, and {} is NOT a descendant of {} ({}). This repo is pointing at a commit that does not contain one it already pointed at, which is what a stale read of the submodule tip looks like when another lane published after this one read it: that lane's commit is dropped from the pin. Not refused -- the pin is written as asked. Re-read the tip (git_fetch on {}, then gh api repos/<owner>/<repo>/git/ref/heads/main for {}) and bump the pin forward, or leave it if the older commit is deliberate.",
         entry.path,
         entry.old_sha,
         entry.new_sha,
@@ -289,7 +289,7 @@ fn recovery_for(drifted: &[DriftedSubmodule]) -> Option<String> {
             .collect::<Vec<_>>()
             .join(" ");
         parts.push(format!(
-            "cd back to gm root, `git add {}`, then git_commit/git_finalize to update gm's own tracked pointer(s) to each submodule's origin main tip.",
+            "back at gm root, git_add {}, then git_commit/git_finalize to update gm's own tracked pointer(s) to each submodule's origin main tip.",
             paths,
         ));
     }
@@ -300,7 +300,7 @@ fn recovery_for(drifted: &[DriftedSubmodule]) -> Option<String> {
             .collect::<Vec<_>>()
             .join(" ");
         parts.push(format!(
-            "Not staged: {} -- the checkout HEAD is not that submodule's origin/main tip (run `git -C <path> fetch origin` first if origin/main looks stale). Where the checkout is behind its gitlink, run `git submodule update -- {}` to sync it to the pin, then re-check; where it is ahead, publish that commit to the submodule's main first.",
+            "Not staged: {} -- the checkout HEAD is not that submodule's origin/main tip (run git_fetch on the submodule path first if origin/main looks stale). Where the checkout is behind its gitlink, run git_submodule_update on {} to sync it to the pin, then re-check; where it is ahead, publish that commit to the submodule's main first.",
             paths,
             paths,
         ));
