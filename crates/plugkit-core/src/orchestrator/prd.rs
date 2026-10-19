@@ -779,6 +779,18 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             item_map.insert(Value::String("owner".to_string()), Value::String(filer));
         }
     }
+    if let Some(recheck) = mapping_text(&item_map, "recheck_by") {
+        if mapping_text(&item_map, "owner").as_deref() == Some(recheck.as_str()) {
+            return (
+                String::new(),
+                format!(
+                    "prd-add refused: recheck_by '{}' equals owner; the session that re-checks a finding must differ from the one that acts on it",
+                    recheck
+                ),
+                1,
+            );
+        }
+    }
     let has_external_block = item_map
         .get(&Value::String("blockedBy".to_string()))
         .and_then(|v| v.as_sequence())
