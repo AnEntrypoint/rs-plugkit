@@ -63,7 +63,7 @@ pub(super) fn tree_staleness(body: &Value) -> Option<Value> {
     let (behind, ahead) = if head == upstream {
         (0, 0)
     } else {
-        let counts = git_ok_stdout("rev-list --left-right --count @{u}...HEAD", &dir)?;
+        let counts = git_ok_stdout("rev-list --left-right --count @{u}...HEAD -- .", &dir)?;
         let mut n = counts.split_whitespace().map(|x| x.parse::<u64>().unwrap_or(0));
         (n.next().unwrap_or(0), n.next().unwrap_or(0))
     };
