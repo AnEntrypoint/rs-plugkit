@@ -6016,7 +6016,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         ));
     } else if req.pattern.split_whitespace().count() > 1 {
         out.insert("query_note".to_string(), json!(
-            "the query was matched as ONE phrase: a line must contain it verbatim, spaces included -- pass combine:\"or\" to split it into terms and rank by how many a line carries, or combine:\"and\" to require all of them on one line"
+            "the query was matched as ONE phrase: a line must contain it verbatim, spaces included -- run codesearch with combine:\"or\" to split it into terms and rank by how many a line carries, or combine:\"and\" to require all of them on one line"
         ));
     }
     if multi && !terms_ignored.is_empty() {
@@ -6094,7 +6094,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             )
         } else if req.pattern.split_whitespace().count() > 1 {
             format!(
-                "no line matched the query as ONE phrase: \"{}\" was matched verbatim, spaces included; split it into terms and pass combine:\"or\", or combine:\"and\" to require all of them on one line",
+                "no line matched the query as ONE phrase: \"{}\" was matched verbatim, spaces included; split it into terms and run codesearch with combine:\"or\", or combine:\"and\" to require all of them on one line",
                 req.pattern
             )
         } else if req.pattern.contains('|') {
