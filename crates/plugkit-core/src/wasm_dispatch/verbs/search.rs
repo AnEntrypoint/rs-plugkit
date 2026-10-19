@@ -2281,6 +2281,27 @@ pub(super) fn grep(body: &Value) -> u64 {
     answer_scan("grep", out, partial)
 }
 
+fn with_index_topup(packed: u64, reason: &str, pass: &Value, pass_ms: u64) -> u64 {
+    let Some(text) = unpack_to_string(packed) else {
+        return packed;
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(mut map)) => {
+            map.insert(
+                "index_topup".to_string(),
+                json!({
+                    "reason": reason,
+                    "pass_ms": pass_ms,
+                    "pass_ok": pass.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "changed_files_count": pass.get("changed_files_count").cloned().unwrap_or_else(|| json!(0)),
+                }),
+            );
+            pack(Value::Object(map).to_string())
+        }
+        _ => pack(text),
+    }
+}
+
 pub(super) fn answer_scan(verb: &str, out: serde_json::Map<String, Value>, partial: Option<String>) -> u64 {
     match partial {
         Some(reason) => ok_partial(verb, Value::Object(out), &reason),
@@ -2834,6 +2855,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             } else {
                 "digest-mismatch"
             };
+            let topup_started = unsafe { host_now_ms() };
             let pass = if cold_start {
                 crate::code_index::index_topup(
                     ".",
@@ -2847,12 +2869,13 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
                     cfg.index.incremental_topup_wall_budget_ms,
                 )
             };
+            let topup_ms = unsafe { host_now_ms() }.saturating_sub(topup_started);
             emit_codeinsight_pass_outcome(reason, ".", &pass);
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
             }
-            return codesearch_dispatch(&retry);
+            return with_index_topup(codesearch_dispatch(&retry), reason, &pass, topup_ms);
         }
     }
     let cand_k = scoped_candidate_k(cfg.budget.pool(k as usize).max(50) as u32, scope.as_ref());
