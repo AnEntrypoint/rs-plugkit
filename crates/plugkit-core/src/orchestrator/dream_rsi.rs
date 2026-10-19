@@ -1643,7 +1643,8 @@ fn automatic_replay(session_id: Option<&str>) -> Value {
             continue;
         };
         let cost = prd_open + mutable_open + 1;
-        let replay_score = quality - DEFAULT_CYCLE_BETA1 * cost as f64;
+        let parallelism_bonus = 1.0_f64;
+        let replay_score = quality - DEFAULT_CYCLE_BETA1 * cost as f64 + DEFAULT_CYCLE_BETA2 * parallelism_bonus;
         replays.push(json!({ "dispatch_id": observation.dispatch_id, "verb": observation.verb, "fingerprint": observation.fingerprint, "score": replay_score, "quality": quality, "cost": cost }));
     }
     if replays.is_empty() {
