@@ -1606,7 +1606,10 @@ fn lang(body: &Value) -> u64 {
         explicit_project_dir.to_string()
     };
     let project_dir = project_dir_owned.as_str();
-    let command = body.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    let language = ["lang", "command"]
+        .iter()
+        .find_map(|key| body.get(*key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
+        .unwrap_or("");
     let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
     if project_dir.is_empty() {
         return err(
@@ -1614,8 +1617,11 @@ fn lang(body: &Value) -> u64 {
             "projectDir required: pass projectDir, or cwd (the dispatch working directory) when projectDir is absent; neither was present",
         );
     }
-    if command.is_empty() {
-        return err("lang", "command required");
+    if language.is_empty() {
+        return err(
+            "lang",
+            "language required: pass lang (the language name) and code (the source); command is accepted as an alias for lang",
+        );
     }
     let timeout_ms = body
         .get("timeoutMs")
@@ -1655,7 +1661,7 @@ fn lang(body: &Value) -> u64 {
   }}
 }})().catch(e => {{ process.stdout.write(JSON.stringify({{ok:false, error: String(e && e.message || e)}})); }})"#,
         project_dir = serde_json::to_string(project_dir).unwrap_or_else(|_| "\"\"".to_string()),
-        command = serde_json::to_string(command).unwrap_or_else(|_| "\"\"".to_string()),
+        command = serde_json::to_string(language).unwrap_or_else(|_| "\"\"".to_string()),
         code = serde_json::to_string(code).unwrap_or_else(|_| "\"\"".to_string()),
         inner_timeout = timeout_ms.saturating_sub(2000).max(1000),
     );
