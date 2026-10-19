@@ -102,7 +102,10 @@ fn pool_concurrency_shortfall() -> usize {
         let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
         let now = unsafe { crate::wasm_dispatch::host_now_ms() };
         let window = super::fsm::graph().policy.concurrency_window_ms;
-        crate::dispatch_ledger::subagent_running_count(&cwd, &session, now, window)
+        match crate::dispatch_ledger::subagent_running_count(&cwd, &session, now, window) {
+            Ok(n) => n,
+            Err(_) => 0,
+        }
     };
     open.saturating_sub(running)
 }
