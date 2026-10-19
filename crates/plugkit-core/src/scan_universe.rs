@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::code_index::{
     gitignore_excludes, is_dependency_noise_dir_segment, is_hidden_segment, is_skipped_dir_segment,
-    list_dir, load_repo_gitignore,
+    list_dir, load_codesearchignore, load_repo_gitignore,
 };
 use crate::ragconfig::IndexConfig;
 use crate::wasm_dispatch::{git_call_argv, host_exists, host_now_ms, host_stat_is_directory};
@@ -475,6 +475,11 @@ fn git_worktree_files(dir: &str, nesting: usize, no_ignore: bool, failed: &mut V
     Ok((files, complete && !nested_untracked_failed, tracked_count, untracked_count, nested_worktrees, nested_untracked_failed))
 }
 
+fn codesearchignore_rule(gi: &Option<ignore::gitignore::Gitignore>, path: &str) -> Option<&'static str> {
+    let matcher = gi.as_ref()?;
+    matcher.matched_path_or_any_parents(path, false).is_ignore().then_some("codesearchignore")
+}
+
 fn runtime_artifact_rule(path: &str) -> Option<&'static str> {
     let normalized_path = path.replace('\\', "/");
     let mut segments = normalized_path.split('/');
@@ -776,9 +781,11 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
                         report_unlisted_own_state(root, &kept, &mut pruned);
                         (kept, pruned)
                     };
+                    let codesearchignore = if named_scope { None } else { load_codesearchignore(root) };
                     let mut kept = Vec::with_capacity(files.len());
                     for path in files {
-                        match runtime_artifact_rule(&path) {
+                        let rule = runtime_artifact_rule(&path).or_else(|| codesearchignore_rule(&codesearchignore, &path));
+                        match rule {
                             Some(rule) => pruned.push(RuleExclusion {
                                 path,
                                 rule,
