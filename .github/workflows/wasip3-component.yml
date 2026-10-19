@@ -43,8 +43,12 @@ jobs:
       - name: Build the guest as a wasip3 component (slim, wit-env)
         run: cargo build -p rs-plugkit --release --target wasm32-wasip3 --features slim,wit-env
 
-      - name: Install wasm-tools
-        run: cargo install wasm-tools --locked
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
+        with:
+          tool: cargo-binstall
+
+      - name: Install wasm-tools 1.262.0 from its release binary
+        run: cargo binstall --no-confirm --disable-strategies compile wasm-tools@1.262.0
 
       - name: Parse env.wit
         run: wasm-tools component wit crates/plugkit-core/wit > /dev/null
