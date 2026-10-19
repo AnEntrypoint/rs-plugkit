@@ -2135,10 +2135,7 @@ pub(super) fn grep(body: &Value) -> u64 {
         Ok(limit) => limit,
         Err(e) => return err("grep", &e),
     };
-    let scan_cap = match (limit_was_explicit, output_mode) {
-        (true, _) | (false, "content") => max_matches,
-        _ => GREP_NON_CONTENT_SCAN_CAP,
-    };
+    let scan_cap = if limit_was_explicit { max_matches } else { GREP_NON_CONTENT_SCAN_CAP };
     let fixed_strings = body
         .get("fixed_strings")
         .and_then(|v| v.as_bool())
