@@ -3174,7 +3174,11 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     #[cfg(target_arch = "wasm32")]
     if let (Some((dispatch_id, outcome)), Some(session_id)) = (recorded, dispatch_session_id.as_deref()) {
         let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
-        crate::dispatch_ledger::attach_reply_sha256(cwd, &dispatch_id, &crate::orchestrator::dream_rsi::reply_sha256_hex(&reply));
+        let reply_sha = {
+            use sha2::Digest;
+            format!("{:x}", sha2::Sha256::digest(reply.as_bytes()))
+        };
+        crate::dispatch_ledger::attach_reply_sha256(cwd, &dispatch_id, &reply_sha);
         crate::orchestrator::dream_rsi::observe_recorded(
             outcome,
             &dispatch_id,
