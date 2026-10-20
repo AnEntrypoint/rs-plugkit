@@ -375,7 +375,7 @@ async function instantiateWasm(module, root, home, onGit, note) {
     },
     host_task_proc: () => 0n,
     host_plugin_call: () => 0n,
-    crawl_cdp: () => 0n,
+    browser_cdp: () => 0n,
     host_git: (ap, al, cp, cl) => {
       try {
         const args = gitArgsFromHostPayload(str(ap, al));

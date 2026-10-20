@@ -44,9 +44,9 @@ host_abi_extern_block_and_host_imports_list_from_one_declaration! {
     fn host_task_proc(action_ptr: *const u8, action_len: u32, params_ptr: *const u8, params_len: u32) -> u64;
     fn host_git(args_ptr: *const u8, args_len: u32, cwd_ptr: *const u8, cwd_len: u32) -> u64;
     fn host_plugin_call(plugin_ptr: *const u8, plugin_len: u32, verb_ptr: *const u8, verb_len: u32, body_ptr: *const u8, body_len: u32) -> u64;
-    fn crawl_cdp(body_ptr: *const u8, body_len: u32) -> u64;
-    fn crawl_ops(op_ptr: *const u8, op_len: u32, body_ptr: *const u8, body_len: u32) -> u64;
-    fn crawl_events(body_ptr: *const u8, body_len: u32) -> u64;
+    fn browser_cdp(body_ptr: *const u8, body_len: u32) -> u64;
+    fn browser_ops(op_ptr: *const u8, op_len: u32, body_ptr: *const u8, body_len: u32) -> u64;
+    fn browser_events(body_ptr: *const u8, body_len: u32) -> u64;
 }
 
 pub fn plugin_call(plugin: &str, verb: &str, body: &Value) -> Value {
@@ -68,18 +68,18 @@ pub fn plugin_call_text(plugin: &str, verb: &str, body: &str) -> Value {
     unpack_to_value(packed)
 }
 
-pub fn crawl_cdp_call(body: &str) -> Value {
-    let packed = unsafe { crawl_cdp(body.as_ptr(), body.len() as u32) };
+pub fn browser_cdp_call(body: &str) -> Value {
+    let packed = unsafe { browser_cdp(body.as_ptr(), body.len() as u32) };
     unpack_to_value(packed)
 }
 
-pub fn crawl_ops_call(op: &str, body: &str) -> Value {
-    let packed = unsafe { crawl_ops(op.as_ptr(), op.len() as u32, body.as_ptr(), body.len() as u32) };
+pub fn browser_ops_call(op: &str, body: &str) -> Value {
+    let packed = unsafe { browser_ops(op.as_ptr(), op.len() as u32, body.as_ptr(), body.len() as u32) };
     unpack_to_value(packed)
 }
 
-pub fn crawl_events_call(body: &str) -> Value {
-    let packed = unsafe { crawl_events(body.as_ptr(), body.len() as u32) };
+pub fn browser_events_call(body: &str) -> Value {
+    let packed = unsafe { browser_events(body.as_ptr(), body.len() as u32) };
     unpack_to_value(packed)
 }
 

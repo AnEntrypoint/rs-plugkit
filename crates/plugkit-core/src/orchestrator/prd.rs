@@ -1939,7 +1939,7 @@ const BROWSER_OR_GPU_WITNESS_MARKERS: &[&str] = &[
     "webgl",
     "webgpu",
     "headless",
-    "crawl_cdp",
+    "browser_cdp",
     "cdp-browser",
 ];
 
