@@ -358,7 +358,7 @@ pub fn lookup_outside_root(cwd: &str, dispatch_id: &str) -> Result<Option<Value>
         .find(|e| e.get("dispatch_id").and_then(|v| v.as_str()) == Some(dispatch_id)))
 }
 
-pub fn submodule_holding(cwd: &str, dispatch_id: &str) -> Result<Option<String>, String> {
+fn nested_scope_roots(cwd: &str) -> Vec<String> {
     let project = if cwd.is_empty() {
         crate::wasm_dispatch::host_cwd_string().unwrap_or_default()
     } else {
@@ -376,13 +376,29 @@ pub fn submodule_holding(cwd: &str, dispatch_id: &str) -> Result<Option<String>,
                 .map(|path| under(path.trim()))
         })
         .collect();
-    let candidates = submodules
+    submodules
         .iter()
         .flat_map(|sub| {
             std::iter::once(sub.clone()).chain(crate::scan_universe::nested_worktree_dirs(sub))
         })
-        .chain(crate::scan_universe::nested_worktree_dirs(root));
-    for sub_cwd in candidates {
+        .chain(crate::scan_universe::nested_worktree_dirs(root))
+        .collect()
+}
+
+pub fn lookup_in_scope(cwd: &str, dispatch_id: &str) -> Result<Option<Value>, String> {
+    if let Some(entry) = lookup(cwd, dispatch_id)? {
+        return Ok(Some(entry));
+    }
+    for sub_cwd in nested_scope_roots(cwd) {
+        if let Some(entry) = lookup(&sub_cwd, dispatch_id)? {
+            return Ok(Some(entry));
+        }
+    }
+    Ok(None)
+}
+
+pub fn submodule_holding(cwd: &str, dispatch_id: &str) -> Result<Option<String>, String> {
+    for sub_cwd in nested_scope_roots(cwd) {
         if lookup(&sub_cwd, dispatch_id)?.is_some() {
             return Ok(Some(ledger_path(&sub_cwd)));
         }
