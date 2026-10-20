@@ -578,8 +578,72 @@ pub const LOOKUP_MISS_EXIT: i32 = 4;
 
 const PRD_LIST_DEFAULT_PAGE: usize = 10;
 
+const PRD_LIST_DECLARED_BODY_FIELDS: &[&str] = &[
+    "id",
+    "ids",
+    "row_id",
+    "id_prefix",
+    "idPrefix",
+    "status",
+    "limit",
+    "offset",
+    "full",
+    "verbose",
+    "bodies",
+    "brief",
+    "compact",
+];
+
+const PRD_LIST_ENVELOPE_FIELDS: &[&str] = &[
+    "session_id",
+    "session",
+    "SESSION_ID",
+    "sessionId",
+    "cwd",
+    "repo",
+    "root",
+    "projectPath",
+    "git_root_override",
+    "full_response",
+    "lean_node",
+    "lane_wait_ms",
+    "run_end",
+];
+
+fn undeclared_list_key_refusal(request: &serde_json::Value) -> Option<(String, String, i32)> {
+    let map = request.as_object()?;
+    let unknown: Vec<&str> = map
+        .keys()
+        .map(String::as_str)
+        .filter(|key| {
+            !key.starts_with('_')
+                && !PRD_LIST_DECLARED_BODY_FIELDS.contains(key)
+                && !PRD_LIST_ENVELOPE_FIELDS.contains(key)
+        })
+        .collect();
+    if unknown.is_empty() {
+        return None;
+    }
+    let body = serde_json::json!({
+        "ok": false,
+        "verb": "prd-list",
+        "error_code": "body_undeclared_key",
+        "error": format!(
+            "prd-list body has undeclared key {} -- declared body fields: {}; prd-list has no text search, so a query key is refused rather than ignored",
+            unknown.join(", "),
+            PRD_LIST_DECLARED_BODY_FIELDS.join(", ")
+        ),
+        "declared_fields": PRD_LIST_DECLARED_BODY_FIELDS,
+        "undeclared_keys": unknown,
+    });
+    Some((body.to_string(), String::new(), 1))
+}
+
 pub fn handle_list(content: &str) -> (String, String, i32) {
     let request = request_object(content);
+    if let Some(refusal) = undeclared_list_key_refusal(&request) {
+        return refusal;
+    }
     let limit = match request_limit(&request) {
         Ok(limit) => limit,
         Err(message) => return (String::new(), message, 1),
