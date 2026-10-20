@@ -3553,22 +3553,7 @@ pub fn topup_allowed(stored: &Option<String>, project_path: Option<&str>) -> boo
     if !stored.contains(":partial=") {
         return true;
     }
-    if content_moved_on_since(stored, project_path) {
-        return true;
-    }
     partial_topup_due_at(project_path)
-}
-
-fn digest_without_partial_suffix(digest: &str) -> &str {
-    match digest.split_once(":partial=") {
-        Some((base, _)) => base,
-        None => digest,
-    }
-}
-
-fn content_moved_on_since(stored: &str, project_path: Option<&str>) -> bool {
-    let current = current_digest_cfg_at(&crate::ragconfig::RagConfig::resolved(), project_path);
-    digest_without_partial_suffix(stored) != digest_without_partial_suffix(&current)
 }
 
 pub fn stored_digest() -> Option<String> {
