@@ -217,14 +217,14 @@ pub unsafe fn host_plugin_call(
     ))
 }
 
-pub unsafe fn crawl_cdp(body_ptr: *const u8, body_len: u32) -> u64 {
-    packed(wit::crawl_cdp(&read_str(body_ptr, body_len)))
+pub unsafe fn browser_cdp(body_ptr: *const u8, body_len: u32) -> u64 {
+    packed(wit::browser_cdp(&read_str(body_ptr, body_len)))
 }
 
-pub unsafe fn crawl_ops(op_ptr: *const u8, op_len: u32, body_ptr: *const u8, body_len: u32) -> u64 {
-    packed(wit::crawl_ops(&read_str(op_ptr, op_len), &read_str(body_ptr, body_len)))
+pub unsafe fn browser_ops(op_ptr: *const u8, op_len: u32, body_ptr: *const u8, body_len: u32) -> u64 {
+    packed(wit::browser_ops(&read_str(op_ptr, op_len), &read_str(body_ptr, body_len)))
 }
 
-pub unsafe fn crawl_events(body_ptr: *const u8, body_len: u32) -> u64 {
-    packed(wit::crawl_events(&read_str(body_ptr, body_len)))
+pub unsafe fn browser_events(body_ptr: *const u8, body_len: u32) -> u64 {
+    packed(wit::browser_events(&read_str(body_ptr, body_len)))
 }

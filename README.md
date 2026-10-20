@@ -258,14 +258,14 @@ GitHub Actions workflow-run query with each job's name and conclusion in `jobs`)
 `sql_smoke`, `task-spawn`/`task-list`/`task-output`/`task-stop`, `wait-for-task` (`{id, timeout_ms?}`, default and max 100000; blocks until the task leaves `running` and returns its output, or returns `timed_out:true` at the deadline),
 `background-convert`, `kill-port`, `similarity`, `claim-audit`, `comment-audit`.
 
-`crawl` takes a plain-text body (not JSON). Its first line is `engine=cdp` (the default when the line is absent); the rest is the crawl request (URLs and steps). `chrome` is an alias that drops any engine line. The engine is always HEADFUL: the host drives a visible Chrome over CDP through its `crawl_cdp` entry point, and a `headless` line is refused. The reply carries `ok`, `engine`, `headless`, `stdout`, `stderr`, `exit_code` and `duration_ms`. Any other engine answers `ok: false` with `error_code: unknown_engine`, naming `cdp`.
+`browser` takes a plain-text body (not JSON). Its first line is `engine=cdp` (the default when the line is absent); the rest is the browser request (URLs and steps). `chrome` is an alias that drops any engine line. The engine is always HEADFUL: the host drives a visible Chrome over CDP through its `browser_cdp` entry point, and a `headless` line is refused. The reply carries `ok`, `engine`, `headless`, `stdout`, `stderr`, `exit_code` and `duration_ms`. Any other engine answers `ok: false` with `error_code: unknown_engine`, naming `cdp`.
 
 ```
 engine=cdp
 https://example.com/
 ```
 
-The standalone `cdp` verb is removed; `crawl engine=cdp` replaces it. `browser` and `serp` are
+The standalone `cdp` verb is removed; `browser engine=cdp` replaces it. `browser` and `serp` are
 removed too and answer `unknown_verb`. `session-list` and `session-close-all` answer
 `ok: false` with `error_code: not_implemented_in_guest`, since the guest holds no browser session state.
 

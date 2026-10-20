@@ -1,6 +1,6 @@
 use super::events::{emit_event, install_panic_hook, log_deviation_push};
 use super::host_abi::{
-    crawl_cdp_call, crawl_events_call, crawl_ops_call, git_call, git_call_argv, host_env_get, host_exec_js, host_fetch,
+    browser_cdp_call, browser_events_call, browser_ops_call, git_call, git_call_argv, host_env_get, host_exec_js, host_fetch,
     host_fs_readdir, host_kv_delete, host_kv_get, host_kv_put, host_kv_query, host_now_ms,
     host_read, pack, plugin_call as call_plugin, read_str, unpack_to_string,
     unpack_to_value,
@@ -580,7 +580,7 @@ fn next_dispatch_hint_for(verb: &str) -> Value {
 
 fn session_not_implemented_in_guest(verb: &str, canonical: &str) -> u64 {
     let reason = format!(
-        "{canonical} needs a browser session registry, and this guest holds none: crawl sessions are owned by the host's crawl_cdp entry point, which exposes no list or close call to the guest"
+        "{canonical} needs a browser session registry, and this guest holds none: browser sessions are owned by the host's browser_cdp entry point, which exposes no list or close call to the guest"
     );
     pack(
         json!({
@@ -1534,50 +1534,50 @@ fn scan_deps(body: &Value) -> u64 {
 pub const FETCH_DEFAULT_TIMEOUT_MS: u64 = 60_000;
 pub const FETCH_MAX_TIMEOUT_MS: u64 = 600_000;
 
-const CRAWL_ENGINE_CDP: &str = "cdp";
-const CRAWL_ERR_UNKNOWN_ENGINE: &str = "unknown_engine";
+const BROWSER_ENGINE_CDP: &str = "cdp";
+const BROWSER_ERR_UNKNOWN_ENGINE: &str = "unknown_engine";
 
-fn split_crawl_engine(body_s: &str) -> (&str, &str) {
+fn split_browser_engine(body_s: &str) -> (&str, &str) {
     let (first, rest) = body_s.split_once('\n').unwrap_or((body_s, ""));
     match first.trim().strip_prefix("engine=") {
         Some(name) => (name.trim(), rest),
-        None => (CRAWL_ENGINE_CDP, body_s),
+        None => (BROWSER_ENGINE_CDP, body_s),
     }
 }
 
-fn crawl(body_s: &str) -> u64 {
-    let (engine, request) = split_crawl_engine(body_s);
+fn browser(body_s: &str) -> u64 {
+    let (engine, request) = split_browser_engine(body_s);
     match engine {
-        CRAWL_ENGINE_CDP => crawl_reply(crawl_cdp_call(request)),
+        BROWSER_ENGINE_CDP => browser_reply(browser_cdp_call(request)),
         other => err_coded(
-            "crawl",
-            CRAWL_ERR_UNKNOWN_ENGINE,
-            &format!("unknown crawl engine \"{other}\": the first line must be engine=cdp (headful Chrome over CDP, the only engine) or be absent"),
+            "browser",
+            BROWSER_ERR_UNKNOWN_ENGINE,
+            &format!("unknown browser engine \"{other}\": the first line must be engine=cdp (headful Chrome over CDP, the only engine) or be absent"),
         ),
     }
 }
 
 fn chrome(body_s: &str) -> u64 {
-    let (_, request) = split_crawl_engine(body_s);
-    crawl_reply(crawl_cdp_call(request))
+    let (_, request) = split_browser_engine(body_s);
+    browser_reply(browser_cdp_call(request))
 }
 
 fn browser_op(op: &str, body_s: &str) -> u64 {
-    crawl_reply(crawl_ops_call(op, body_s))
+    browser_reply(browser_ops_call(op, body_s))
 }
 
-fn crawl_events(body_s: &str) -> u64 {
-    crawl_reply(crawl_events_call(body_s))
+fn browser_events(body_s: &str) -> u64 {
+    browser_reply(browser_events_call(body_s))
 }
 
-fn crawl_reply(reply: Value) -> u64 {
+fn browser_reply(reply: Value) -> u64 {
     match reply {
         Value::Object(_) => pack(reply.to_string()),
-        Value::Null => err_coded("crawl", ERR_CODE_FAILED, "host returned no reply for crawl"),
+        Value::Null => err_coded("browser", ERR_CODE_FAILED, "host returned no reply for browser"),
         other => err_coded(
-            "crawl",
+            "browser",
             ERR_CODE_FAILED,
-            &format!("host crawl reply is not a JSON object: {other}"),
+            &format!("host browser reply is not a JSON object: {other}"),
         ),
     }
 }
@@ -2927,7 +2927,7 @@ fn verb_body_must_be_json(verb: &str) -> bool {
             | "zsh"
             | "powershell"
             | "ps1"
-            | "crawl"
+            | "browser"
             | "chrome"
     )
 }
@@ -3347,7 +3347,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "scan_deps" | "scan-deps" => scan_deps(&body),
         "fetch" => fetch(&body),
         "websearch" | "web_search" | "web-search" => websearch(&body),
-        "crawl" => crawl(&body_s),
+        "browser" => browser(&body_s),
         "chrome" => chrome(&body_s),
         "browser-reset" | "browser_reset" => browser_op("browser-reset", &body_s),
         "browser-list" | "browser_list" => browser_op("browser-list", &body_s),
@@ -3359,7 +3359,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "recorder-stop" | "recorder_stop" => browser_op("recorder-stop", &body_s),
         "recorder-events" | "recorder_events" => browser_op("recorder-events", &body_s),
         "recorder-frame" | "recorder_frame" => browser_op("recorder-frame", &body_s),
-        "crawl-events" | "crawl_events" => crawl_events(&body_s),
+        "browser-events" | "browser_events" => browser_events(&body_s),
         "session-close-all" | "session_close_all" => session_not_implemented_in_guest(verb, "session-close-all"),
         "env_get" => env_get(&body),
         "kv_get" => kv_get(&body),
@@ -3439,7 +3439,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_worktree_remove" => git_worktree_remove(&body),
         "git_worktree_prune" => git_worktree_prune(&body),
         "git_poll" => git_poll(&body),
-        "cdp" => err_coded("cdp", ERR_CODE_RETIRED_VERB, "verb retired: the standalone cdp verb is removed in this build; dispatch verb crawl (or chrome) with a plain-text body whose first line is engine=cdp, then one step per line: sessionId=<name>, a URL or url=<url>, wait <ms>, eval=<js>, cdp <Domain.method> with its JSON params on the next line, events <Domain.event> [where <field>~<value>] [limit=N]. A session still answered by an older runner build serves cdp; a runner newer than that one retires it"),
+        "cdp" => err_coded("cdp", ERR_CODE_RETIRED_VERB, "verb retired: the standalone cdp verb is removed in this build; dispatch verb browser (or chrome) with a plain-text body whose first line is engine=cdp, then one step per line: sessionId=<name>, a URL or url=<url>, wait <ms>, eval=<js>, cdp <Domain.method> with its JSON params on the next line, events <Domain.event> [where <field>~<value>] [limit=N]. A session still answered by an older runner build serves cdp; a runner newer than that one retires it"),
         "discipline" => discipline(&body),
         "" => err_coded("", ERR_CODE_INVALID_ARGS, "verb required"),
         _ => {
