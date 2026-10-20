@@ -23,6 +23,7 @@ pub mod prd_repair;
 pub mod predicate_registry;
 pub mod pool_rank;
 pub mod pool_slots;
+pub mod proc_control;
 pub mod residual;
 pub mod row_store;
 pub mod state;
@@ -439,6 +440,8 @@ orchestrator_dispatch_table! {
     "task-stop" => task::handle_stop(content),
     "task-output" => task::handle_output(content),
     "wait-for-task" => task::handle_wait_for_task(content),
+    "proc-list" => proc_control::handle_list(content),
+    "proc-signal" => proc_control::handle_signal(content),
     "subagent-start" => subagent::handle_start(content),
     "subagent-end" => subagent::handle_end(content),
     "memorize-continue" => handle_memorize_continue(content),
