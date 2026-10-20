@@ -4316,7 +4316,9 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
         out.insert("listing_incomplete".to_string(), json!(true));
     }
     if let Some(reason) = &universe.walk_reason {
-        out.insert("walk_reason".to_string(), json!(reason));
+        if walk_reason_is_new(reason) {
+            out.insert("walk_reason".to_string(), json!(reason));
+        }
     }
     if files_truncated {
         out.insert("files_truncated".to_string(), json!(true));
@@ -5117,6 +5119,7 @@ pub struct UncoveredScanResult {
     pub files_with_matches: usize,
     pub lines_with_matches: usize,
     pub occurrence_count: usize,
+    pub occurrences_truncated: bool,
     pub files_skipped_binary_extension: usize,
     pub files_skipped_too_large: usize,
     pub files_unreadable: usize,
@@ -5152,6 +5155,7 @@ fn scan_uncovered_files(
         files_with_matches: 0,
         lines_with_matches: 0,
         occurrence_count: 0,
+        occurrences_truncated: false,
         files_skipped_binary_extension: 0,
         files_skipped_too_large: 0,
         files_unreadable: 0,
@@ -5204,6 +5208,7 @@ fn scan_uncovered_files(
         files_with_matches: 0,
         lines_with_matches: 0,
         occurrence_count: 0,
+        occurrences_truncated: false,
         files_skipped_binary_extension: 0,
         files_skipped_too_large: 0,
         files_unreadable: 0,
@@ -5259,7 +5264,12 @@ fn scan_uncovered_files(
             this_file_matched = true;
             this_file_lines += 1;
             result.lines_with_matches += 1;
-            result.occurrence_count += found.len();
+            let line_occurrences = found.len();
+            let counted_occurrences = line_occurrences.min(LITERAL_OCCURRENCE_LINE_CAP);
+            if counted_occurrences < line_occurrences {
+                result.occurrences_truncated = true;
+            }
+            result.occurrence_count += counted_occurrences;
             if matches!(req.output, ScanOutput::Files | ScanOutput::Count) {
                 continue;
             }
@@ -5293,7 +5303,10 @@ fn scan_uncovered_files(
                 "match".to_string(),
                 json!(line.get(start..end).unwrap_or(req.pattern)),
             );
-            hit.insert("occurrence_count".to_string(), json!(found.len()));
+            hit.insert("occurrence_count".to_string(), json!(counted_occurrences));
+            if counted_occurrences < line_occurrences {
+                hit.insert("occurrence_count_truncated".to_string(), json!(true));
+            }
             hit.insert("text".to_string(), json!(shown.trim_end()));
             if text_truncated {
                 hit.insert("text_truncated".to_string(), json!(true));
@@ -5308,6 +5321,22 @@ fn scan_uncovered_files(
         }
     }
     result
+}
+
+const LITERAL_OCCURRENCE_LINE_CAP: usize = 64;
+const LITERAL_OCCURRENCE_REPLY_CAP: usize = 100_000;
+
+static LAST_SENT_WALK_REASON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn walk_reason_is_new(reason: &str) -> bool {
+    let Ok(mut last) = LAST_SENT_WALK_REASON.lock() else {
+        return true;
+    };
+    if last.as_deref() == Some(reason) {
+        return false;
+    }
+    *last = Some(reason.to_string());
+    true
 }
 
 pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Value {
@@ -5473,6 +5502,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut files_unreadable = 0usize;
     let mut lines_with_matches = 0usize;
     let mut occurrence_count = 0usize;
+    let mut occurrences_truncated = false;
     let mut lines_all_terms = 0usize;
     let mut lines_phrase_matched = 0usize;
     let mut matches_truncated = false;
@@ -5674,7 +5704,16 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             this_file_matched = true;
             this_file_lines += 1;
             lines_with_matches += 1;
-            occurrence_count += found.len();
+            let line_occurrences = found.len();
+            let counted_occurrences = line_occurrences.min(LITERAL_OCCURRENCE_LINE_CAP);
+            if counted_occurrences < line_occurrences {
+                occurrences_truncated = true;
+            }
+            occurrence_count += counted_occurrences;
+            if occurrence_count > LITERAL_OCCURRENCE_REPLY_CAP {
+                occurrence_count = LITERAL_OCCURRENCE_REPLY_CAP;
+                occurrences_truncated = true;
+            }
             if matches!(req.output, ScanOutput::Files | ScanOutput::Count) {
                 continue;
             }
@@ -5717,7 +5756,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 "match".to_string(),
                 json!(line.get(start..end).unwrap_or(req.pattern)),
             );
-            hit.insert("occurrence_count".to_string(), json!(found.len()));
+            hit.insert("occurrence_count".to_string(), json!(counted_occurrences));
+            if counted_occurrences < line_occurrences {
+                hit.insert("occurrence_count_truncated".to_string(), json!(true));
+            }
             hit.insert("text".to_string(), json!(shown.trim_end()));
             if text_truncated {
                 hit.insert("text_truncated".to_string(), json!(true));
@@ -5913,6 +5955,11 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         files_with_matches += extra.files_with_matches;
         lines_with_matches += extra.lines_with_matches;
         occurrence_count += extra.occurrence_count;
+        occurrences_truncated |= extra.occurrences_truncated;
+        if occurrence_count > LITERAL_OCCURRENCE_REPLY_CAP {
+            occurrence_count = LITERAL_OCCURRENCE_REPLY_CAP;
+            occurrences_truncated = true;
+        }
         file_line_counts.extend(extra.file_line_counts);
         compact_lines.extend(extra.compact_lines);
         let room = max_matches.saturating_sub(matches.len());
@@ -6025,7 +6072,9 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("listing_incomplete".to_string(), json!(true));
     }
     if let Some(reason) = &universe.walk_reason {
-        out.insert("walk_reason".to_string(), json!(reason));
+        if walk_reason_is_new(reason) {
+            out.insert("walk_reason".to_string(), json!(reason));
+        }
     }
     insert_excluded_by_rule(&mut out, &universe.excluded);
     out.insert("term_combination".to_string(), json!(combination.label()));
@@ -6225,6 +6274,9 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             out.insert("files_with_matches".to_string(), json!(files_with_matches));
             out.insert("lines_with_matches".to_string(), json!(lines_with_matches));
         }
+    }
+    if occurrences_truncated {
+        out.insert("occurrences_truncated".to_string(), json!(true));
     }
     if uncovered_files_listed > 0 || uncovered_listing_error.is_some() {
         out.insert(
@@ -7484,7 +7536,9 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     if !universe.listing_complete {
         out.insert("listing_incomplete".to_string(), json!(true));
         if let Some(reason) = &universe.walk_reason {
-            out.insert("walk_reason".to_string(), json!(reason));
+            if walk_reason_is_new(reason) {
+                out.insert("walk_reason".to_string(), json!(reason));
+            }
         }
     }
     out.insert("comment_count".to_string(), json!(comments.len()));
