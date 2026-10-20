@@ -1,6 +1,6 @@
 use super::events::{emit_event, install_panic_hook, log_deviation_push};
 use super::host_abi::{
-    crawl_cdp_call, git_call, git_call_argv, host_env_get, host_exec_js, host_fetch,
+    crawl_cdp_call, crawl_events_call, crawl_ops_call, git_call, git_call_argv, host_env_get, host_exec_js, host_fetch,
     host_fs_readdir, host_kv_delete, host_kv_get, host_kv_put, host_kv_query, host_now_ms,
     host_read, pack, plugin_call as call_plugin, read_str, unpack_to_string,
     unpack_to_value,
@@ -1560,6 +1560,14 @@ fn crawl(body_s: &str) -> u64 {
 fn chrome(body_s: &str) -> u64 {
     let (_, request) = split_crawl_engine(body_s);
     crawl_reply(crawl_cdp_call(request))
+}
+
+fn browser_op(op: &str, body_s: &str) -> u64 {
+    crawl_reply(crawl_ops_call(op, body_s))
+}
+
+fn crawl_events(body_s: &str) -> u64 {
+    crawl_reply(crawl_events_call(body_s))
 }
 
 fn crawl_reply(reply: Value) -> u64 {
@@ -3341,7 +3349,17 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "websearch" | "web_search" | "web-search" => websearch(&body),
         "crawl" => crawl(&body_s),
         "chrome" => chrome(&body_s),
-        "session-list" | "session_list" => session_not_implemented_in_guest(verb, "session-list"),
+        "browser-reset" | "browser_reset" => browser_op("browser-reset", &body_s),
+        "browser-list" | "browser_list" => browser_op("browser-list", &body_s),
+        "session-list" | "session_list" => browser_op("session-list", &body_s),
+        "session-delete" | "session_delete" => browser_op("session-delete", &body_s),
+        "session-update" | "session_update" => browser_op("session-update", &body_s),
+        "session-reset" | "session_reset" => browser_op("session-reset", &body_s),
+        "recorder-start" | "recorder_start" => browser_op("recorder-start", &body_s),
+        "recorder-stop" | "recorder_stop" => browser_op("recorder-stop", &body_s),
+        "recorder-events" | "recorder_events" => browser_op("recorder-events", &body_s),
+        "recorder-frame" | "recorder_frame" => browser_op("recorder-frame", &body_s),
+        "crawl-events" | "crawl_events" => crawl_events(&body_s),
         "session-close-all" | "session_close_all" => session_not_implemented_in_guest(verb, "session-close-all"),
         "env_get" => env_get(&body),
         "kv_get" => kv_get(&body),
