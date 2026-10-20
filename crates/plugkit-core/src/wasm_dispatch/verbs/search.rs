@@ -1915,6 +1915,9 @@ pub(super) fn finish_scan_reply(out: &mut serde_json::Map<String, Value>, scan_c
         out.insert("exhaustive".to_string(), json!(false));
     }
     let partial = scan_partial_reason(out);
+    if partial.is_some() {
+        out.insert("exhaustive".to_string(), json!(false));
+    }
     for key in SCAN_TELEMETRY_DROPPED {
         out.remove(*key);
     }
@@ -2151,7 +2154,13 @@ pub(super) fn grep(body: &Value) -> u64 {
         Ok(limit) => limit,
         Err(e) => return err("grep", &e),
     };
-    let scan_cap = if limit_was_explicit { max_matches } else { GREP_NON_CONTENT_SCAN_CAP };
+    let scan_cap = if limit_was_explicit {
+        max_matches
+    } else if output_mode == "content" {
+        GREP_NON_CONTENT_SCAN_CAP
+    } else {
+        u32::MAX
+    };
     let fixed_strings = body
         .get("fixed_strings")
         .and_then(|v| v.as_bool())
