@@ -3734,9 +3734,14 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                         pathspec_matches_nothing_refusal("git_commit", &paths, &unmatched),
                     ));
                 }
-                let scoped_serr = scoped_r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
-                let scoped_sout = scoped_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-                let git_said = if scoped_serr.trim().is_empty() { scoped_sout.trim() } else { scoped_serr.trim() };
+                let dry_identity = commit_identity(body);
+                let mut dry_run_argv: Vec<String> = identity_config_argv(&dry_identity);
+                dry_run_argv.extend(["commit", "--dry-run", "--"].iter().map(|s| s.to_string()));
+                dry_run_argv.extend(paths.iter().cloned());
+                let dry_r = git_step_replayed_by_call_order(plan, &as_argv(&dry_run_argv), cwd)?;
+                let dry_serr = dry_r.get("stderr").and_then(|x| x.as_str()).unwrap_or("");
+                let dry_sout = dry_r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+                let git_said = if dry_sout.trim().is_empty() { dry_serr.trim() } else { dry_sout.trim() };
                 let git_clause = if git_said.is_empty() { String::new() } else { format!("; git said: {}", git_said) };
                 return Ok(err_json(
                     "git_commit",
@@ -3745,7 +3750,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                         "error_code": "nothing_to_commit_for_paths",
                         "requested_paths": paths,
                         "next_dispatch": "git_commit",
-                        "git_stderr": scoped_serr.trim(),
+                        "git_stderr": dry_serr.trim(),
                     }),
                 ));
             }
