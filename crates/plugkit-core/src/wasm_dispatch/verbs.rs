@@ -2986,6 +2986,19 @@ fn strip_gm_session_header(body_s: &str) -> (Option<String>, &str) {
     (None, body_s)
 }
 
+fn strip_body_session_header(body_s: &str) -> (Option<String>, String) {
+    let (timeout_line, rest) = match body_s.split_once('\n') {
+        Some((first, rest)) if first.trim_start().starts_with("timeoutMs=") => (Some(first), rest),
+        _ => (None, body_s),
+    };
+    let (sid, rest) = strip_gm_session_header(rest);
+    let out = match timeout_line {
+        Some(line) => format!("{}\n{}", line, rest),
+        None => rest.to_string(),
+    };
+    (sid, out)
+}
+
 fn extract_session_id_from_plain_text_body(body_s: &str) -> Option<String> {
     let trimmed = body_s.trim_start();
     for prefix in ["sessionId=", "session_id=", "SESSION_ID="] {
@@ -3059,8 +3072,9 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     let (header_session_id, raw_body_s) = if body_is_json {
         (None, raw_body_s)
     } else {
-        let (sid, rest) = strip_gm_session_header(&raw_body_s);
-        (sid, rest.to_string())
+        let (envelope_sid, rest) = strip_gm_session_header(&raw_body_s);
+        let (body_sid, body_rest) = strip_body_session_header(rest);
+        (body_sid.or(envelope_sid), body_rest)
     };
     let (caller_timeout_ms, body_s) = if body_is_json {
         let (n, rest) = strip_timeout_ms_prefix_directive(&raw_body_s);
