@@ -634,6 +634,10 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         .iter()
         .map(|row| row_text(row, &["id"]))
         .collect();
+    let pending_total = folded_rows
+        .iter()
+        .filter(|row| status_matches_filter("pending", &row_status(row)))
+        .count();
     let selected: Vec<serde_json::Value> = folded_rows
         .into_iter()
         .filter(|row| {
@@ -733,6 +737,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         "items": items,
         "count": items.len(),
         "total": matched,
+        "pending_total": pending_total,
         "store_total": store_total,
         "limit": limit,
         "offset": offset,
