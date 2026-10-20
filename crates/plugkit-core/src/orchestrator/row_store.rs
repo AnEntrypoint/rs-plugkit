@@ -820,7 +820,14 @@ pub fn retire_to_log(
         "material": rows,
     });
     let entry = append_log(store, entry)?;
-    remove_item(store, id);
+    if !remove_item(store, id) && pkfs::exists(&item_path(store, id)) {
+        return Err(format!(
+            "{} is logged as {} but its item file {} could not be removed, so prd-list would keep it open",
+            id,
+            status,
+            item_path(store, id)
+        ));
+    }
     Ok(entry)
 }
 
