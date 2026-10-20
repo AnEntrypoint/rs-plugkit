@@ -444,6 +444,8 @@ orchestrator_dispatch_table! {
     "proc-signal" => proc_control::handle_signal(content),
     "subagent-start" => subagent::handle_start(content),
     "subagent-end" => subagent::handle_end(content),
+    "subagent-checkpoint" => subagent::handle_checkpoint(content),
+    "subagent-resume" => subagent::handle_resume(content),
     "memorize-continue" => handle_memorize_continue(content),
     "fsm-vendor" => fsm_vendor::handle_vendor(content),
     "fsm-validate" => fsm_vendor::handle_validate(content),

@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 const LEDGER_FILE: &str = ".subagent-ledger.jsonl";
 const END_STATUSES: &[&str] = &["done", "failed", "stopped"];
+const CAUSE_MAX_CHARS: usize = 500;
+const CHECKPOINT_MAX_BYTES: usize = 8192;
 #[cfg(target_arch = "wasm32")]
 const LEDGER_CAS_MAX_ATTEMPTS: u32 = 8;
 #[cfg(target_arch = "wasm32")]
@@ -80,7 +82,11 @@ pub fn lifecycle_running_count(cwd: &str, parent: &str, now_ms: u64, window_ms: 
     let mut latest: HashMap<String, (String, u64)> = HashMap::new();
     for row in parse_rows(&read_ledger(&ledger_path(cwd))) {
         let ts = row_ts(&row);
-        if body_str(&row, "parent") != parent || ts < since_ms || ts > now_ms {
+        if body_str(&row, "parent") != parent
+            || body_str(&row, "kind") == "checkpoint"
+            || ts < since_ms
+            || ts > now_ms
+        {
             continue;
         }
         latest.insert(
@@ -121,6 +127,9 @@ fn failure_response(failure: Failure) -> (String, String, i32) {
 fn compact_lines(raw: &str, now_ms: u64) -> String {
     let mut latest: HashMap<String, (String, u64)> = HashMap::new();
     for row in parse_rows(raw) {
+        if body_str(&row, "kind") == "checkpoint" {
+            continue;
+        }
         latest.insert(
             body_str(&row, "subagent").to_string(),
             (body_str(&row, "kind").to_string(), row_ts(&row)),
@@ -225,8 +234,13 @@ fn run_start(cwd: &str, parent: &str, subagent: &str, slice_id: &str) -> (String
 }
 
 #[cfg(target_arch = "wasm32")]
-fn run_end(cwd: &str, parent: &str, subagent: &str, status: &str) -> (String, String, i32) {
+fn run_end(cwd: &str, parent: &str, subagent: &str, status: &str, cause: &str) -> (String, String, i32) {
     let now = unsafe { host_now_ms() };
+    let cause_value = if cause.is_empty() {
+        Value::Null
+    } else {
+        Value::String(cause.to_string())
+    };
     let plan = |raw: &str| -> Result<Option<Value>, String> {
         let rows = parse_rows(raw);
         let ended = rows
@@ -248,6 +262,7 @@ fn run_end(cwd: &str, parent: &str, subagent: &str, status: &str) -> (String, St
             "parent": parent,
             "subagent": subagent,
             "status": status,
+            "cause": cause_value,
             "ts": now,
         })))
     };
@@ -263,13 +278,118 @@ fn run_end(cwd: &str, parent: &str, subagent: &str, status: &str) -> (String, St
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn run_checkpoint(cwd: &str, parent: &str, subagent: &str, checkpoint: &Value) -> (String, String, i32) {
+    let now = unsafe { host_now_ms() };
+    let plan = |raw: &str| -> Result<Option<Value>, String> {
+        let rows = parse_rows(raw);
+        let open = rows.iter().any(|r| {
+            body_str(r, "kind") == "start"
+                && body_str(r, "subagent") == subagent
+                && body_str(r, "parent") == parent
+        });
+        let ended = rows
+            .iter()
+            .any(|r| body_str(r, "kind") == "end" && body_str(r, "subagent") == subagent);
+        if !open || ended {
+            return Err("no open subagent".to_string());
+        }
+        Ok(Some(json!({
+            "kind": "checkpoint",
+            "parent": parent,
+            "subagent": subagent,
+            "checkpoint": checkpoint,
+            "ts": now,
+        })))
+    };
+    match append_event(&ledger_path(cwd), now, plan) {
+        Ok(_) => accept(json!({ "ok": true, "subagent_session_id": subagent, "ts": now })),
+        Err(failure) => failure_response(failure),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn run_resume(cwd: &str, parent: &str, subagent: &str, successor: &str) -> (String, String, i32) {
+    let now = unsafe { host_now_ms() };
+    let started: std::cell::RefCell<Option<Value>> = std::cell::RefCell::new(None);
+    let plan = |raw: &str| -> Result<Option<Value>, String> {
+        let rows = parse_rows(raw);
+        let checkpoint = rows
+            .iter()
+            .rev()
+            .find(|r| {
+                body_str(r, "kind") == "checkpoint"
+                    && body_str(r, "subagent") == subagent
+                    && body_str(r, "parent") == parent
+            })
+            .and_then(|r| r.get("checkpoint").cloned());
+        let Some(checkpoint) = checkpoint else {
+            return Err("no checkpoint recorded for this subagent".to_string());
+        };
+        let Some(last_end) = rows
+            .iter()
+            .rev()
+            .find(|r| body_str(r, "kind") == "end" && body_str(r, "subagent") == subagent)
+        else {
+            return Err("subagent has no end record: end it with status failed or stopped and a cause first".to_string());
+        };
+        if !matches!(body_str(last_end, "status"), "failed" | "stopped") {
+            return Err("subagent did not fail or stop: nothing to resume".to_string());
+        }
+        if rows
+            .iter()
+            .any(|r| body_str(r, "kind") == "start" && body_str(r, "subagent") == successor)
+        {
+            return Err("successor subagent session already exists".to_string());
+        }
+        let event = json!({
+            "kind": "start",
+            "parent": parent,
+            "subagent": successor,
+            "slice_id": "",
+            "status": Value::Null,
+            "resumes": subagent,
+            "checkpoint": checkpoint,
+            "cause": last_end.get("cause").cloned().unwrap_or(Value::Null),
+            "ts": now,
+        });
+        *started.borrow_mut() = Some(event.clone());
+        Ok(Some(event))
+    };
+    match append_event(&ledger_path(cwd), now, plan) {
+        Ok(true) => {
+            let event = started.borrow().clone().unwrap_or(Value::Null);
+            accept(json!({
+                "ok": true,
+                "resumed_from": subagent,
+                "subagent_session_id": successor,
+                "checkpoint": event.get("checkpoint").cloned().unwrap_or(Value::Null),
+                "cause": event.get("cause").cloned().unwrap_or(Value::Null),
+                "ts": now,
+            }))
+        }
+        Ok(false) => reject("resume was not recorded"),
+        Err(failure) => failure_response(failure),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_checkpoint(_cwd: &str, _parent: &str, _subagent: &str, _checkpoint: &Value) -> (String, String, i32) {
+    reject("subagent lifecycle requires the wasm32 host")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_resume(_cwd: &str, _parent: &str, _subagent: &str, _successor: &str) -> (String, String, i32) {
+    reject("subagent lifecycle requires the wasm32 host")
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn run_start(_cwd: &str, _parent: &str, _subagent: &str, _slice_id: &str) -> (String, String, i32) {
     reject("subagent lifecycle requires the wasm32 host")
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn run_end(_cwd: &str, _parent: &str, _subagent: &str, _status: &str) -> (String, String, i32) {
+fn run_end(_cwd: &str, _parent: &str, _subagent: &str, _status: &str, _cause: &str) -> (String, String, i32) {
     reject("subagent lifecycle requires the wasm32 host")
 }
 
@@ -311,5 +431,57 @@ pub fn handle_end(content: &str) -> (String, String, i32) {
     if !END_STATUSES.contains(&status) {
         return reject("invalid status");
     }
-    run_end(body_str(&body, "cwd"), parent, subagent, status)
+    let cause = body_str(&body, "cause").trim();
+    if status != "done" && cause.is_empty() {
+        return reject("cause required for a failed or stopped subagent");
+    }
+    if cause.chars().count() > CAUSE_MAX_CHARS {
+        return reject("cause must be at most 500 characters");
+    }
+    run_end(body_str(&body, "cwd"), parent, subagent, status, cause)
+}
+
+pub fn handle_checkpoint(content: &str) -> (String, String, i32) {
+    let body: Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(e) => return reject(&format!("invalid JSON: {e}")),
+    };
+    let parent = body_str(&body, "parent_session_id");
+    let subagent = body_str(&body, "subagent_session_id");
+    if parent.is_empty() {
+        return reject("parent_session_id required");
+    }
+    if !is_valid_subagent_id(parent, subagent) {
+        return reject("invalid subagent session id");
+    }
+    let Some(checkpoint) = body.get("checkpoint") else {
+        return reject("checkpoint required: a JSON object naming the row, stage and receipt to resume from");
+    };
+    if !checkpoint.is_object() {
+        return reject("checkpoint must be a JSON object");
+    }
+    if checkpoint.to_string().len() > CHECKPOINT_MAX_BYTES {
+        return reject("checkpoint exceeds 8192 bytes");
+    }
+    run_checkpoint(body_str(&body, "cwd"), parent, subagent, checkpoint)
+}
+
+pub fn handle_resume(content: &str) -> (String, String, i32) {
+    let body: Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(e) => return reject(&format!("invalid JSON: {e}")),
+    };
+    let parent = body_str(&body, "parent_session_id");
+    let subagent = body_str(&body, "subagent_session_id");
+    let successor = body_str(&body, "new_subagent_session_id");
+    if parent.is_empty() {
+        return reject("parent_session_id required");
+    }
+    if subagent.is_empty() {
+        return reject("subagent_session_id required");
+    }
+    if !is_valid_subagent_id(parent, successor) {
+        return reject("new_subagent_session_id must start with the parent id and contain -sub");
+    }
+    run_resume(body_str(&body, "cwd"), parent, subagent, successor)
 }
