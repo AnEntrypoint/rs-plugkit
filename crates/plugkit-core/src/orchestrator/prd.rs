@@ -385,12 +385,18 @@ const PRD_LIST_ITEMS_BUDGET_CHARS: usize = 20_000;
 
 const PRD_TITLE_FIELDS: &[&str] = &["title", "subject"];
 
-fn load_blocks() -> Result<Vec<Value>, (String, i32)> {
-    Ok(row_store::read_blocks(&row_store::Store::prd())?.blocks)
+fn load_rows() -> Result<(Vec<serde_json::Value>, Vec<row_store::SkippedRow>), (String, i32)> {
+    let (set, skipped) = row_store::read_blocks_listing(&row_store::Store::prd())?;
+    Ok((set.blocks.iter().filter_map(row_to_json).collect(), skipped))
 }
 
-fn load_rows() -> Result<Vec<serde_json::Value>, (String, i32)> {
-    Ok(load_blocks()?.iter().filter_map(row_to_json).collect())
+fn skipped_rows_json(skipped: &[row_store::SkippedRow]) -> serde_json::Value {
+    serde_json::Value::Array(
+        skipped
+            .iter()
+            .map(|(file, reason)| serde_json::json!({ "file": file, "reason": reason }))
+            .collect(),
+    )
 }
 
 fn row_to_json(item: &Value) -> Option<serde_json::Value> {
@@ -488,13 +494,17 @@ pub(super) fn request_flag(request: &serde_json::Value, fields: &[&str]) -> Opti
 }
 
 pub fn handle_list_full() -> (String, String, i32) {
-    let rows = match load_rows() {
-        Ok(rows) => rows,
+    let (rows, skipped) = match load_rows() {
+        Ok(loaded) => loaded,
         Err((message, code)) => return (String::new(), message, code),
     };
     let count = rows.len();
+    let mut reply = serde_json::json!({ "items": rows, "count": count });
+    if !skipped.is_empty() {
+        reply["skipped_rows"] = skipped_rows_json(&skipped);
+    }
     (
-        serde_json::json!({ "items": rows, "count": count }).to_string(),
+        reply.to_string(),
         String::new(),
         0,
     )
@@ -574,8 +584,8 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         Ok(limit) => limit,
         Err(message) => return (String::new(), message, 1),
     };
-    let rows = match load_rows() {
-        Ok(rows) => rows,
+    let (rows, skipped_rows) = match load_rows() {
+        Ok(loaded) => loaded,
         Err((message, code)) => return (String::new(), message, code),
     };
     let store_total = rows.len();
@@ -734,6 +744,9 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
     });
     if truncated {
         reply["hint"] = serde_json::json!("more rows: repeat with offset set to next_offset");
+    }
+    if !skipped_rows.is_empty() {
+        reply["skipped_rows"] = skipped_rows_json(&skipped_rows);
     }
     if log.dropped_torn_lines > 0 {
         reply["dropped_torn_lines"] = serde_json::json!(log.dropped_torn_lines);

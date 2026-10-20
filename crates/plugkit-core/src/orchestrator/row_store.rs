@@ -356,18 +356,43 @@ pub fn maybe_absorb(store: &Store) -> Result<(), String> {
     Ok(())
 }
 
+pub type SkippedRow = (String, String);
+
 pub fn read_blocks(store: &Store) -> Result<ReadSet, (String, i32)> {
+    read_blocks_mode(store, false).map(|(set, _)| set)
+}
+
+pub fn read_blocks_listing(store: &Store) -> Result<(ReadSet, Vec<SkippedRow>), (String, i32)> {
+    read_blocks_mode(store, true)
+}
+
+fn read_blocks_mode(
+    store: &Store,
+    skip_unreadable: bool,
+) -> Result<(ReadSet, Vec<SkippedRow>), (String, i32)> {
     let mut raw: BTreeMap<String, String> = BTreeMap::new();
     let mut blocks: Vec<Value> = Vec::new();
+    let mut skipped: Vec<SkippedRow> = Vec::new();
+    let mut present: BTreeSet<String> = BTreeSet::new();
     for stem in listing_stems(store) {
         let path = item_path_by_stem(store, &stem);
+        present.insert(stem.clone());
         let Some(text) = pkfs::read_to_string(&path) else {
-            return Err((
-                format!("{} exists but could not be read", path),
-                1,
-            ));
+            let message = format!("{} exists but could not be read", path);
+            if skip_unreadable {
+                skipped.push((path, message));
+                continue;
+            }
+            return Err((message, 1));
         };
-        let parsed = parse_blocks(&path, &text)?;
+        let parsed = match parse_blocks(&path, &text) {
+            Ok(parsed) => parsed,
+            Err((message, _)) if skip_unreadable => {
+                skipped.push((path, message));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         raw.insert(stem, text);
         blocks.extend(parsed);
     }
@@ -379,7 +404,7 @@ pub fn read_blocks(store: &Store) -> Result<ReadSet, (String, i32)> {
                 let resolved = resolved_stems(store).map_err(|message| (message, 1))?;
                 for block in parsed {
                     let stem = item_stem(block_id(&block).unwrap_or_default().as_str());
-                    if raw.contains_key(&stem) || resolved.contains(&stem) {
+                    if present.contains(&stem) || resolved.contains(&stem) {
                         continue;
                     }
                     blocks.push(block);
@@ -387,7 +412,7 @@ pub fn read_blocks(store: &Store) -> Result<ReadSet, (String, i32)> {
             }
         }
     }
-    Ok(ReadSet { blocks, raw })
+    Ok((ReadSet { blocks, raw }, skipped))
 }
 
 pub enum WriteErr {
