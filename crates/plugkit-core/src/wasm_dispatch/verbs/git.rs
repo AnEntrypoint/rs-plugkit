@@ -1393,12 +1393,22 @@ fn bin_drift_pathspec_covers(pathspecs: &[String], path: &str) -> bool {
     })
 }
 
-fn bin_drift_commit_refusal(repo: Option<&str>, paths: &[String], add_all: bool) -> Option<String> {
+fn bin_drift_commit_refusal(
+    repo: Option<&str>,
+    paths: &[String],
+    add_all: bool,
+    session: &str,
+) -> Option<String> {
     let head_sha = resolve_ref(repo, "HEAD")?;
     if !bin_drift_tracks_gate(repo, &head_sha) {
         return None;
     }
     let index_only = !add_all && paths.is_empty();
+    let session_staged = if index_only {
+        git_add_staged_recorded(repo, session)
+    } else {
+        Vec::new()
+    };
     let porcelain = git_push_porcelain_in(repo);
     let mut touches_gate = false;
     let mut committed_inputs: Vec<String> = Vec::new();
@@ -1412,7 +1422,7 @@ fn bin_drift_commit_refusal(repo: Option<&str>, paths: &[String], add_all: bool)
         let in_commit = if add_all {
             true
         } else if index_only {
-            staged
+            staged && session_staged.iter().any(|p| p == path)
         } else {
             bin_drift_pathspec_covers(paths, path)
         };
@@ -3707,7 +3717,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 with_exclusion_report(json!({ "nothing_to_commit": true, "requested_paths": paths }), cwd, &paths),
             ));
         }
-        if let Some(reason) = bin_drift_commit_refusal(cwd, &paths, add_all) {
+        if let Some(reason) = bin_drift_commit_refusal(cwd, &paths, add_all, &lane_session) {
             return Ok(err_json(
                 "git_commit",
                 json!({
