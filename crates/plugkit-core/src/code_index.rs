@@ -5361,6 +5361,16 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             && !exclude_globs.iter().any(|g| glob_scopes.iter().any(|s| g.admits(root, *s, path)))
     };
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
+    if let Err(listing) = list_dir_checked(root) {
+        let denied = listing.contains("EACCES") || listing.contains("Permission denied");
+        return json!({
+            "ok": false,
+            "error_code": if denied { "EACCES" } else { "root_unlistable" },
+            "error": format!("codesearch could not list root {root}: the directory exists but the host could not read it ({listing})"),
+            "path": root,
+            "pattern": req.pattern,
+        });
+    }
     let listing_started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore, true) {
         Ok(u) => u,
