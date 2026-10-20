@@ -1842,7 +1842,7 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
     }
     if reply_cut_by_hit_cap {
         bounds.push(format!(
-            "the hit cap cut at {} matches",
+            "the hit cap cut at {} matches; raise max_matches (or k) to see more, or narrow with path/glob",
             num("matches_truncated_at")
         ));
     }
