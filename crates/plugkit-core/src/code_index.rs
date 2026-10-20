@@ -6142,9 +6142,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 ),
             }
         } else if req.regex && carries_regex_metacharacter(req.pattern) {
+            let alternation = if req.pattern.contains('|') { "a \"|\" alternated and " } else { "" };
             format!(
-                "no line matched /{}/ as ONE regular expression: mode \"regex\" honoured every metacharacter as written, so a \"|\" alternated and the query was never split into terms",
-                req.pattern
+                "no line matched /{}/ as ONE regular expression: every metacharacter was honoured as written, so {}the query was never split into terms",
+                req.pattern, alternation
             )
         } else if req.pattern.split_whitespace().count() > 1 {
             format!(
