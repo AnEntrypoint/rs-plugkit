@@ -1426,7 +1426,9 @@ const FS_READDIR_DEFAULT_LIMIT: usize = 200;
 const FS_READDIR_MAX_LIMIT: usize = 1000;
 
 fn fs_readdir(body: &Value) -> u64 {
-    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let requested = body.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let joined = root_joined_read_path(requested, body);
+    let path = joined.as_str();
     if let Some(rejection) = read_path_rejection("fs_readdir", path, body) {
         return rejection;
     }
@@ -1489,11 +1491,42 @@ fn fs_readdir_unlisted(path: &str) -> u64 {
     )
 }
 
+fn root_joined_read_path(path: &str, body: &Value) -> String {
+    let root = ["root", "projectPath"]
+        .iter()
+        .find_map(|key| body.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|root| !root.is_empty());
+    let Some(root) = root else {
+        return path.to_string();
+    };
+    if path_is_absolute(path) {
+        return path.to_string();
+    }
+    let joined = format!(
+        "{}/{}",
+        root.replace('\\', "/").trim_end_matches('/'),
+        path.replace('\\', "/")
+    );
+    let Some(cwd) = super::host_abi::host_cwd_string() else {
+        return joined;
+    };
+    let cwd = cwd.replace('\\', "/");
+    let relative = joined
+        .strip_prefix(cwd.trim_end_matches('/'))
+        .and_then(|rest| rest.strip_prefix('/'))
+        .filter(|rel| !rel.is_empty())
+        .map(str::to_string);
+    relative.unwrap_or(joined)
+}
+
 fn fs_stat(body: &Value) -> u64 {
-    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    if path.is_empty() {
+    let requested = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if requested.is_empty() {
         return err("fs_stat", "path required");
     }
+    let joined = root_joined_read_path(requested, body);
+    let path = joined.as_str();
     if let Some(rejection) = read_path_rejection("fs_stat", path, body) {
         return rejection;
     }
