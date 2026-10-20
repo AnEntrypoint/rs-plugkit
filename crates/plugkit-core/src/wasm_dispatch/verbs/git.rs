@@ -5431,6 +5431,29 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                 .trim()
                 .parse()
                 .unwrap_or(0);
+            if let Ok(porcelain) = checked_git_porcelain_scoped("git_finalize", cwd_ref, &paths) {
+                if porcelain.trim().is_empty() {
+                    let head_now = head_before_any_commit.trim().to_string();
+                    return ok(
+                        "git_finalize",
+                        with_exclusion_report(
+                            json!({
+                                "no_change": true,
+                                "nothing_to_commit": true,
+                                "committed": false,
+                                "pushed": false,
+                                "sha": head_now[..head_now.len().min(10)].to_string(),
+                                "sha_full": head_now,
+                                "requested_paths": paths.clone(),
+                                "unpushed_commits_ahead_of_upstream": ahead_n,
+                                "next_dispatch": "instruction",
+                            }),
+                            cwd_ref,
+                            &paths,
+                        ),
+                    );
+                }
+            }
             return err_json(
                 "git_finalize",
                 json!({
