@@ -16,7 +16,7 @@ pub const RETAINED_ENTRIES: usize = MAX_ENTRIES;
 
 pub fn ledger_path(cwd: &str) -> String {
     if cwd.is_empty() {
-        ".gm/exec-spool/.dispatch-ledger.json".to_string()
+        crate::pkfs::anchor(".gm/exec-spool/.dispatch-ledger.json")
     } else {
         format!(
             "{}/.gm/exec-spool/.dispatch-ledger.json",
