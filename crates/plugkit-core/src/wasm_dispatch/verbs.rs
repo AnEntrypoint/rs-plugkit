@@ -1424,6 +1424,58 @@ catch(e){process.stdout.write(JSON.stringify({ok:false,error:String((e&&e.code)|
 
 const FS_READDIR_DEFAULT_LIMIT: usize = 200;
 const FS_READDIR_MAX_LIMIT: usize = 1000;
+const FS_READDIR_DEFAULT_MAX_ENTRIES: usize = 1000;
+const FS_READDIR_MAX_ENTRIES: usize = 5000;
+const FS_READDIR_MAX_DEPTH: usize = 16;
+
+fn readdir_entry_name(entry: &Value) -> Option<String> {
+    entry
+        .as_str()
+        .or_else(|| entry.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+fn fs_readdir_walk(root: &str, root_names: Vec<Value>, recursive: bool, cap: usize) -> (Vec<Value>, bool) {
+    let mut out: Vec<Value> = Vec::new();
+    let mut pending: Vec<(String, String, usize)> = Vec::new();
+    let mut dir = match root.trim_end_matches('/') {
+        "" | "." => String::new(),
+        other => other.to_string(),
+    };
+    let mut prefix = String::new();
+    let mut depth = 0usize;
+    let mut names = root_names;
+    loop {
+        let mut sorted: Vec<String> = names.iter().filter_map(readdir_entry_name).collect();
+        sorted.sort();
+        for name in sorted {
+            if out.len() >= cap {
+                return (out, true);
+            }
+            let full = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
+            let stat = super::host_abi::host_stat(&full).filter(|v| !v.is_null());
+            let field = |key: &str| stat.as_ref().and_then(|s| s.get(key)).cloned().unwrap_or(Value::Null);
+            let is_dir = field("isDirectory").as_bool() == Some(true);
+            let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            out.push(json!({
+                "path": rel,
+                "isDirectory": is_dir,
+                "size": field("size"),
+                "mtime_ms": field("mtime_ms"),
+            }));
+            if recursive && is_dir && depth + 1 < FS_READDIR_MAX_DEPTH {
+                pending.push((full, rel, depth + 1));
+            }
+        }
+        let Some((next_dir, next_prefix, next_depth)) = pending.pop() else {
+            return (out, false);
+        };
+        dir = next_dir;
+        prefix = next_prefix;
+        depth = next_depth;
+        names = super::host_abi::host_readdir(&dir).unwrap_or_default();
+    }
+}
 
 fn fs_readdir(body: &Value) -> u64 {
     let requested = body.get("path").and_then(|v| v.as_str()).unwrap_or(".");
@@ -1432,8 +1484,25 @@ fn fs_readdir(body: &Value) -> u64 {
     if let Some(rejection) = read_path_rejection("fs_readdir", path, body) {
         return rejection;
     }
-    let Some(entries) = super::host_abi::host_readdir(path) else {
+    let Some(names) = super::host_abi::host_readdir(path) else {
         return fs_readdir_unlisted(path);
+    };
+    let recursive = body.get("recursive").and_then(Value::as_bool) == Some(true);
+    let mtime = recursive || body.get("mtime").and_then(Value::as_bool) == Some(true);
+    let cap = body
+        .get("max_entries")
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+        .map(|n| (n as usize).min(FS_READDIR_MAX_ENTRIES));
+    let (entries, capped, cap_applied) = if mtime {
+        let applied = cap.unwrap_or(FS_READDIR_DEFAULT_MAX_ENTRIES);
+        let (walked, capped) = fs_readdir_walk(path, names, recursive, applied);
+        (walked, capped, applied)
+    } else {
+        match cap {
+            Some(applied) if names.len() > applied => (names.into_iter().take(applied).collect(), true, applied),
+            _ => (names, false, cap.unwrap_or(0)),
+        }
     };
     let limit = body
         .get("limit")
@@ -1454,10 +1523,18 @@ fn fs_readdir(body: &Value) -> u64 {
         "limit": limit,
         "has_more": has_more,
         "next_offset": if has_more { json!(next) } else { Value::Null },
+        "recursive": recursive,
+        "mtime": mtime,
     });
     if has_more {
         reply["partial"] = json!(true);
         reply["partial_reason"] = json!("listing_paged");
+    }
+    if capped {
+        reply["partial"] = json!(true);
+        reply["partial_reason"] = json!("max_entries");
+        reply["truncated"] = json!(true);
+        reply["max_entries"] = json!(cap_applied);
     }
     pack(reply.to_string())
 }
