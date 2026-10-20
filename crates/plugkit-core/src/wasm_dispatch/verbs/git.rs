@@ -7938,27 +7938,32 @@ function emit(kind, k, j, s, ts, m) {
   total++
   if (TAILMODE) {
     R++
-    slot = R % CAP
-    RK[slot] = k; RJ[slot] = j; RSTEP[slot] = s; RT[slot] = ts; RM[slot] = m
+    REC[R] = k "\034" j "\034" s "\034" ts "\034" m
+    if (!(j in JN)) { JN[j] = 0; NJ++; JOBS[NJ] = j }
+    JN[j]++
+    JSQ[j, JN[j]] = R
+    if (iserr(m) && NE < CAP) { NE++; ERRQ[NE] = R }
     next
   }
   if (printed < CAP && used <= BCAP) emit("L", k, j, s, ts, m)
 }
 END {
   if (TAILMODE && R > 0) {
-    n = (R < CAP) ? R : CAP
-    start = R + 1
-    bytes = 0
-    for (i = R; i > R - n; i--) {
-      slot = i % CAP
-      cost = length(RJ[slot]) + length(RSTEP[slot]) + length(RT[slot]) + length(RM[slot]) + 8
-      if (start <= R && bytes + cost > BCAP) break
-      bytes += cost
-      start = i
+    left = CAP
+    for (e = 1; e <= NE && left > 0; e++) { SEL[ERRQ[e]] = 1; left-- }
+    for (jj = 1; jj <= NJ && left > 0; jj++) {
+      j = JOBS[jj]
+      for (t = JN[j] - TAIL + 1; t <= JN[j] && left > 0; t++) {
+        if (t < 1) continue
+        q = JSQ[j, t]
+        if (!(q in SEL)) { SEL[q] = 1; left-- }
+      }
     }
-    for (i = start; i <= R; i++) {
-      slot = i % CAP
-      emit("L", RK[slot], RJ[slot], RSTEP[slot], RT[slot], RM[slot])
+    for (q = R; q >= 1 && left > 0; q--) if (!(q in SEL)) { SEL[q] = 1; left-- }
+    for (q = 1; q <= R; q++) {
+      if (!(q in SEL)) continue
+      split(REC[q], f, "\034")
+      emit("L", f[1] + 0, f[2], f[3], f[4], f[5])
     }
   }
   if (FO && TAIL > 0) {
@@ -8000,7 +8005,10 @@ pub(super) fn ci_log_second_prefix(stamp: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-pub(super) fn ci_log_steps(repo: &str, run_id: u64) -> Result<Vec<CiLogStep>, String> {
+pub(super) fn ci_log_steps(
+    repo: &str,
+    run_id: u64,
+) -> Result<(Vec<CiLogStep>, Vec<(String, String)>), String> {
     let parsed = match ci_status_gh_api_json(&format!(
         "repos/{}/actions/runs/{}/jobs?per_page=100",
         repo, run_id
@@ -8017,6 +8025,7 @@ pub(super) fn ci_log_steps(repo: &str, run_id: u64) -> Result<Vec<CiLogStep>, St
         .ok_or_else(|| "jobs response carries no jobs array".to_string())?;
     let failed = |v: Option<&str>| matches!(v, Some("failure" | "timed_out" | "startup_failure"));
     let mut steps = Vec::new();
+    let mut conclusions = Vec::new();
     for job in jobs {
         let job_failed = failed(job.get("conclusion").and_then(Value::as_str));
         let listed = job
@@ -8028,6 +8037,13 @@ pub(super) fn ci_log_steps(repo: &str, run_id: u64) -> Result<Vec<CiLogStep>, St
             .iter()
             .any(|s| failed(s.get("conclusion").and_then(Value::as_str)));
         let job_name = ci_log_table_field(job.get("name").and_then(Value::as_str).unwrap_or(""));
+        conclusions.push((
+            job_name.clone(),
+            job.get("conclusion")
+                .and_then(Value::as_str)
+                .unwrap_or("in_progress")
+                .to_string(),
+        ));
         let job_id = job.get("id").and_then(Value::as_u64);
         let job_url = job.get("html_url").and_then(Value::as_str).map(String::from);
         let before = steps.len();
@@ -8061,7 +8077,7 @@ pub(super) fn ci_log_steps(repo: &str, run_id: u64) -> Result<Vec<CiLogStep>, St
             });
         }
     }
-    Ok(steps)
+    Ok((steps, conclusions))
 }
 
 pub(super) fn ci_log_step_table(steps: &[CiLogStep]) -> (String, usize) {
@@ -8461,6 +8477,55 @@ pub(super) fn ci_log_gh_failure_class(detail: &str) -> (Option<&'static str>, Op
     }
 }
 
+pub(super) fn ci_log_explain_gh_failure(
+    error_code: Option<&'static str>,
+    hint: Option<&'static str>,
+    repo: &str,
+    run_id: u64,
+    conclusions: &[(String, String)],
+) -> (Option<&'static str>, Option<String>) {
+    let inert = |c: &str| c == "cancelled" || c == "skipped";
+    let listing = |keep: &dyn Fn(&str) -> bool| {
+        conclusions
+            .iter()
+            .filter(|(_, c)| keep(c.as_str()))
+            .map(|(name, c)| format!("{} ({})", name, c))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match error_code {
+        Some("run_not_found") => (
+            error_code,
+            Some(format!(
+                "run {} was not found in {}; pass repo (owner/name) when the run belongs to another repository",
+                run_id, repo
+            )),
+        ),
+        Some("log_unavailable") if !conclusions.is_empty() => {
+            let ran = listing(&|c: &str| !inert(c));
+            if ran.is_empty() {
+                (
+                    Some("run_cancelled"),
+                    Some(format!(
+                        "every job of run {} was cancelled or skipped ({}); gh keeps no log for those jobs",
+                        run_id,
+                        listing(&|c: &str| inert(c))
+                    )),
+                )
+            } else {
+                (
+                    Some("log_expired"),
+                    Some(format!(
+                        "jobs that ran in run {} ({}) have no log in gh; job logs are kept for a limited retention period, so these logs have expired",
+                        run_id, ran
+                    )),
+                )
+            }
+        }
+        _ => (error_code, hint.map(String::from)),
+    }
+}
+
 pub(super) fn ci_log_is_transient_failure(detail: &str) -> bool {
     let lower = detail.to_ascii_lowercase();
     [
@@ -8540,10 +8605,15 @@ pub(super) fn ci_log(body: &Value) -> u64 {
         Ok(tail_lines) => tail_lines,
         Err(detail) => return err_json("ci-log", detail),
     };
-    let (steps, step_labels_error) = match ci_log_steps(&repo, run_id) {
-        Ok(steps) => (steps, None),
-        Err(reason) => (Vec::new(), Some(reason)),
+    let (steps, job_conclusions, step_labels_error) = match ci_log_steps(&repo, run_id) {
+        Ok((steps, conclusions)) => (steps, conclusions, None),
+        Err(reason) => (Vec::new(), Vec::new(), Some(reason)),
     };
+    let cancelled_jobs: Vec<String> = job_conclusions
+        .iter()
+        .filter(|(_, conclusion)| conclusion == "cancelled")
+        .map(|(name, _)| name.clone())
+        .collect();
     if failed_only {
         if let Some(reason) = &step_labels_error {
             return err_json(
@@ -8621,6 +8691,8 @@ pub(super) fn ci_log(body: &Value) -> u64 {
     if let Some(code) = ci_log_marker(&stderr, CI_LOG_FAILURE_MARKER) {
         let detail = ci_status_truncate_for_error(&stderr, 400);
         let (error_code, hint) = ci_log_gh_failure_class(&detail);
+        let (error_code, hint) =
+            ci_log_explain_gh_failure(error_code, hint, &repo, run_id, &job_conclusions);
         let mut reply = json!({
             "error": format!("gh exited {} reading the log of {} run {}", code, repo, run_id),
             "detail": detail,
@@ -8775,6 +8847,12 @@ pub(super) fn ci_log(body: &Value) -> u64 {
                 "run {} was picked from the sha and has no failing step; pass its run_id from ci-status failing_jobs (or job_id) to read the failing workflow run",
                 run_id
             ));
+        } else if failures.is_empty() && !cancelled_jobs.is_empty() {
+            data["hint"] = json!(format!(
+                "no job in this run failed; {} job(s) were cancelled and produced no log: {}",
+                cancelled_jobs.len(),
+                cancelled_jobs.join(", ")
+            ));
         } else if failures.is_empty() {
             data["hint"] = json!("no job in this run failed; drop failed_only to read the whole log");
         } else if matched == 0 {
@@ -8784,6 +8862,9 @@ pub(super) fn ci_log(body: &Value) -> u64 {
             ));
         }
         data["attempts"] = json!(attempts);
+        if !cancelled_jobs.is_empty() {
+            data["cancelled_jobs"] = json!(cancelled_jobs);
+        }
         return pack(json!({ "ok": true, "verb": "ci-log", "data": data }).to_string());
     }
     let truncated = truncated_by.is_some() || lines.len() < matched;
@@ -8822,13 +8903,22 @@ pub(super) fn ci_log(body: &Value) -> u64 {
         "attempts": attempts,
         "log_source": if fallback_jobs.is_empty() { "run" } else { "per_job" },
     });
+    if !cancelled_jobs.is_empty() {
+        data["cancelled_jobs"] = json!(cancelled_jobs);
+    }
     if lines.is_empty() {
-        let hint = if matched == 0 && filtered {
-            "no line matched these filters; narrow job, step or pattern, or drop the filters to see the whole log"
+        let hint = if !cancelled_jobs.is_empty() && matched == 0 {
+            format!(
+                "{} job(s) were cancelled and produced no log: {}",
+                cancelled_jobs.len(),
+                cancelled_jobs.join(", ")
+            )
+        } else if matched == 0 && filtered {
+            "no line matched these filters; narrow job, step or pattern, or drop the filters to see the whole log".to_string()
         } else if matched == 0 {
-            "gh returned no log lines for this run"
+            "gh returned no log lines for this run".to_string()
         } else {
-            "no line fit the max_chars budget; raise max_chars"
+            "no line fit the max_chars budget; raise max_chars".to_string()
         };
         data["hint"] = json!(hint);
     }
