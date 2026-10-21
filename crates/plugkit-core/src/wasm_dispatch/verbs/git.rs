@@ -1587,6 +1587,17 @@ pub(super) fn git_push(body: &Value) -> u64 {
         Some(name) => name.to_string(),
         None => "origin".to_string(),
     };
+    for key in ["rev", "sha"] {
+        if body
+            .get(key)
+            .is_some_and(|v| v.as_str().map_or(true, |s| s.trim().is_empty()))
+        {
+            return err(
+                "git_push",
+                &format!("{key} must be a non-empty string naming the commit to publish"),
+            );
+        }
+    }
     let origin_remote = remote_name == "origin";
     let explicit_branch = body
         .get("branch")
@@ -1594,6 +1605,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
         .map(String::from);
     let explicit_source_ref = body
         .get("rev")
+        .or_else(|| body.get("sha"))
         .or_else(|| body.get("source_ref"))
         .and_then(|v| v.as_str())
         .map(str::trim)
@@ -6494,6 +6506,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
                 "ff_only": ff_only,
                 "conflicted": true,
                 "conflicts": conflicts,
+                "colliding_paths": conflicts,
                 "head_before": head_before,
                 "head_after": head_after,
                 "hint": "The pull landed, but the shelved local changes conflict with it and the stash remains. Resolve the conflicted paths, git_add them, then git_commit; git_stash_pop restores the shelved changes once the worktree is clean.",
@@ -6594,6 +6607,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
                 "ff_only": ff_only,
                 "conflicted": !conflicts.is_empty(),
                 "conflicts": conflicts,
+                "colliding_paths": conflicts,
                 "head_before": head_before,
                 "hint": "resolve conflicted paths, git_add them, then git_commit; or git_merge_abort to restore the pre-pull HEAD",
             }),
@@ -6612,6 +6626,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
                 "ff_only": ff_only,
                 "conflicted": true,
                 "conflicts": conflicts,
+                "colliding_paths": conflicts,
                 "head_before": head_before,
                 "head_after": head_after,
                 "hint": "The pull landed, but the shelved local changes conflict with it and the stash remains. Resolve the conflicted paths, git_add them, then git_commit; git_stash_pop restores the shelved changes once the worktree is clean.",
@@ -7633,10 +7648,7 @@ pub(super) fn ci_status_summarize(
         let gh_status = run.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let conclusion = run.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
         let mut per_run_status = ci_status_conclusion_to_status(conclusion, gh_status);
-        let html_url = run
-            .get("html_url")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let html_url = ci_status_run_url(repo, run);
         if run_url.is_none() {
             run_url = html_url.clone();
         }
@@ -7688,6 +7700,17 @@ pub(super) fn ci_status_summarize(
             "transport": source,
         },
     })
+}
+
+fn ci_status_run_url(repo: &str, run: &Value) -> Option<String> {
+    run.get("html_url")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .or_else(|| {
+            run.get("id")
+                .and_then(Value::as_u64)
+                .map(|id| format!("https://github.com/{}/actions/runs/{}", repo, id))
+        })
 }
 
 pub(super) fn ci_status_collect_run_jobs(
