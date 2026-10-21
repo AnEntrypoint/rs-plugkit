@@ -3058,15 +3058,27 @@ fn default_git_root(verb: &str, body: &Value) -> Result<Value, u64> {
     if body_cwd(body).is_some_and(|c| !c.is_empty()) {
         return Ok(body.clone());
     }
-    let Some(root) = super::host_abi::host_cwd_string().filter(|r| !r.is_empty()) else {
-        return Err(err(
-            verb,
-            "cwd-required: no cwd was passed and the dispatch project root is unknown; pass cwd set to the project root containing .gm/exec-spool",
-        ));
+    let path_alias = body
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|p| !p.is_empty() && verb == "git_pull");
+    let root = super::host_abi::host_cwd_string().filter(|r| !r.is_empty());
+    let target = match (path_alias, root) {
+        (Some(p), Some(r)) if !std::path::Path::new(p).is_absolute() => {
+            format!("{}/{}", r.trim_end_matches('/'), p)
+        }
+        (Some(p), _) => p.to_string(),
+        (None, Some(r)) => r,
+        (None, None) => {
+            return Err(err(
+                verb,
+                "cwd-required: no cwd was passed and the dispatch project root is unknown; pass cwd set to the project root containing .gm/exec-spool",
+            ));
+        }
     };
     let mut defaulted = body.clone();
     if let Some(map) = defaulted.as_object_mut() {
-        map.insert("cwd".to_string(), json!(root));
+        map.insert("cwd".to_string(), json!(target));
     }
     Ok(defaulted)
 }
