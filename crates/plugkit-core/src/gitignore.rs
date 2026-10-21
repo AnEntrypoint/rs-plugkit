@@ -203,6 +203,7 @@ pub fn ensure_managed_gitignore(cwd: &str) -> Result<bool, String> {
     let mut block = String::new();
     block.push_str(START_MARKER);
     block.push('\n');
+    block.push_str("# .gm/prd-log.jsonl, .gm/mutables-log.jsonl and .gm/expansion-audit.jsonl are append-only state that stays tracked, so no rule here ignores them\n");
     for entry in MANAGED_ENTRIES {
         block.push_str(entry);
         block.push('\n');
