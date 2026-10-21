@@ -236,8 +236,10 @@ metatheory describes, bounded rather than a full unbounded proof (which
 would need a proof assistant, not a Rust crate), but real and executed
 rather than asserted in a doc comment.
 
-Wasm-direct verbs: `fs_read`/`fs_write`/`fs_stat`/`fs_readdir` (the three read
-verbs accept `{"allowOutsideRoot": true}` to address an absolute path outside
+Wasm-direct verbs: `fs_read`/`fs_write`/`fs_edit`/`fs_stat`/`fs_readdir` (`fs_edit`
+takes `path`, `old_string` and `new_string` and replaces one exact occurrence,
+refusing with `edit_no_match` or `edit_ambiguous` unless `old_string` occurs
+exactly once; the three read verbs accept `{"allowOutsideRoot": true}` to address an absolute path outside
 the project root -- per call, never inferred, `".."` still refused; `fs_write`
 ignores it and stays project-only), `scan_deps`
 (supply-chain scan for the HiddenSpawn-class obfuscated-dropper pattern:

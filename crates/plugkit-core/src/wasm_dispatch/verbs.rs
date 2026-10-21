@@ -384,6 +384,7 @@ pub enum Capability {
 const VERB_CAPABILITIES: &[(&str, Capability)] = &[
     ("fs_read", Capability::ProjectPath),
     ("fs_write", Capability::ProjectPath),
+    ("fs_edit", Capability::ProjectPath),
     ("fs_stat", Capability::ProjectPath),
     ("fs_readdir", Capability::ProjectPath),
     ("scan_deps", Capability::ProjectPathOrGrantedRoot),
@@ -407,6 +408,7 @@ fn guarded_verb_is_dispatchable(verb: &str) -> bool {
         verb,
         "fs_read"
             | "fs_write"
+            | "fs_edit"
             | "fs_stat"
             | "fs_readdir"
             | "scan_deps"
@@ -1318,6 +1320,97 @@ fn fs_write(body: &Value) -> u64 {
             "error_code": parents.get("code").and_then(Value::as_str).unwrap_or(ERR_CODE_FAILED),
             "path": path,
             "blocking_path": parents.get("blocking").cloned().unwrap_or(Value::Null),
+            "next_dispatch": "fs_stat",
+        }),
+    )
+}
+
+fn fs_edit(body: &Value) -> u64 {
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if path.is_empty() {
+        return err("fs_edit", "path required");
+    }
+    if !path_within_project(path) {
+        return err("fs_edit", &path_outside_project_message(path, false));
+    }
+    let (Some(old), Some(new)) = (
+        body.get("old_string").and_then(|v| v.as_str()),
+        body.get("new_string").and_then(|v| v.as_str()),
+    ) else {
+        return err_json_coded(
+            "fs_edit",
+            ERR_CODE_INVALID_ARGS,
+            json!({
+                "error": "fs_edit needs old_string (the exact text to replace) and new_string (its replacement, empty to delete) as JSON strings",
+                "path": path,
+                "next_dispatch": "fs_read",
+            }),
+        );
+    };
+    if old.is_empty() {
+        return err_json_coded(
+            "fs_edit",
+            ERR_CODE_INVALID_ARGS,
+            json!({
+                "error": "old_string must not be empty; an empty string matches every position",
+                "path": path,
+                "next_dispatch": "fs_read",
+            }),
+        );
+    }
+    if is_append_only_path(path) {
+        return err_json(
+            "fs_edit",
+            json!({
+                "error": format!("{path} is append-only; fs_edit cannot rewrite it, use fs_write with append:true"),
+                "path": path,
+                "next_dispatch": "fs_write",
+            }),
+        );
+    }
+    let Some(text) = super::host_abi::host_read(path) else {
+        return err_json(
+            "fs_edit",
+            json!({
+                "error": format!("{path} could not be read, so nothing was edited"),
+                "path": path,
+                "next_dispatch": "fs_stat",
+            }),
+        );
+    };
+    let matches = text.matches(old).count();
+    if matches != 1 {
+        let (code, reason) = if matches == 0 {
+            ("edit_no_match", "old_string occurs 0 times; nothing was edited".to_string())
+        } else {
+            (
+                "edit_ambiguous",
+                format!("old_string occurs {matches} times; widen it until exactly one occurrence remains. Nothing was edited"),
+            )
+        };
+        return err_json_coded(
+            "fs_edit",
+            code,
+            json!({
+                "error": reason,
+                "path": path,
+                "matches": matches,
+                "next_dispatch": "fs_read",
+            }),
+        );
+    }
+    let edited = text.replacen(old, new, 1);
+    if super::host_abi::host_write(path, &edited) {
+        return ok(
+            "fs_edit",
+            json!({ "path": path, "replacements": 1, "bytes": edited.len() }),
+        );
+    }
+    err_json(
+        "fs_edit",
+        json!({
+            "error": format!("write failed for {path}; the edit was not applied"),
+            "path": path,
             "next_dispatch": "fs_stat",
         }),
     )
@@ -3478,6 +3571,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
     let result = match verb {
         "fs_read" => fs_read(&body),
         "fs_write" => fs_write(&body),
+        "fs_edit" => fs_edit(&body),
         "fs_readdir" => fs_readdir(&body),
         "fs_stat" => fs_stat(&body),
         "scan_deps" | "scan-deps" => scan_deps(&body),
