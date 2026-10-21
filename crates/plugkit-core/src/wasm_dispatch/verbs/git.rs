@@ -3106,7 +3106,7 @@ const head=must('head',git(['rev-parse','--verify','HEAD'])).trim();
 let patch=I.patch;const selected=[];
 if(patch==null){patch='';for(const [file,wanted] of Object.entries(I.hunks)){const d=must('diff',git(['diff','--no-color','--no-ext-diff','--src-prefix=a/','--dst-prefix=b/','-U3','HEAD','--',file]));const lines=d.split('\n');const at=lines.findIndex(l=>l.startsWith('@@'));if(at<0){const inHead=git(['cat-file','-e','HEAD:'+file]).code===0;const nonText=inHead&&(git(['diff','--numstat','HEAD','--',file]).stdout.trim()!==''||git(['diff','--summary','HEAD','--',file]).stdout.trim()!=='');throw {stage:'hunks',stderr:!inHead?file+' is untracked (not in HEAD and not staged), so it has no hunks; commit it by paths instead.':nonText?file+' is a binary or mode-only change with no hunks; commit it by paths instead.':'no diff against HEAD for '+file};}const header=lines.slice(0,at);const hunks=[];let cur=null;for(const l of lines.slice(at)){if(l.startsWith('@@')){cur=[l];hunks.push(cur);}else if(cur){cur.push(l);}}
 while(hunks.length&&hunks[hunks.length-1].length&&hunks[hunks.length-1][hunks[hunks.length-1].length-1]==='')hunks[hunks.length-1].pop();
-const bad=wanted.filter(n=>!Number.isInteger(n)||n<1||n>hunks.length);if(bad.length)throw {stage:'hunks',stderr:file+' has '+hunks.length+' hunk(s) against HEAD; refused hunk number(s) '+bad.join(','),hunk_headers:hunks.map(h=>h[0])};
+const bad=wanted.filter(n=>!Number.isInteger(n)||n<1||n>hunks.length);if(bad.length)throw {stage:'hunks',stderr:file+' has '+hunks.length+' hunk(s) against HEAD; refused hunk number(s) '+bad.join(','),hunk_headers:hunks.map(h=>h[0])};const expect=I.hunk_headers&&Array.isArray(I.hunk_headers[file])?I.hunk_headers[file]:null;if(expect){const moved=wanted.filter(n=>expect[n-1]!==hunks[n-1][0]);if(moved.length)throw {stage:'hunks',stderr:file+' changed after the hunks were read: hunk(s) '+moved.join(',')+' do not match the hunk_headers given; re-read git diff HEAD -- '+file+' and renumber',hunk_headers:hunks.map(h=>h[0])};}
 const ordered=wanted.slice().sort((a,b)=>a-b);const dup=ordered.filter((n,i)=>i>0&&n===ordered[i-1]);if(dup.length)throw {stage:'hunks',stderr:file+' names hunk number(s) more than once: '+dup.join(',')};
 patch+=header.join('\n')+'\n'+ordered.map(n=>hunks[n-1].join('\n')).join('\n')+'\n';for(const n of ordered)selected.push({path:file,hunk:n,header:hunks[n-1][0]});}}
 idx=P.join(gitdir,'gm-patch-index-'+process.pid+'-'+Date.now());const E={GIT_INDEX_FILE:idx};
@@ -3219,6 +3219,7 @@ pub(super) fn git_commit_hunk_scoped(body: &Value) -> Option<u64> {
         "cwd": cwd,
         "patch": patch_text,
         "hunks": hunks,
+        "hunk_headers": body.get("hunk_headers").filter(|v| !v.is_null()),
         "message": message,
         "identity": identity_config_argv(&commit_identity(body)),
     });
