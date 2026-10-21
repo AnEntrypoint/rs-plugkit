@@ -3898,7 +3898,11 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd, &commit_note_paths(cwd, scoped_paths));
         let bundled_message = bundle_prd_commit_comments(message, &commit_notes);
         let identity = commit_identity(body);
-        let commit_pathspec: Vec<String> = scoped_paths.iter().filter(|p| !index_removed_paths.contains(p)).cloned().collect();
+        let commit_pathspec: Vec<String> = scoped_paths
+            .iter()
+            .filter(|p| !index_removed_paths.contains(p) || head_tracks_path(cwd, p))
+            .cloned()
+            .collect();
         let commit_lock = git_commit_lock_key(cwd);
         if !git_commit_lock_acquire(&commit_lock, &plan.id) {
             return Ok(err_json(
@@ -11778,6 +11782,13 @@ pub(super) fn git_stage_argv_forced(paths: &[String], cwd: Option<&str>) -> Vec<
     let mut argv: Vec<String> = vec!["add".to_string(), "--force".to_string(), "--".to_string()];
     argv.extend(git_pathspec_scope(paths, cwd));
     argv
+}
+
+fn head_tracks_path(cwd: Option<&str>, path: &str) -> bool {
+    git_call_argv(&["cat-file", "-e", format!("HEAD:{path}").as_str()], cwd)
+        .get("exit_code")
+        .and_then(|x| x.as_i64())
+        == Some(0)
 }
 
 pub(super) fn deleted_tracked_paths(cwd: Option<&str>, paths: &[String]) -> Vec<String> {
