@@ -2729,6 +2729,13 @@ fn has_gm_component(path: &str) -> bool {
 
 fn git_rewrite_authors_run(body: &Value, plan: &mut GitPendingTokenReplayPlan) -> Result<u64, u64> {
     const VERB: &str = "git_rewrite_authors";
+    if let Some(refusal) = refuse_unknown_fields(
+        VERB,
+        body,
+        &["apply", "confirm", "since", "author_name", "author_email", "cwd"],
+    ) {
+        return Ok(refusal);
+    }
     let cwd = body_cwd(body);
     let apply = body.get("apply").and_then(Value::as_bool).unwrap_or(false);
     if apply && body.get("confirm").and_then(Value::as_str) != Some(REWRITE_CONFIRM) {
