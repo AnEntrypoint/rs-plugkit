@@ -695,7 +695,7 @@ fn failure_class(result: &Value, exit_code: i64) -> FailureClass {
     if zero_matches {
         FailureClass::NoMatch
     } else {
-        FailureClass::Unclassified
+        FailureClass::Coded("exit_nonzero".to_owned())
     }
 }
 
