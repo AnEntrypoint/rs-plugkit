@@ -2542,6 +2542,17 @@ fn prune_receipts(id: &str) {
     }
 }
 
+pub fn open_row_witness_dispatch_ids() -> std::collections::HashSet<String> {
+    let Ok((set, _)) = row_store::read_blocks_listing(&row_store::Store::prd()) else {
+        return std::collections::HashSet::new();
+    };
+    set.blocks
+        .iter()
+        .filter_map(row_to_json)
+        .filter_map(|row| row.get("witness_dispatch_id").and_then(serde_json::Value::as_str).map(str::to_string))
+        .collect()
+}
+
 fn sweep_orphan_receipts() {
     let Ok((set, skipped)) = row_store::read_blocks_listing(&row_store::Store::prd()) else {
         return;
