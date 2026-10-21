@@ -4559,17 +4559,52 @@ fn glob_scopes_for<'a>(paths: &'a [&'a str]) -> Vec<Option<&'a str>> {
     if paths.is_empty() { vec![None] } else { paths.iter().map(|p| Some(*p)).collect() }
 }
 
+const SPILL_OUT_DIR: &str = ".gm/exec-spool/out";
+const SPILL_FILE_PREFIX: &str = "spill-";
+const SPILL_KEEP_NEWEST: usize = 200;
+const SPILL_RETAIN_MS: f64 = 24.0 * 60.0 * 60.0 * 1000.0;
+
 fn spill_lines_to_out_file(spill_name: &str, lines: &[String]) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
-    let relative = format!(".gm/exec-spool/out/{spill_name}");
+    let relative = format!("{SPILL_OUT_DIR}/{SPILL_FILE_PREFIX}{spill_name}");
     let mut body = lines.join("\n");
     body.push('\n');
     if crate::pkfs::write(&relative, &body) {
+        prune_spill_files();
         Some(crate::pkfs::anchor(&relative))
     } else {
         None
+    }
+}
+
+fn prune_spill_files() {
+    let Some(Value::Array(entries)) = crate::pkfs::readdir(SPILL_OUT_DIR) else {
+        return;
+    };
+    let now = unsafe { crate::wasm_dispatch::host_now_ms() } as f64;
+    let mut spills: Vec<(f64, String)> = entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry
+                .as_str()
+                .or_else(|| entry.get("name").and_then(Value::as_str))?;
+            if !name.starts_with(SPILL_FILE_PREFIX) || !name.ends_with(".txt") {
+                return None;
+            }
+            let mtime_ms = crate::pkfs::stat(&format!("{SPILL_OUT_DIR}/{name}"))
+                .and_then(|s| s.get("mtimeMs").or_else(|| s.get("mtime_ms")).and_then(Value::as_f64))
+                .unwrap_or(f64::MAX);
+            Some((mtime_ms, name.to_string()))
+        })
+        .collect();
+    spills.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    for (rank, (mtime_ms, name)) in spills.into_iter().enumerate() {
+        if rank < SPILL_KEEP_NEWEST || now - mtime_ms < SPILL_RETAIN_MS {
+            continue;
+        }
+        crate::pkfs::remove_file(&format!("{SPILL_OUT_DIR}/{name}"));
     }
 }
 
