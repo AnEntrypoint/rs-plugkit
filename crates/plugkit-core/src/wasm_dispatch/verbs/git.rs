@@ -6059,6 +6059,10 @@ pub(super) fn git_show(body: &Value) -> u64 {
         .unwrap_or("HEAD");
     let stat = body.get("stat").and_then(|v| v.as_bool()).unwrap_or(false);
     let path = body.get("path").and_then(|v| v.as_str());
+    let owned_path = path.and_then(|p| submodule_owning_path(cwd, p));
+    let cwd_owned: Option<String> = owned_path.as_ref().map(|(d, _)| d.clone()).or_else(|| cwd.map(String::from));
+    let cwd = cwd_owned.as_deref();
+    let path = owned_path.as_ref().map(|(_, rel)| rel.as_str()).or(path);
     let paths: Vec<String> = body
         .get("paths")
         .or_else(|| body.get("files"))
