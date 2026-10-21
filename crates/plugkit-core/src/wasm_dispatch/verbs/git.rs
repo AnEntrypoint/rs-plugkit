@@ -6598,6 +6598,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         }
         if lower_output.contains("would be overwritten by merge")
             || lower_output.contains("would be overwritten by checkout")
+            || lower_output.contains("not uptodate. cannot merge")
         {
             let blocking_paths: Vec<String> = output
                 .lines()
