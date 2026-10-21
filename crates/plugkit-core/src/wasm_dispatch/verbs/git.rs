@@ -4860,7 +4860,7 @@ pub(super) fn pull_and_repush_remote_moved(
                 "clashing_paths": clash.clone(),
                 "recovery_steps": [
                     { "step": 1, "verb": "git_status", "paths": clash.clone(), "action": clean_tree_first.clone() },
-                    { "step": 2, "verb": "git_push", "rev": "HEAD", "action": "publish the committed sha; do not re-dispatch git_push unchanged, it repeats this same refusal" },
+                    { "step": 2, "verb": "git_push", "rev": "<committed full sha>", "action": "after the owning lanes clear the clashing paths, publish the committed sha by its full rev; rev HEAD or an unchanged re-dispatch repeats this refusal while those paths stay dirty" },
                 ],
             });
             stamp_dirty_split(&mut refusal, &dirty_split);
