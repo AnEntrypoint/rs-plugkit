@@ -1704,6 +1704,26 @@ pub(super) fn git_push(body: &Value) -> u64 {
     let mut ssh_fallback: Option<SshHttpsFallback> = None;
     let mut remote_before =
         git_fetch_and_resolve_remote(repo.as_deref(), &remote_name, &branch, None);
+    if let (Some(named), Some(remote_tip)) = (explicit_source_ref.as_deref(), remote_before.as_deref()) {
+        if ref_is_ancestor(repo.as_deref(), &local_source_before, remote_tip) {
+            return pack(
+                json!({
+                    "ok": true,
+                    "verb": "git_push",
+                    "repo": repo,
+                    "branch": branch,
+                    "source_ref": named,
+                    "source_sha": local_source_before,
+                    "remote": remote_name,
+                    "remote_sha": remote_tip,
+                    "remote_advanced": false,
+                    "already_current": true,
+                    "output": "source ref is an ancestor of the remote branch; nothing to publish",
+                })
+                .to_string(),
+            );
+        }
+    }
     let allow_foreign_commits = body
         .get("allow_foreign_commits")
         .and_then(|v| v.as_bool())
@@ -6438,6 +6458,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
     let dirty_runtime_logs: Vec<String> = dirty_tracked
         .iter()
         .filter(|path| path.starts_with(".gm/") && path.ends_with("-log.jsonl"))
+        .filter(|path| !APPEND_ONLY_STATE_LOGS.contains(&path.as_str()))
         .filter(|path| incoming_paths.iter().any(|incoming| incoming == *path))
         .cloned()
         .collect();
