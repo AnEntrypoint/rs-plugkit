@@ -1824,9 +1824,6 @@ fn verify_record(kind: &str, record: &Value) -> Result<Value, String> {
         let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
         let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id)?
             .ok_or_else(|| "Dream-RSI evaluator dispatch is absent".to_string())?;
-        if dispatch.get("session_id").and_then(Value::as_str) != Some(owner) {
-            return Err("Dream-RSI evaluator dispatch belongs to another session".to_string());
-        }
         let verb = dispatch
             .get("verb")
             .and_then(Value::as_str)
@@ -2001,9 +1998,12 @@ fn evaluator_receipt(content: &str) -> Result<Value, String> {
     let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id)?.ok_or_else(|| {
         "dream-evaluator-receipt dispatch_id is not a completed GM dispatch".to_string()
     })?;
-    if dispatch.get("session_id").and_then(Value::as_str) != Some(owner_session_id.as_str()) {
-        return Err("dream-evaluator-receipt dispatch belongs to another session".to_string());
-    }
+    let dispatch_session_id = dispatch
+        .get("session_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "dream-evaluator-receipt dispatch lacks session".to_string())?
+        .to_owned();
+    let lean_node = lean_node_for_dispatch(&dispatch_session_id, &dispatch_id);
     let verb = dispatch
         .get("verb")
         .and_then(Value::as_str)
@@ -2020,7 +2020,7 @@ fn evaluator_receipt(content: &str) -> Result<Value, String> {
     let target = format!("{}:{}", verb, fingerprint);
     let signed = signed_record(
         "evaluator",
-        json!({ "id": receipt_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": outcome_score(exit_code, false, output_bytes), "cost": 1, "parent_id": parent_id, "owner_session_id": owner_session_id, "metric": "completed-dispatch-success" }),
+        json!({ "id": receipt_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "dispatch_session_id": dispatch_session_id, "lean_node": lean_node, "exit_code": exit_code, "evaluator_score": outcome_score(exit_code, false, output_bytes), "cost": 1, "parent_id": parent_id, "owner_session_id": owner_session_id, "metric": "completed-dispatch-success" }),
     )?;
     let path = evaluator_receipt_path()?;
     append_store(&path, "dream-evaluator-receipt", vec![signed.clone()])
@@ -2889,7 +2889,8 @@ pub(super) fn handle(content: &str) -> (String, String, i32) {
         }
     };
     let walk_files = lean_walk_files();
-    let mut reply = result_json(&produce_result(&observations, &replay, &scorer, &walk_files));
+    let receipted = receipted_walks();
+    let mut reply = result_json(&produce_result(&observations, &replay, &scorer, &walk_files, &receipted));
     reply["rejected_count"] = json!(rejected_count);
     reply["replay"] = replay;
     (reply.to_string(), String::new(), 0)
@@ -3021,12 +3022,74 @@ fn lean_walk_files() -> Vec<LeanWalkFile> {
 }
 
 #[cfg(target_arch = "wasm32")]
+struct ReceiptedWalk {
+    node: String,
+    dispatch_session: String,
+    dispatch_id: String,
+    succeeded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+enum WalkVerdict {
+    Verified,
+    Missing,
+    SelfScored,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn walk_verdict(scorer: &str, dispatch_session: &str, succeeded: bool) -> WalkVerdict {
+    if dispatch_session == scorer {
+        WalkVerdict::SelfScored
+    } else if succeeded {
+        WalkVerdict::Verified
+    } else {
+        WalkVerdict::Missing
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn lean_node_for_dispatch(dispatch_session: &str, dispatch_id: &str) -> Option<String> {
+    session_history(dispatch_session)
+        .0
+        .into_iter()
+        .find(|record| record.dispatch_id.as_deref() == Some(dispatch_id))
+        .and_then(|record| record.lean_node)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn receipted_walks() -> Vec<ReceiptedWalk> {
+    let Ok(path) = evaluator_receipt_path() else {
+        return Vec::new();
+    };
+    let Some(raw) = crate::pkfs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(receipts) = parse_store(&raw, "dream-evaluator-receipt") else {
+        return Vec::new();
+    };
+    receipts
+        .iter()
+        .filter_map(|receipt| verify_record("evaluator", receipt).ok())
+        .filter_map(|receipt| {
+            Some(ReceiptedWalk {
+                node: receipt.get("lean_node").and_then(Value::as_str)?.to_owned(),
+                dispatch_session: receipt.get("dispatch_session_id").and_then(Value::as_str)?.to_owned(),
+                dispatch_id: receipt.get("dispatch_id").and_then(Value::as_str)?.to_owned(),
+                succeeded: receipt.get("exit_code").and_then(Value::as_i64) == Some(0),
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
 fn derive_part_b(
     observations: &[ObservationRecord],
     scorer: &str,
     walk_files: &[LeanWalkFile],
+    receipted: &[ReceiptedWalk],
 ) -> PartB {
-    let self_scored: BTreeSet<&str> = walk_files
+    let mut self_scored: BTreeSet<String> = walk_files
         .iter()
         .filter(|walk| {
             walk.session == scorer
@@ -3035,18 +3098,24 @@ fn derive_part_b(
                     .as_deref()
                     .map_or(false, |verifier| verifier == walk.session.as_str())
         })
-        .map(|walk| walk.node.as_str())
+        .map(|walk| walk.node.clone())
         .collect();
     let mut walks: BTreeMap<String, (bool, Vec<String>)> = BTreeMap::new();
     for record in observations {
         let Some(node) = record.lean_node.as_deref() else {
             continue;
         };
-        let walk = walks.entry(node.to_owned()).or_insert((false, Vec::new()));
-        match record.dispatch_id.as_deref() {
-            Some(_) if record.succeeded() => walk.0 = true,
-            Some(dispatch_id) => walk.1.push(dispatch_id.to_owned()),
-            None => {}
+        walks.entry(node.to_owned()).or_insert((false, Vec::new()));
+        self_scored.insert(node.to_owned());
+    }
+    for walk in receipted {
+        let entry = walks.entry(walk.node.clone()).or_insert((false, Vec::new()));
+        match walk_verdict(scorer, &walk.dispatch_session, walk.succeeded) {
+            WalkVerdict::Verified => entry.0 = true,
+            WalkVerdict::Missing => entry.1.push(walk.dispatch_id.clone()),
+            WalkVerdict::SelfScored => {
+                self_scored.insert(walk.node.clone());
+            }
         }
     }
     let traversable_nodes = walks.len() as u64;
@@ -3098,6 +3167,7 @@ fn produce_result(
     replay: &Value,
     scorer: &str,
     walk_files: &[LeanWalkFile],
+    receipted: &[ReceiptedWalk],
 ) -> DreamRsiResult {
     let records = observations.len() as u64;
     let part_a = if records < INSUFFICIENT_RECORD_THRESHOLD {
@@ -3112,7 +3182,7 @@ fn produce_result(
     DreamRsiResult {
         status: DreamRsiStatus::Proposed,
         part_a,
-        part_b: derive_part_b(observations, scorer, walk_files),
+        part_b: derive_part_b(observations, scorer, walk_files, receipted),
     }
 }
 
@@ -3182,4 +3252,25 @@ fn result_json(result: &DreamRsiResult) -> Value {
                 .collect::<Vec<_>>(),
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{walk_verdict, WalkVerdict};
+
+    #[test]
+    fn walk_run_by_another_session_is_verified_when_it_succeeds() {
+        assert_eq!(walk_verdict("scorer-s", "lw-jtbd-live", true), WalkVerdict::Verified);
+    }
+
+    #[test]
+    fn walk_run_by_another_session_is_missing_when_it_fails() {
+        assert_eq!(walk_verdict("scorer-s", "lw-jtbd-live", false), WalkVerdict::Missing);
+    }
+
+    #[test]
+    fn scorer_own_walk_is_self_scored_and_never_verified() {
+        assert_eq!(walk_verdict("scorer-s", "scorer-s", true), WalkVerdict::SelfScored);
+        assert_eq!(walk_verdict("scorer-s", "scorer-s", false), WalkVerdict::SelfScored);
+    }
 }
