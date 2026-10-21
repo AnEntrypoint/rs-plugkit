@@ -2596,6 +2596,35 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         }
         Err(denial) => denial["count_of_record"].clone(),
     };
+    if !annotate_only {
+        let closed_store = row_store::Store::prd();
+        let open_here = match row_store::read_blocks(&closed_store) {
+            Ok(read) => read
+                .blocks
+                .iter()
+                .filter_map(Value::as_mapping)
+                .any(|map| mapping_text(map, "id").as_deref() == Some(id_target.as_str())),
+            Err((message, code)) => return (String::new(), message, code),
+        };
+        if !open_here {
+            if let Ok(Some(logged)) = row_store::log_row(&closed_store, &id_target) {
+                let status = logged.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let body = serde_json::json!({
+                    "error": format!(
+                        "prd-resolve refused: {} is already resolved (status {}); its record is in .gm/prd-log.jsonl, read it with prd-list id={}",
+                        id_target, status, id_target
+                    ),
+                    "deviation_kind": "prd-resolve-already-resolved",
+                    "deviation_severity": "deny",
+                    "prd_id": id_target,
+                    "status": status,
+                    "resolved_at": logged.get("resolved_at").cloned().unwrap_or(serde_json::Value::Null),
+                })
+                .to_string();
+                return (body, format!("prd-resolve refused: {} already resolved", id_target), 1);
+            }
+        }
+    }
     let has_witness = witness
         .as_ref()
         .map(|w| !w.trim().is_empty())
