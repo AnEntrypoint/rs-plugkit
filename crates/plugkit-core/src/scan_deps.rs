@@ -630,6 +630,149 @@ fn advisory_findings(package_dir: &str, findings: &mut Vec<FileFinding>) {
     }
 }
 
+const KNOWN_CARGO_ADVISORIES: &[Advisory] = &[Advisory {
+    package: "smallvec",
+    below: (1, 6, 1),
+    id: "RUSTSEC-2021-0003",
+    title: "buffer overflow in smallvec insert_many and grow",
+}];
+
+fn root_file(root: &str, name: &str) -> String {
+    if root == "." {
+        name.to_string()
+    } else {
+        crate::scan_universe::join_under(root, name)
+    }
+}
+
+fn quoted_field(line: &str, key: &str) -> Option<String> {
+    let value = line.strip_prefix(key)?.trim_start().strip_prefix('=')?.trim();
+    Some(value.strip_prefix('"')?.strip_suffix('"')?.to_string())
+}
+
+fn cargo_lock_packages(text: &str) -> Vec<(String, String)> {
+    let mut packages = Vec::new();
+    let mut name: Option<String> = None;
+    let mut version: Option<String> = None;
+    for line in text.lines().map(str::trim) {
+        if line == "[[package]]" {
+            if let (Some(n), Some(v)) = (name.take(), version.take()) {
+                packages.push((n, v));
+            }
+        } else if let Some(n) = quoted_field(line, "name") {
+            name = Some(n);
+        } else if let Some(v) = quoted_field(line, "version") {
+            version = Some(v);
+        }
+    }
+    if let (Some(n), Some(v)) = (name, version) {
+        packages.push((n, v));
+    }
+    packages
+}
+
+fn range_admits(range: &str, locked: (u64, u64, u64)) -> bool {
+    let range = range.trim();
+    let (op, rest) = match range.chars().next() {
+        Some('^') => ('^', &range[1..]),
+        Some('~') => ('~', &range[1..]),
+        Some('>') => match range.strip_prefix(">=") {
+            Some(rest) => ('>', rest),
+            None => return true,
+        },
+        Some(c) if c.is_ascii_digit() => ('=', range),
+        _ => return true,
+    };
+    let rest = rest.trim();
+    if rest.split('.').count() != 3 {
+        return true;
+    }
+    let Some(base) = parse_version_triple(rest) else {
+        return true;
+    };
+    match op {
+        '^' if base.0 > 0 => locked.0 == base.0 && locked >= base,
+        '^' if base.1 > 0 => locked.0 == 0 && locked.1 == base.1 && locked >= base,
+        '^' => locked.0 == 0 && locked.1 == 0 && locked.2 == base.2,
+        '~' => locked.0 == base.0 && locked.1 == base.1 && locked >= base,
+        '>' => locked >= base,
+        _ => locked == base,
+    }
+}
+
+fn lock_version_of(lock: &Value, name: &str) -> Option<String> {
+    lock.get("packages")
+        .and_then(|packages| packages.get(format!("node_modules/{name}").as_str()))
+        .or_else(|| lock.get("dependencies").and_then(|deps| deps.get(name)))
+        .and_then(|entry| entry.get("version"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn lockfile_findings(root: &str, findings: &mut Vec<FileFinding>) {
+    let cargo_path = root_file(root, "Cargo.lock");
+    if let Some(text) = crate::wasm_dispatch::host_read(&cargo_path) {
+        for (name, version) in cargo_lock_packages(&text) {
+            let Some(installed) = parse_version_triple(&version) else {
+                continue;
+            };
+            for advisory in KNOWN_CARGO_ADVISORIES
+                .iter()
+                .filter(|a| a.package == name && installed < a.below)
+            {
+                let (major, minor, patch) = advisory.below;
+                findings.push(FileFinding {
+                    path: cargo_path.clone(),
+                    severity: "fail",
+                    ratio: None,
+                    escape_hits: Vec::new(),
+                    note: Some(format!(
+                        "{name} {version} is below {major}.{minor}.{patch} ({}: {})",
+                        advisory.id, advisory.title
+                    )),
+                });
+            }
+        }
+    }
+
+    let manifest_path = root_file(root, "package.json");
+    let lock_path = root_file(root, "package-lock.json");
+    let manifest = crate::wasm_dispatch::host_read(&manifest_path)
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let lock = crate::wasm_dispatch::host_read(&lock_path)
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let (Some(manifest), Some(lock)) = (manifest, lock) else {
+        return;
+    };
+    for section in ["dependencies", "devDependencies"] {
+        let Some(declared) = manifest.get(section).and_then(Value::as_object) else {
+            continue;
+        };
+        for (name, range) in declared {
+            let Some(range) = range.as_str() else {
+                continue;
+            };
+            let Some(version) = lock_version_of(&lock, name) else {
+                continue;
+            };
+            let Some(locked) = parse_version_triple(&version) else {
+                continue;
+            };
+            if !range_admits(range, locked) {
+                findings.push(FileFinding {
+                    path: manifest_path.clone(),
+                    severity: "fail",
+                    ratio: None,
+                    escape_hits: Vec::new(),
+                    note: Some(format!(
+                        "{name} range {range} in {section} does not admit {version}, the version package-lock.json locks"
+                    )),
+                });
+            }
+        }
+    }
+}
+
 pub fn scan_deps(body: &Value) -> Value {
     let requested_root = body
         .get("root")
@@ -667,6 +810,7 @@ pub fn scan_deps(body: &Value) -> Value {
     let node_modules = scan_node_modules(root, MAX_NODE_MODULES_FILES);
     findings.extend(node_modules.findings);
     blocked.extend(node_modules.blocked);
+    lockfile_findings(root, &mut findings);
 
     let failing: Vec<&FileFinding> = findings.iter().filter(|f| f.severity == "fail").collect();
     let warnings: Vec<&FileFinding> = findings.iter().filter(|f| f.severity == "warn").collect();
