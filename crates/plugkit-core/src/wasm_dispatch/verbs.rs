@@ -3533,10 +3533,14 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
             let data: Value = serde_json::from_str(&out).unwrap_or(Value::String(out));
             return ok(verb, data);
         }
-        let error_code = if code == crate::orchestrator::prd::LOOKUP_MISS_EXIT {
-            "not_found"
+        let error_code: String = if code == crate::orchestrator::prd::LOOKUP_MISS_EXIT {
+            "not_found".to_string()
         } else {
-            ERR_CODE_FAILED
+            serde_json::from_str::<Value>(out.trim())
+                .ok()
+                .and_then(|v| v.get("error_code").and_then(Value::as_str).map(str::to_owned))
+                .filter(|code| !code.is_empty())
+                .unwrap_or_else(|| ERR_CODE_FAILED.to_string())
         };
         let error = if err_msg.is_empty() {
             serde_json::from_str::<Value>(&out)
@@ -3548,7 +3552,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         };
         return err_json_coded(
             verb,
-            error_code,
+            &error_code,
             json!({ "error": error, "stdout": out, "exitCode": code }),
         );
     }
