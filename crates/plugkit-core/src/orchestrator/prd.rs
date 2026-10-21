@@ -676,6 +676,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         requested_statuses
     };
     let folded_rows = fold_last_blocks(rows);
+    let folded_duplicates = store_total.saturating_sub(folded_rows.len());
     let closed_statuses = super::fsm::graph().policy.prd_closed_statuses.clone();
     if let Some(unknown) = wanted_statuses.iter().find(|want| {
         !want.eq_ignore_ascii_case("pending")
@@ -809,6 +810,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         "total": matched,
         "pending_total": pending_total,
         "store_total": store_total,
+        "folded_duplicates": folded_duplicates,
         "limit": limit,
         "offset": offset,
         "next_offset": truncated.then_some(offset + page),
