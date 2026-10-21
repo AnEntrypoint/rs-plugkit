@@ -883,6 +883,47 @@ fn body_session_id(body: &serde_json::Value) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+const DUPLICATE_MIN_TOKENS: usize = 3;
+const DUPLICATE_MIN_SIMILARITY_PERCENT: usize = 70;
+
+fn subject_tokens(subject: &str) -> std::collections::BTreeSet<String> {
+    subject
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn near_duplicate_open_row(store: &row_store::Store, id: &str, subject: &str) -> Option<String> {
+    let incoming = subject_tokens(subject);
+    if incoming.len() < DUPLICATE_MIN_TOKENS {
+        return None;
+    }
+    let read = row_store::read_blocks(store).ok()?;
+    read.blocks.iter().find_map(|block| {
+        let map = block.as_mapping()?;
+        let other = row_store::block_id(block)?;
+        if other == id {
+            return None;
+        }
+        let status = map
+            .get(&Value::String("status".to_string()))
+            .and_then(Value::as_str)
+            .unwrap_or("pending");
+        if !status_is_open(status) {
+            return None;
+        }
+        let existing = subject_tokens(subject_from_fields(map));
+        if existing.len() < DUPLICATE_MIN_TOKENS {
+            return None;
+        }
+        let shared = incoming.intersection(&existing).count();
+        let union = incoming.len() + existing.len() - shared;
+        (shared * 100 >= union * DUPLICATE_MIN_SIMILARITY_PERCENT).then_some(other)
+    })
+}
+
 pub fn handle_add(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -1025,6 +1066,20 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         .or_else(|| slug.clone())
         .unwrap_or_else(|| format!("item-{}", crate::orchestrator::state::now_ms()));
     let store = row_store::Store::prd();
+    if let Some(existing) = near_duplicate_open_row(&store, &id, subject_str) {
+        let message = format!(
+            "prd-add refused: '{}' duplicates open row '{}' (normalized subject tokens overlap at {}% or more). Nothing was written. Reuse '{}', resolve it, or give the new work a subject that names a distinct intent.",
+            id, existing, DUPLICATE_MIN_SIMILARITY_PERCENT, existing
+        );
+        let stdout = serde_json::json!({
+            "ok": false,
+            "error_code": "duplicate_of_open_row",
+            "duplicate_of": existing,
+            "id": id,
+        })
+        .to_string();
+        return (stdout, message, 1);
+    }
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
     let overwrite = item_map
         .get(&Value::String("overwrite".to_string()))
