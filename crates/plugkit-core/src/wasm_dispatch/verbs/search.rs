@@ -1396,7 +1396,16 @@ pub(super) fn codesearch_exhaustive(
     };
     let partial = finish_scan_reply(&mut out, max_matches.min(u32::MAX as usize) as u32);
     out.insert("guest_elapsed_ms".to_string(), json!(guest_elapsed_ms()));
-    answer_scan("codesearch", out, partial)
+    if !regex && !filenames {
+            if let Some(requested) = body
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .filter(|m| CODESEARCH_MODES.contains(m))
+            {
+                out.insert("mode".to_string(), json!(requested));
+            }
+        }
+        answer_scan("codesearch", out, partial)
 }
 
 pub(super) const GREP_OUTPUT_MODES: &[&str] = &["content", "files_with_matches", "count"];

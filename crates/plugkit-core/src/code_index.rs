@@ -7371,21 +7371,21 @@ pub fn scan_comments(req: &CommentScan, cfg: &crate::ragconfig::RagConfig) -> Va
     for pattern in &req.include_globs {
         match crate::path_glob::PathGlob::parse(pattern) {
             Ok(parsed) => includes.push(parsed),
-            Err(e) => return json!({ "ok": false, "error": e, "mode": "comments" }),
+            Err(e) => return json!({ "ok": false, "error_code": "invalid_include_glob", "error": e, "mode": "comments" }),
         }
     }
     let mut exclude_globs: Vec<crate::path_glob::PathGlob> = Vec::new();
     for pattern in &req.exclude_globs {
         match crate::path_glob::PathGlob::parse(pattern) {
             Ok(parsed) => exclude_globs.push(parsed),
-            Err(e) => return json!({ "ok": false, "error": e, "mode": "comments" }),
+            Err(e) => return json!({ "ok": false, "error_code": "invalid_exclude_glob", "error": e, "mode": "comments" }),
         }
     }
     let file_cap = req.max_files.min(LITERAL_SCAN_MAX_FILES).max(1);
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let universe = match crate::scan_universe::list_scan_universe(root, req.paths, file_cap.saturating_add(1), &cfg.index, origin, req.refresh, req.no_ignore, false) {
         Ok(u) => u,
-        Err(e) => return json!({ "ok": false, "error": e, "mode": "comments" }),
+        Err(e) => return json!({ "ok": false, "error_code": "universe_listing_failed", "error": e, "mode": "comments" }),
     };
     let listed = universe.files;
     let files_truncated = listed.len() > file_cap;
@@ -7652,7 +7652,7 @@ pub fn search_at(
     project_path: Option<&str>,
 ) -> Value {
     if let Err(e) = ensure_schema_for(project_path) {
-        return json!({ "ok": false, "error": e });
+        return json!({ "ok": false, "error_code": "schema_unavailable", "error": e });
     }
     let db_path = project_db_path(project_path);
     let qvec = match inline_embedding
@@ -7675,7 +7675,7 @@ pub fn search_at(
                     json!({ "ok": true, "degraded": true, "degraded_reason": "embedding unavailable", "mode": "fallback_like", "rows": rows })
                 }
                 Err(e) => {
-                    json!({ "ok": false, "degraded": true, "mode": "fallback_like", "error": e })
+                    json!({ "ok": false, "error_code": "fallback_search_failed", "degraded": true, "mode": "fallback_like", "error": e })
                 }
             };
         }
@@ -7733,7 +7733,7 @@ pub fn memorize_at(
 ) -> Value {
     if inline_embedding.is_none() && crate::pipeline::needs_summarize(text) {
         if let Err(e) = ensure_schema_for(project_path) {
-            return json!({ "ok": false, "error": e });
+            return json!({ "ok": false, "error_code": "schema_unavailable", "error": e });
         }
         return crate::pipeline::build_pending_step(text, namespace, project_path);
     }
@@ -7749,7 +7749,7 @@ pub fn memorize_at_finalize(
 ) -> Value {
     let db_name = match ensure_schema_for(project_path) {
         Ok(n) => n,
-        Err(e) => return json!({ "ok": false, "error": e }),
+        Err(e) => return json!({ "ok": false, "error_code": "schema_unavailable", "error": e }),
     };
     let emb = inline_embedding
         .and_then(json_to_f32_vec)
@@ -7759,7 +7759,7 @@ pub fn memorize_at_finalize(
         None => {
             let msg = format!("memorize_at: embed_text failed for namespace={}; refusing to insert row with NULL embedding", namespace);
             let _ = unsafe { host_log(2, msg.as_ptr(), msg.len() as u32) };
-            return json!({ "ok": false, "error": msg });
+            return json!({ "ok": false, "error_code": "embed_unavailable", "error": msg });
         }
     };
     let embedding_sql = format!("vector('{}')", vec_to_json_literal(&v));
@@ -7772,6 +7772,6 @@ pub fn memorize_at_finalize(
         Ok(()) => {
             json!({ "ok": true, "memorized": true, "embedded": true, "inline": inline_embedding.is_some(), "project_path": project_path })
         }
-        Err(e) => json!({ "ok": false, "error": e }),
+        Err(e) => json!({ "ok": false, "error_code": "memory_insert_failed", "error": e }),
     }
 }

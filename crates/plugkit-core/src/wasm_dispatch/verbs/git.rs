@@ -6074,7 +6074,18 @@ pub(super) fn git_show(body: &Value) -> u64 {
                 .collect()
         })
         .unwrap_or_default();
-    let combined_ref = match path {
+    if path.is_some() && refspec.contains(':') {
+            return err_json(
+                "git_show",
+                json!({
+                    "error_code": "git_show_rev_path_combined",
+                    "error": format!("rev {} already carries a path; pass the commit alone as rev and the file as path", refspec),
+                    "rev": refspec,
+                    "path": path,
+                }),
+            );
+        }
+        let combined_ref = match path {
         Some(p) => format!("{}:{}", refspec, p),
         None => refspec.to_string(),
     };
