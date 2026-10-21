@@ -42,12 +42,7 @@ pub(super) fn git_commit_dedup_lookup(key: &str, cwd: Option<&str>) -> Option<Va
         return None;
     }
     let sha_full = record.get("sha_full").and_then(|v| v.as_str())?.to_string();
-    let still_reachable = git_call_argv(&["cat-file", "-e", &sha_full], cwd)
-        .get("exit_code")
-        .and_then(|x| x.as_i64())
-        .unwrap_or(1)
-        == 0;
-    if !still_reachable {
+    if resolve_ref(cwd, "HEAD").as_deref() != Some(sha_full.as_str()) {
         return None;
     }
     Some(record)
