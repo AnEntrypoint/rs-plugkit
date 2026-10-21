@@ -2814,13 +2814,19 @@ fn persist_sealed_replay(source: &'static str, replay: &mut Value) {
         "beta2": replay.get("beta2"),
         "rankings": rankings,
     });
-    let persisted = persist_replay_result(
+    match persist_replay_result(
         ReplayFile::Replay,
         ReplaySource(source),
         summary.as_object().cloned().unwrap_or_default(),
-    )
-    .ok();
-    replay["replay_result_path"] = persisted.map(Value::String).unwrap_or(Value::Null);
+    ) {
+        Ok(path) => replay["replay_result_path"] = Value::String(path),
+        Err(error) => {
+            replay["ok"] = Value::Bool(false);
+            replay["error_code"] = Value::String("persist_failed".to_string());
+            replay["error"] = Value::String(error);
+            replay["replay_result_path"] = Value::Null;
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
