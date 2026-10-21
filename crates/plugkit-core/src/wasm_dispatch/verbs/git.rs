@@ -624,6 +624,13 @@ pub(super) fn git_status(body: &Value) -> u64 {
                 deleted.push(path.clone());
             }
         }
+        // A submodule is listed as modified only for dirt outside the gm state
+        // pathspecs (.gm/, .agentplug*) inside that submodule.
+        let declared_submodules = submodule_gitlink_paths(cwd);
+        modified.retain(|path| {
+            !declared_submodules.contains(path.as_str())
+                || submodule_has_unprotected_dirt(cwd, path.as_str())
+        });
         let dirty = !porcelain.trim().is_empty();
         let head_sha = status.head_sha;
         let head_branch = status.branch;
@@ -11966,6 +11973,23 @@ pub(super) fn submodule_gitlink_paths(cwd: Option<&str>) -> std::collections::Ha
         }
     }
     out
+}
+
+// True when the submodule at `path` holds a change outside the protected gm
+// state pathspecs. A failed probe counts as dirty, so the entry stays listed.
+fn submodule_has_unprotected_dirt(cwd: Option<&str>, path: &str) -> bool {
+    let root = cwd.unwrap_or(".").trim_end_matches(['/', '\\']);
+    let dir = format!("{root}/{path}");
+    let mut argv: Vec<&str> = vec!["status", "--porcelain", "--untracked-files=all", "--", "."];
+    argv.extend(GIT_PROTECTED_PATHSPECS.iter().map(|(_, spec)| *spec));
+    let probe = git_call_argv(&argv, Some(dir.as_str()));
+    if probe.get("exit_code").and_then(Value::as_i64) != Some(0) {
+        return true;
+    }
+    probe
+        .get("stdout")
+        .and_then(Value::as_str)
+        .is_some_and(|out| out.lines().any(|line| !line.trim().is_empty()))
 }
 
 pub(super) fn path_is_submodule_gitlink(cwd: Option<&str>, path: &str) -> bool {
