@@ -2246,7 +2246,7 @@ pub(super) fn git_commit_failed_for_missing_identity(sout: &str, serr: &str) -> 
 pub(super) const MISSING_COMMIT_IDENTITY: &str = "git commit needs an author identity: pass author_name and author_email in the body, or set git.author_name and git.author_email in the gm config. The identity of an earlier commit is never reused.";
 
 pub(super) const DEFAULT_COMMIT_AUTHOR_NAME: &str = "lanmower";
-pub(super) const DEFAULT_COMMIT_AUTHOR_EMAIL: &str = "657315+lanmower@users.noreply.github.com";
+pub(super) const DEFAULT_COMMIT_AUTHOR_EMAIL: &str = "lanmower@users.noreply.github.com";
 
 fn non_blank_str(value: Option<&Value>) -> Option<String> {
     value
