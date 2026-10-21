@@ -55,7 +55,6 @@ pub(super) fn git_commit_dedup_record(key: &str, sha_full: &str, sha: &str, summ
     git_async_kv_put(GIT_COMMIT_DEDUP_NS, key, &record);
 }
 
-pub(super) const GIT_COMMIT_LOCK_NS: &str = "git_commit_lock";
 pub(super) const GIT_COMMIT_LOCK_TTL_MS: u64 = 120_000;
 pub(super) const GIT_COMMIT_LOCK_WAIT_MS: u64 = 15_000;
 pub(super) const GIT_COMMIT_LOCK_POLL_MS: u64 = 50;
@@ -64,22 +63,26 @@ pub(super) fn git_commit_lock_key(cwd: Option<&str>) -> String {
     format!("repo:{}", cwd.unwrap_or(""))
 }
 
-fn git_commit_lock_holder(key: &str) -> Option<(String, u64)> {
-    let raw = super::host_abi::host_kv_read(GIT_COMMIT_LOCK_NS, key)?;
+fn git_commit_lock_path(key: &str) -> String {
+    format!(".gm/locks/git-commit-{:016x}.lock", crate::hash::fnv1a64(key.as_bytes()))
+}
+
+fn parse_git_commit_lock(raw: &str) -> Option<(String, u64)> {
     let (holder, ts) = raw.rsplit_once('|')?;
     Some((holder.to_string(), ts.parse::<u64>().ok()?))
 }
 
 pub(super) fn git_commit_lock_acquire(key: &str, owner: &str) -> bool {
     let started = unsafe { host_now_ms() };
+    let path = git_commit_lock_path(key);
     loop {
         let now = unsafe { host_now_ms() };
-        let free = match git_commit_lock_holder(key) {
+        let current = super::host_abi::host_read(&path).unwrap_or_default();
+        let free = match parse_git_commit_lock(&current) {
             None => true,
             Some((holder, ts)) => holder == owner || now.saturating_sub(ts) > GIT_COMMIT_LOCK_TTL_MS,
         };
-        if free {
-            git_async_kv_put(GIT_COMMIT_LOCK_NS, key, &format!("{}|{}", owner, now));
+        if free && super::host_abi::host_cas_write(&path, &current, &format!("{}|{}", owner, now)) == 1 {
             return true;
         }
         if now.saturating_sub(started) >= GIT_COMMIT_LOCK_WAIT_MS {
@@ -90,10 +93,10 @@ pub(super) fn git_commit_lock_acquire(key: &str, owner: &str) -> bool {
 }
 
 pub(super) fn git_commit_lock_release(key: &str, owner: &str) {
-    if let Some((holder, _)) = git_commit_lock_holder(key) {
-        if holder == owner {
-            git_async_kv_delete(GIT_COMMIT_LOCK_NS, key);
-        }
+    let path = git_commit_lock_path(key);
+    let current = super::host_abi::host_read(&path).unwrap_or_default();
+    if matches!(parse_git_commit_lock(&current), Some((holder, _)) if holder == owner) {
+        super::host_abi::host_cas_write(&path, &current, "");
     }
 }
 
