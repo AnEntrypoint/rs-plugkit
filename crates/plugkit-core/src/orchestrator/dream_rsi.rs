@@ -359,6 +359,7 @@ fn evaluate_policy(
 
 const PROMOTION_MARGIN: f64 = 0.02;
 const PROMOTION_MIN_WORLDS: usize = 3;
+const PROMOTION_MIN_WIN_FRACTION: f64 = 0.5;
 
 fn evaluate_worlds(
     baseline_id: String,
@@ -459,16 +460,32 @@ fn evaluate_worlds(
         .get("score")
         .and_then(Value::as_f64)
         .ok_or_else(|| "dream-replay baseline score missing".to_string())?;
+    let replay_score = |replay: &Value| replay.get("replay_score").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY);
+    let baseline_replays = baseline.get("replays").and_then(Value::as_array).cloned().unwrap_or_default();
+    for ranking in rankings.iter_mut() {
+        let wins = ranking
+            .get("replays")
+            .and_then(Value::as_array)
+            .map_or(0, |replays| {
+                replays
+                    .iter()
+                    .zip(baseline_replays.iter())
+                    .filter(|(challenger, incumbent)| replay_score(challenger) > replay_score(incumbent))
+                    .count()
+            });
+        let win_fraction = if usable_count == 0 { 0.0 } else { wins as f64 / usable_count as f64 };
+        ranking["win_fraction"] = json!(win_fraction);
+    }
+    let clears_margin = |ranking: &Value| -> bool {
+        ranking.get("score").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY) > baseline_score + PROMOTION_MARGIN
+    };
+    let clears_win_fraction = |ranking: &Value| -> bool {
+        ranking.get("win_fraction").and_then(Value::as_f64).unwrap_or(0.0) >= PROMOTION_MIN_WIN_FRACTION
+    };
+    let margin_only = rankings.iter().any(|ranking| clears_margin(ranking) && !clears_win_fraction(ranking));
     let selected = rankings
         .iter()
-        .filter(|ranking| {
-            usable_count >= PROMOTION_MIN_WORLDS
-                && ranking
-                    .get("score")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(f64::NEG_INFINITY)
-                    > baseline_score + PROMOTION_MARGIN
-        })
+        .filter(|ranking| usable_count >= PROMOTION_MIN_WORLDS && clears_margin(ranking) && clears_win_fraction(ranking))
         .max_by(|left, right| {
             let score = |ranking: &Value| {
                 ranking
@@ -512,10 +529,13 @@ fn evaluate_worlds(
             "improved"
         } else if usable_count < PROMOTION_MIN_WORLDS {
             "insufficient_worlds"
+        } else if margin_only {
+            "below_win_fraction"
         } else {
             "below_margin"
         },
         "promotion_margin": PROMOTION_MARGIN,
+        "promotion_min_win_fraction": PROMOTION_MIN_WIN_FRACTION,
         "n_observations": usable_count,
         "skipped_worlds": skipped_worlds,
         "domain": if usable_count < PROMOTION_MIN_WORLDS { "disorder" } else { "order" },
@@ -1023,14 +1043,11 @@ fn session_history(session_id: &str) -> (Vec<ObservationRecord>, usize) {
             absorb(&raw);
         }
     }
-    if let Some(raw) = recover_observations_tail(&session_store_path(session_id, "observations.json")) {
+    if let Some(raw) = recover_observations_tail(&session_store_path(session_id, OBSERVATIONS_FILE)) {
         absorb(&raw);
     }
     (records, rejected)
 }
-
-#[cfg(target_arch = "wasm32")]
-const SPOOL_OUT_DIR: &str = ".gm/exec-spool/out";
 
 #[cfg(target_arch = "wasm32")]
 #[derive(Default)]
@@ -1039,25 +1056,13 @@ struct LedgerCheck {
     unreadable: Option<&'static str>,
     evicted_possible: bool,
     newest_ts: u64,
-    spool_out_names: Option<Vec<String>>,
-    spool_out_ids_by_session: std::collections::HashMap<String, BTreeSet<String>>,
 }
 
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Copy, PartialEq)]
 enum Confirmation {
     Ledger,
-    SpoolOut,
     Retained,
-}
-
-#[cfg(target_arch = "wasm32")]
-fn reply_dispatch_ids(text: &str) -> impl Iterator<Item = String> + '_ {
-    const NEEDLE: &str = "\"dispatch_id\":\"";
-    text.match_indices(NEEDLE).filter_map(move |(start, _)| {
-        let rest = &text[start + NEEDLE.len()..];
-        rest.find('"').map(|end| rest[..end].to_owned())
-    })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1085,23 +1090,6 @@ impl LedgerCheck {
         LedgerCheck { entries, evicted_possible, newest_ts, ..Default::default() }
     }
 
-    fn spool_out_confirms(&mut self, session_id: &str, dispatch_id: &str) -> bool {
-        if !self.spool_out_ids_by_session.contains_key(session_id) {
-            let names = self.spool_out_names.get_or_insert_with(|| {
-                dir_entry_names(SPOOL_OUT_DIR).into_iter().filter(|name| name.ends_with(".json")).collect()
-            });
-            let marker = format!("-{session_id}-");
-            let ids = names
-                .iter()
-                .filter(|name| name.contains(&marker))
-                .filter_map(|name| crate::pkfs::read_to_string(&format!("{SPOOL_OUT_DIR}/{name}")))
-                .flat_map(|text| reply_dispatch_ids(&text).collect::<Vec<_>>())
-                .collect();
-            self.spool_out_ids_by_session.insert(session_id.to_owned(), ids);
-        }
-        self.spool_out_ids_by_session.get(session_id).is_some_and(|ids| ids.contains(dispatch_id))
-    }
-
     fn verdict(&mut self, session_id: &str, record: &ObservationRecord) -> Result<Confirmation, &'static str> {
         let dispatch_id = record.dispatch_id.as_deref().ok_or("no_dispatch_id")?;
         let Some(entry) = self.entries.get(dispatch_id) else {
@@ -1109,10 +1097,7 @@ impl LedgerCheck {
             if (self.evicted_possible || aged_out) && self.unreadable.is_none() {
                 return Ok(Confirmation::Retained);
             }
-            if self.spool_out_confirms(session_id, dispatch_id) {
-                return Ok(Confirmation::SpoolOut);
-            }
-            return Err(self.unreadable.unwrap_or("unconfirmed_by_ledger_or_spool_out"));
+            return Err(self.unreadable.unwrap_or("unconfirmed_by_ledger"));
         };
         if entry.get("session_id").and_then(Value::as_str) != Some(session_id) {
             return Err("ledger_session_mismatch");
@@ -1261,10 +1246,6 @@ fn scan_history() -> HistoryScan {
         records.retain(|record| match ledger.verdict(&session_id, record) {
             Ok(Confirmation::Ledger) | Ok(Confirmation::Retained) => {
                 scan.ledger_confirmed += 1;
-                true
-            }
-            Ok(Confirmation::SpoolOut) => {
-                scan.spool_out_confirmed += 1;
                 true
             }
             Err(reason) => {
@@ -1556,7 +1537,7 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         return;
     }
     let failure = failure.for_exit(exit_code);
-    let path = session_store_path(session_id, "observations.json");
+    let path = session_store_path(session_id, OBSERVATIONS_FILE);
     let ts = super::state::now_ms() as i64;
     rotate_observations_if_full(session_id, &path, ts);
     if recover_observations_tail(&path).is_none() {
@@ -1652,9 +1633,63 @@ pub(super) fn active_strategy(session_id: Option<&str>) -> Value {
     let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
         return Value::Null;
     };
-    crate::pkfs::read_to_string(&session_store_path(session_id, &format!("{ACTIVE_STRATEGY_FILE}.json")))
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or(Value::Null)
+    let read = |owner: &str| -> Option<Value> {
+        crate::pkfs::read_to_string(&session_store_path(owner, &format!("{ACTIVE_STRATEGY_FILE}.json")))
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+    };
+    read(session_id).or_else(|| read(PROJECT_WIDE_SESSION)).unwrap_or(Value::Null)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub const PROJECT_WIDE_SESSION: &str = "_any-session";
+
+#[cfg(target_arch = "wasm32")]
+pub const PROBE_STRATEGY_FILE: &str = "probe-strategy.json";
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn update_probe(owner: &str, fields: &Value) {
+    let path = session_store_path(owner, PROBE_STRATEGY_FILE);
+    let baseline = fields.get("baseline_score").and_then(Value::as_f64);
+    if crate::pkfs::exists(&path) {
+        let probe = crate::pkfs::read_to_string(&path).and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        let probe_score = probe
+            .as_ref()
+            .and_then(|probe| probe.get("policy_id")?.as_str())
+            .and_then(|policy| {
+                fields
+                    .get("rankings")?
+                    .as_array()?
+                    .iter()
+                    .find(|ranking| ranking.get("policy_id").and_then(Value::as_str) == Some(policy))?
+                    .get("score")?
+                    .as_f64()
+            });
+        let dampen = matches!((probe_score, baseline), (Some(score), Some(base)) if score < base);
+        if dampen {
+            crate::pkfs::remove_file(&path);
+        }
+        return;
+    }
+    let improved = fields.get("improved").and_then(Value::as_bool).unwrap_or(false);
+    let never_worse = fields.get("never_worse").and_then(Value::as_bool).unwrap_or(false);
+    let observations = fields
+        .get("history")
+        .and_then(|history| history.get("observations"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if improved && never_worse && observations >= INSUFFICIENT_RECORD_THRESHOLD {
+        let probe = json!({
+            "kind": "probe-strategy",
+            "scope": "session",
+            "owner_session_id": owner,
+            "policy_id": fields.get("selected_policy_id"),
+            "baseline_score": baseline,
+            "selected_score": fields.get("selected_score"),
+            "n_observations": observations,
+            "ts": super::state::now_ms() as i64,
+        });
+        crate::pkfs::write(&path, &probe.to_string());
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2199,14 +2234,10 @@ fn seal(content: &str) -> Result<Value, String> {
     }).collect::<Result<Vec<_>, String>>()?;
     let world = parse_world(&json!({ "id": world_id, "nodes": nodes }))?;
     let world_path = current_session_store_path("worlds")?;
-    let raw = crate::pkfs::read_to_string(&world_path).unwrap_or_else(|| "[]".to_string());
-    let mut worlds = serde_json::from_str::<Value>(&raw)
-        .map_err(|_| "dream-world-seal world store is invalid".to_string())?
-        .as_array()
-        .cloned()
-        .ok_or_else(|| "dream-world-seal world store is invalid".to_string())?
-        .into_iter()
-        .map(|entry| verify_record("world", &entry))
+    let raw = crate::pkfs::read_to_string(&world_path).unwrap_or_default();
+    let worlds = parse_store(&raw, "dream-world-seal world")?
+        .iter()
+        .map(|entry| verify_record("world", entry))
         .collect::<Result<Vec<_>, _>>()?;
     if worlds
         .iter()
@@ -2217,14 +2248,12 @@ fn seal(content: &str) -> Result<Value, String> {
             world.id
         ));
     }
-    worlds.push(json!({ "id": world.id, "owner_session_id": owner_session_id, "discovery_ids": discovery_ids, "nodes": nodes }));
-    let signed = worlds
-        .into_iter()
-        .map(|record| signed_record("world", record))
-        .collect::<Result<Vec<_>, _>>()?;
-    if !crate::pkfs::write(&world_path, &Value::Array(signed).to_string()) {
-        return Err("dream-world-seal could not persist sealed world".to_string());
-    }
+    let record = signed_record(
+        "world",
+        json!({ "id": world.id, "owner_session_id": owner_session_id, "discovery_ids": discovery_ids, "nodes": nodes }),
+    )?;
+    append_store(&world_path, "dream-world", vec![record])
+        .map_err(|_| "dream-world-seal could not persist sealed world".to_string())?;
     Ok(json!({ "ok": true, "world_id": world.id, "node_count": world.nodes.len() }))
 }
 
@@ -2265,13 +2294,9 @@ fn replay_round(content: &str) -> Result<Value, String> {
     let owner_session_id = session_id()?;
     let replay_id = string_field(&body, "replay_id")?;
     let path = replay_rounds_path()?;
-    let raw = crate::pkfs::read_to_string(&path).unwrap_or_else(|| "[]".to_string());
-    let mut states = serde_json::from_str::<Value>(&raw)
-        .map_err(|_| "dream-replay-round state store is invalid".to_string())?
-        .as_array()
-        .cloned()
-        .ok_or_else(|| "dream-replay-round state store is invalid".to_string())?;
-    let existing_index = states.iter().position(|state| {
+    let raw = crate::pkfs::read_to_string(&path).unwrap_or_default();
+    let states = parse_store(&raw, "dream-replay-round state")?;
+    let existing_index = states.iter().rposition(|state| {
         state.get("replay_id").and_then(Value::as_str) == Some(replay_id.as_str())
             && state.get("owner_session_id").and_then(Value::as_str)
                 == Some(owner_session_id.as_str())
@@ -2311,11 +2336,7 @@ fn replay_round(content: &str) -> Result<Value, String> {
         let world_path = current_session_store_path("worlds")?;
         let raw_worlds = crate::pkfs::read_to_string(&world_path)
             .ok_or_else(|| "dream-replay-round has no sealed worlds".to_string())?;
-        let stored_worlds = serde_json::from_str::<Value>(&raw_worlds)
-            .map_err(|_| "dream-replay-round world store is invalid".to_string())?
-            .as_array()
-            .cloned()
-            .ok_or_else(|| "dream-replay-round world store is invalid".to_string())?
+        let stored_worlds = parse_store(&raw_worlds, "dream-replay-round world")?
             .into_iter()
             .map(|entry| verify_record("world", &entry))
             .collect::<Result<Vec<_>, _>>()?;
@@ -2358,11 +2379,7 @@ fn replay_round(content: &str) -> Result<Value, String> {
     let world_path = current_session_store_path("worlds")?;
     let raw_worlds = crate::pkfs::read_to_string(&world_path)
         .ok_or_else(|| "dream-replay-round has no sealed worlds".to_string())?;
-    let stored_worlds = serde_json::from_str::<Value>(&raw_worlds)
-        .map_err(|_| "dream-replay-round world store is invalid".to_string())?
-        .as_array()
-        .cloned()
-        .ok_or_else(|| "dream-replay-round world store is invalid".to_string())?
+    let stored_worlds = parse_store(&raw_worlds, "dream-replay-round world")?
         .into_iter()
         .map(|entry| verify_record("world", &entry))
         .collect::<Result<Vec<_>, _>>()?;
@@ -2501,14 +2518,8 @@ fn replay_round(content: &str) -> Result<Value, String> {
         })
     };
 
-    if let Some(index) = existing_index {
-        states[index] = state;
-    } else {
-        states.push(state);
-    }
-    if !crate::pkfs::write(&path, &Value::Array(states).to_string()) {
-        return Err("dream-replay-round could not persist state".to_string());
-    }
+    append_store(&path, "dream-replay-round", vec![state])
+        .map_err(|_| "dream-replay-round could not persist state".to_string())?;
     Ok(response)
 }
 
@@ -2590,11 +2601,7 @@ fn evaluate(content: &str) -> Result<Value, String> {
     let world_path = current_session_store_path("worlds")?;
     let raw = crate::pkfs::read_to_string(&world_path)
         .ok_or_else(|| "dream-replay has no sealed worlds".to_string())?;
-    let stored = serde_json::from_str::<Value>(&raw)
-        .map_err(|_| "dream-replay sealed world store is invalid".to_string())?
-        .as_array()
-        .cloned()
-        .ok_or_else(|| "dream-replay sealed world store is invalid".to_string())?
+    let stored = parse_store(&raw, "dream-replay sealed world")?
         .into_iter()
         .map(|entry| verify_record("world", &entry))
         .collect::<Result<Vec<_>, _>>()?;
@@ -2725,6 +2732,7 @@ pub const REPLAY_RESULT_FILE: &str = "replay-result";
 
 #[cfg(target_arch = "wasm32")]
 pub const CYCLE_RESULT_FILE: &str = "cycle-result";
+pub const OBSERVATIONS_FILE: &str = "observations.json";
 
 #[cfg(target_arch = "wasm32")]
 pub const INDEX_PATH: &str = ".gm/dream-rsi/index.json";
@@ -2737,7 +2745,7 @@ fn write_index() {
     let index = json!({
         "schema_version": INDEX_SCHEMA_VERSION,
         "files": {
-            "observations": "observations.json",
+            "observations": OBSERVATIONS_FILE,
             "active_strategy": format!("{ACTIVE_STRATEGY_FILE}.json"),
             "replay_result": format!("{REPLAY_RESULT_FILE}.json"),
             "cycle_result": format!("{CYCLE_RESULT_FILE}.json"),
