@@ -41,7 +41,7 @@ jobs:
           key: wasip3-component
 
       - name: Build the guest as a wasip3 component (slim, wit-env)
-        run: cargo build -p rs-plugkit --release --target wasm32-wasip3 --features slim,wit-env
+        run: cargo build -p rs-plugkit --target wasm32-wasip3 --features slim,wit-env
 
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
         with:
@@ -56,7 +56,7 @@ jobs:
       - name: Witness the component against env.wit
         run: |
           set -euo pipefail
-          wasm=target/wasm32-wasip3/release/rs_plugkit.wasm
+          wasm=target/wasm32-wasip3/debug/rs_plugkit.wasm
           wasm-tools validate "$wasm"
           wasm-tools component wit "$wasm" > component.wit
           grep -q 'import gm:plugkit/env' component.wit
