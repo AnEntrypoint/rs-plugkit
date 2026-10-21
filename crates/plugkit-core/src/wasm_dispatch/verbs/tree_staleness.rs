@@ -9,6 +9,7 @@ fn scope_dir(body: &Value) -> String {
         .get("path")
         .and_then(Value::as_str)
         .or_else(|| body.get("paths").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_str))
+        .or_else(|| body.get("files").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_str))
         .map(|p| p.trim().trim_start_matches("./"))
         .filter(|p| !p.is_empty() && *p != "." && !p.contains("..") && !p.contains(['*', '?', '[']));
     let Some(named) = named else {
