@@ -598,6 +598,7 @@ const PRD_LIST_DECLARED_BODY_FIELDS: &[&str] = &[
     "bodies",
     "brief",
     "compact",
+    "query",
 ];
 
 const PRD_LIST_ENVELOPE_FIELDS: &[&str] = &[
@@ -635,7 +636,7 @@ fn undeclared_list_key_refusal(request: &serde_json::Value) -> Option<(String, S
         "verb": "prd-list",
         "error_code": "body_undeclared_key",
         "error": format!(
-            "prd-list body has undeclared key {} -- declared body fields: {}; prd-list has no text search, so a query key is refused rather than ignored",
+            "prd-list body has undeclared key {} -- declared body fields: {}",
             unknown.join(", "),
             PRD_LIST_DECLARED_BODY_FIELDS.join(", ")
         ),
@@ -767,6 +768,18 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         selected.retain(|row| {
             let id = row_text(row, &["id"]);
             id_prefixes.iter().any(|prefix| id.starts_with(prefix.as_str()))
+        });
+    }
+    if let Some(needle) = request
+        .get("query")
+        .and_then(serde_json::Value::as_str)
+        .map(|text| text.trim().to_lowercase())
+        .filter(|text| !text.is_empty())
+    {
+        selected.retain(|row| {
+            ["id", "title", "subject", "description"]
+                .iter()
+                .any(|key| row_text(row, &[*key]).to_lowercase().contains(needle.as_str()))
         });
     }
     if !wanted_ids.is_empty() && selected.is_empty() {
