@@ -3895,6 +3895,34 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 })));
             }
         }
+        let cached_removals: Vec<String> = index_removed_paths
+            .iter()
+            .filter(|p| !add_all && paths.contains(p) && head_tracks_path(cwd, p))
+            .filter(|p| {
+                let argv: Vec<String> = vec!["ls-files".to_string(), "--others".to_string(), "--".to_string(), p.to_string()];
+                parse_ignore_list(git_call_argv(&as_argv(&argv), cwd).get("stdout").and_then(|v| v.as_str()).unwrap_or(""))
+                    .iter()
+                    .any(|listed| listed == *p)
+            })
+            .cloned()
+            .collect();
+        if !cached_removals.is_empty() {
+            if let Some(filter) = own_rows_filter.as_mut() {
+                filter.restore();
+            }
+            return Ok(err_json(
+                "git_commit",
+                json!({
+                    "error": format!(
+                        "the index removes {} from HEAD (git rm --cached) while the file stays in the work tree; a path-limited commit keeps the file and would drop the removal. Delete the file from the work tree and commit again, or commit the whole index with allow_whole_index:true.",
+                        cached_removals.join(", ")
+                    ),
+                    "error_code": "staged_removal_not_committable",
+                    "cached_removals": cached_removals,
+                    "requested_paths": scoped_paths,
+                }),
+            ));
+        }
         let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd, &commit_note_paths(cwd, scoped_paths));
         let bundled_message = bundle_prd_commit_comments(message, &commit_notes);
         let identity = commit_identity(body);
