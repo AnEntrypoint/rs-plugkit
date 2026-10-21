@@ -385,11 +385,35 @@ fn evaluate_worlds(
         let incumbent = policies.remove(position);
         policies.insert(0, incumbent);
     }
+    // Replay every world under every policy once. A world that fails under any policy is dropped from
+    // every ranking so the candidates stay comparable, and it is reported in skipped_worlds.
+    let evaluated: Vec<Vec<Result<Value, String>>> = policies
+        .iter()
+        .map(|policy| worlds.iter().map(|world| evaluate_policy(world, policy, beta1, beta2)).collect())
+        .collect();
+    let mut usable = vec![true; worlds.len()];
+    let mut skipped_worlds = Vec::new();
+    for (policy_index, policy) in policies.iter().enumerate() {
+        for (index, result) in evaluated[policy_index].iter().enumerate() {
+            if let Err(error) = result {
+                if usable[index] {
+                    usable[index] = false;
+                    skipped_worlds.push(json!({ "world_id": worlds[index].id, "policy_id": policy.id, "error": error }));
+                }
+            }
+        }
+    }
+    let usable_count = usable.iter().filter(|kept| **kept).count();
+    if usable_count == 0 {
+        return Err("dream-replay: no sealed world replays under every policy".to_string());
+    }
     let mut rankings = Vec::new();
-    for policy in &policies {
-        let replays = worlds
+    for (policy_index, policy) in policies.iter().enumerate() {
+        let replays = evaluated[policy_index]
             .iter()
-            .map(|world| evaluate_policy(world, policy, beta1, beta2))
+            .zip(usable.iter())
+            .filter(|(_, kept)| **kept)
+            .map(|(result, _)| result.clone())
             .collect::<Result<Vec<_>, _>>()?;
         let scores = replays
             .iter()
@@ -438,7 +462,7 @@ fn evaluate_worlds(
     let selected = rankings
         .iter()
         .filter(|ranking| {
-            worlds.len() >= PROMOTION_MIN_WORLDS
+            usable_count >= PROMOTION_MIN_WORLDS
                 && ranking
                     .get("score")
                     .and_then(Value::as_f64)
@@ -486,14 +510,15 @@ fn evaluate_worlds(
         "improved": improved,
         "promotion_reason": if improved {
             "improved"
-        } else if worlds.len() < PROMOTION_MIN_WORLDS {
+        } else if usable_count < PROMOTION_MIN_WORLDS {
             "insufficient_worlds"
         } else {
             "below_margin"
         },
         "promotion_margin": PROMOTION_MARGIN,
-        "n_observations": worlds.len(),
-        "domain": if worlds.len() < PROMOTION_MIN_WORLDS { "disorder" } else { "order" },
+        "n_observations": usable_count,
+        "skipped_worlds": skipped_worlds,
+        "domain": if usable_count < PROMOTION_MIN_WORLDS { "disorder" } else { "order" },
         "beta1": beta1,
         "beta2": beta2,
         "rankings": rankings,
