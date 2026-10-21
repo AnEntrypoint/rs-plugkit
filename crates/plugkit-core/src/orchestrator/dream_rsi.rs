@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 #[cfg(target_arch = "wasm32")]
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -57,6 +58,77 @@ struct World {
 }
 
 pub const INSUFFICIENT_RECORD_THRESHOLD: u64 = 20;
+pub const MAX_PART_A_PROPOSALS: usize = 3;
+pub const MAX_PART_B_PROPOSALS: usize = 5;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DreamRsiStatus {
+    Proposed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerbStat {
+    pub verb: String,
+    pub count: u64,
+    pub failure_rate: f64,
+    pub gate_drift_rate: f64,
+    pub not_found: u64,
+    pub unclassified: u64,
+    pub causes: BTreeMap<String, u64>,
+    pub exit_codes: BTreeMap<i64, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerbProposal {
+    pub verb: String,
+    pub change: String,
+    pub evidence: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PartA {
+    Measured {
+        records: u64,
+        per_verb: Vec<VerbStat>,
+        proposals: Vec<VerbProposal>,
+    },
+    Insufficient {
+        records: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RejectedWalk {
+    pub node: String,
+    pub missing_dispatch_ids: Vec<String>,
+    pub reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeProposal {
+    pub node: String,
+    pub walk_when: String,
+    pub evidence_that_counts: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartB {
+    pub traversable_nodes: u64,
+    pub nodes_verified: u64,
+    pub backreference_edges: u64,
+    pub backreferences_verified: u64,
+    pub forward_edge_coverage_approx: f64,
+    pub rejected_walks: Vec<RejectedWalk>,
+    pub proposals: Vec<NodeProposal>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DreamRsiResult {
+    pub status: DreamRsiStatus,
+    pub part_a: PartA,
+    pub part_b: PartB,
+}
 
 fn string_field(value: &Value, field: &str) -> Result<String, String> {
     let value = value
@@ -80,6 +152,14 @@ fn array_field<'a>(value: &'a Value, field: &str) -> Result<&'a Vec<Value>, Stri
         .get(field)
         .and_then(Value::as_array)
         .ok_or_else(|| format!("dream-replay-cycle requires array {field}"))
+}
+
+fn nonneg_f64_field(value: &Value, field: &str) -> Result<f64, String> {
+    value
+        .get(field)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(|| format!("dream-replay-cycle requires non-negative finite {field}"))
 }
 
 fn parse_policy(value: &Value) -> Result<Policy, String> {
@@ -131,6 +211,65 @@ fn parse_policy(value: &Value) -> Result<Policy, String> {
         group_size,
         stop,
     })
+}
+
+fn parse_world(value: &Value) -> Result<World, String> {
+    let id = string_field(value, "id")?;
+    let mut nodes = BTreeMap::new();
+    for (index, raw) in array_field(value, "nodes")?.iter().enumerate() {
+        let node_id = string_field(raw, "id")?;
+        if nodes.contains_key(&node_id) {
+            return Err(format!("dream-replay-cycle world {id} repeats node {node_id}"));
+        }
+        let score = raw
+            .get("score")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| format!("dream-replay-cycle node {node_id} requires finite score"))?;
+        let cost = raw.get("cost").and_then(Value::as_u64).ok_or_else(|| {
+            format!("dream-replay-cycle node {node_id} requires non-negative integer cost")
+        })?;
+        let round = raw
+            .get("round")
+            .and_then(Value::as_u64)
+            .unwrap_or(index as u64);
+        let children = array_field(raw, "children")?
+            .iter()
+            .map(|child| {
+                child
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| format!("dream-replay-cycle node {node_id} has an empty child"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        nodes.insert(
+            node_id.clone(),
+            Node {
+                id: node_id,
+                score,
+                cost,
+                round,
+                children,
+            },
+        );
+    }
+    if nodes.is_empty() {
+        return Err(format!(
+            "dream-replay-cycle world {id} requires at least one node"
+        ));
+    }
+    for node in nodes.values() {
+        for child in &node.children {
+            if !nodes.contains_key(child) {
+                return Err(format!(
+                    "dream-replay-cycle world {id} node {} references unobserved child {child}",
+                    node.id
+                ));
+            }
+        }
+    }
+    Ok(World { id, nodes })
 }
 
 fn evaluate_policy(
@@ -420,6 +559,70 @@ fn session_store_path(session: &str, file: &str) -> String {
 #[cfg(target_arch = "wasm32")]
 fn current_session_store_path(name: &str) -> Result<String, String> {
     Ok(session_store_path(&session_id()?, &format!("{name}.json")))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_store(raw: &str, label: &str) -> Result<Vec<Value>, String> {
+    let invalid = || format!("{label} store is invalid");
+    if raw.trim_start().starts_with('[') {
+        return serde_json::from_str::<Value>(raw)
+            .ok()
+            .and_then(|value| value.as_array().cloned())
+            .ok_or_else(invalid);
+    }
+    raw.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .ok()
+                .filter(Value::is_object)
+                .ok_or_else(invalid)
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn append_store(path: &str, kind: &str, records: Vec<Value>) -> Result<(), String> {
+    let raw = crate::pkfs::read_to_string(path).unwrap_or_default();
+    if raw.trim_start().starts_with('[') {
+        let migrated = parse_store(&raw, kind)?
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>();
+        if !matches!(
+            crate::pkfs::cas_write(path, &raw, &migrated),
+            crate::pkfs::CasWriteOutcome::Swapped
+        ) {
+            return Err(format!("{kind} store changed during migration"));
+        }
+    }
+    for record in records {
+        super::row_store::append_chained(path, kind, record)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn latest_per_owner_id(records: Vec<Value>) -> Vec<Value> {
+    let key = |record: &Value| {
+        (
+            record.get("owner_session_id").map(|v| v.to_string()),
+            record.get("id").map(|v| v.to_string()),
+        )
+    };
+    let mut latest: Vec<Value> = Vec::new();
+    let mut slot_of: std::collections::HashMap<(Option<String>, Option<String>), usize> =
+        std::collections::HashMap::new();
+    for record in records {
+        match slot_of.get(&key(&record)) {
+            Some(&index) => latest[index] = record,
+            None => {
+                slot_of.insert(key(&record), latest.len());
+                latest.push(record);
+            }
+        }
+    }
+    latest
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1491,6 +1694,67 @@ pub(super) fn update_probe(owner: &str, fields: &Value) {
 }
 
 #[cfg(target_arch = "wasm32")]
+fn automatic_replay(session_id: Option<&str>) -> Value {
+    let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
+        return Value::Null;
+    };
+    let (observations, parse_rejected) = session_history(session_id);
+    if observations.is_empty() && parse_rejected == 0 {
+        return Value::Null;
+    }
+    let mut ledger = LedgerCheck::load();
+    let mut dropped: BTreeMap<&'static str, usize> = BTreeMap::new();
+    if parse_rejected > 0 {
+        dropped.insert("unparseable", parse_rejected);
+    }
+    let mut replays = Vec::new();
+    for observation in observations.iter().rev() {
+        if !observation.succeeded() && !observation.is_gate_drift_failure() {
+            *dropped.entry("non_gate_failure").or_default() += 1;
+            continue;
+        }
+        if let Err(reason) = ledger.verdict(session_id, observation) {
+            *dropped.entry(reason).or_default() += 1;
+            continue;
+        }
+        let Some(quality) = observation.quality else {
+            *dropped.entry("unscored").or_default() += 1;
+            continue;
+        };
+        let Some(prd_open) = observation.prd_open_count else {
+            *dropped.entry("prd_count_unknown").or_default() += 1;
+            continue;
+        };
+        let Some(mutable_open) = observation.mutable_open_count else {
+            *dropped.entry("mutable_count_unknown").or_default() += 1;
+            continue;
+        };
+        let cost = prd_open + mutable_open + 1;
+        let parallelism_bonus = 1.0_f64;
+        let replay_score = quality - DEFAULT_CYCLE_BETA1 * cost as f64 + DEFAULT_CYCLE_BETA2 * parallelism_bonus;
+        replays.push(json!({ "dispatch_id": observation.dispatch_id, "verb": observation.verb, "fingerprint": observation.fingerprint, "score": replay_score, "quality": quality, "cost": cost }));
+    }
+    if replays.is_empty() {
+        return json!({ "ok": true, "selection": Value::Null, "replay_count": 0, "observations": observations.len(), "dropped": dropped, "replays": [] });
+    }
+    let score = replays
+        .iter()
+        .filter_map(|entry| entry.get("score").and_then(Value::as_f64))
+        .sum::<f64>();
+    let selected = if replays
+        .iter()
+        .any(|entry| entry.get("quality").and_then(Value::as_f64) == Some(0.0))
+    {
+        SELECTION_REPLAY_RECORDED_SUCCESSES_FIRST
+    } else {
+        SELECTION_CONTINUE_CURRENT_EXPLORATION
+    };
+    let replay_count = replays.len();
+    replays.truncate(AUTOMATIC_REPLAY_SAMPLE);
+    json!({ "ok": true, "selection": selected, "score": score, "replay_count": replay_count, "observations": observations.len(), "dropped": dropped, "replays": replays })
+}
+
+#[cfg(target_arch = "wasm32")]
 pub(super) fn persisted_cycle_result(session_id: Option<&str>) -> Value {
     let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
         return Value::Null;
@@ -1508,10 +1772,203 @@ pub(super) fn persisted_probe(session_id: &str) -> Value {
 }
 
 #[cfg(target_arch = "wasm32")]
+const AUTOMATIC_REPLAY_SAMPLE: usize = 8;
+
+#[cfg(target_arch = "wasm32")]
+const SELECTION_REPLAY_RECORDED_SUCCESSES_FIRST: &str = "replay-recorded-successes-first";
+
+#[cfg(target_arch = "wasm32")]
+const SELECTION_CONTINUE_CURRENT_EXPLORATION: &str = "continue-current-exploration";
+
+#[cfg(target_arch = "wasm32")]
+fn propose_strategy() -> Result<Value, String> {
+    let owner = session_id()?;
+    if owner.len() > 256
+        || matches!(owner.as_str(), "." | "..")
+        || !owner
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err("dream-strategy-propose requires a safe session ID".to_string());
+    }
+    let replay = automatic_replay(Some(owner.as_str()));
+    let proposed_selection = replay
+        .get("selection")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| SELECTION_CONTINUE_CURRENT_EXPLORATION.to_string());
+    let path = session_store_path(&owner, "proposed-strategy.json");
+    let proposal = json!({
+        "ok": true,
+        "kind": "strategy-proposal",
+        "owner_session_id": owner,
+        "proposed_selection": proposed_selection,
+        "replay": replay,
+        "path": &path,
+    });
+    if !crate::pkfs::write(&path, &proposal.to_string()) {
+        return Err("dream-strategy-propose could not persist proposal".to_string());
+    }
+    Ok(proposal)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn evaluator_receipt_path() -> Result<String, String> {
+    current_session_store_path("evaluator-receipts")
+}
+
+#[cfg(target_arch = "wasm32")]
 fn session_id() -> Result<String, String> {
     crate::orchestrator::state::dispatch_session_id()
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| "Dream-RSI requires a gm session ID".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn signed_record(_kind: &str, record: Value) -> Result<Value, String> {
+    Ok(record)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn verify_record(kind: &str, record: &Value) -> Result<Value, String> {
+    let record = record.clone();
+    let owner = record
+        .get("owner_session_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Dream-RSI {kind} record is missing owner_session_id"))?;
+    if owner != session_id()? {
+        return Err(format!(
+            "Dream-RSI {kind} record belongs to another session"
+        ));
+    }
+    if kind == "evaluator" {
+        let dispatch_id = string_field(&record, "dispatch_id")?;
+        let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+        let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id)?
+            .ok_or_else(|| "Dream-RSI evaluator dispatch is absent".to_string())?;
+        let verb = dispatch
+            .get("verb")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Dream-RSI evaluator dispatch lacks verb".to_string())?;
+        let fingerprint = dispatch
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Dream-RSI evaluator dispatch lacks fingerprint".to_string())?;
+        let exit_code = dispatch
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| "Dream-RSI evaluator dispatch lacks exit code".to_string())?;
+        let output_bytes = dispatch.get("output_bytes").and_then(Value::as_u64);
+        if record.get("target").and_then(Value::as_str)
+            != Some(format!("{}:{}", verb, fingerprint).as_str())
+            || record.get("evaluator_score").and_then(Value::as_f64)
+                != Some(outcome_score(exit_code, false, output_bytes))
+            || record.get("cost").and_then(Value::as_u64) != Some(1)
+        {
+            return Err("Dream-RSI evaluator metrics do not match dispatch evidence".to_string());
+        }
+    }
+    Ok(record)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn register_policy(content: &str) -> Result<Value, String> {
+    let body: Value = serde_json::from_str(content)
+        .map_err(|error| format!("dream-policy-register requires JSON: {error}"))?;
+    let policy = parse_policy(
+        body.get("policy")
+            .ok_or_else(|| "dream-policy-register requires policy".to_string())?,
+    )?;
+    let owner_session_id = session_id()?;
+    let deployed = body
+        .get("deployed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let max_online_rounds = body.get("max_online_rounds").map(|value| value.as_u64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "dream-policy-register max_online_rounds must be a positive integer when present".to_string())).transpose()?;
+    let policy_path = current_session_store_path("policies")?;
+    let raw = crate::pkfs::read_to_string(&policy_path).unwrap_or_else(|| "[]".to_string());
+    let mut policies = latest_per_owner_id(
+        parse_store(&raw, "dream-policy-register policy")?
+            .into_iter()
+            .map(|entry| verify_record("policy", &entry))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    if policies.iter().any(|entry| {
+        entry.get("id").and_then(Value::as_str) == Some(policy.id.as_str())
+            && entry.get("owner_session_id").and_then(Value::as_str)
+                == Some(owner_session_id.as_str())
+    }) {
+        return Err(format!(
+            "dream-policy-register policy {} already exists",
+            policy.id
+        ));
+    }
+    let mut flipped: Vec<Value> = Vec::new();
+    if deployed {
+        let incumbent = policies
+            .iter()
+            .find(|entry| {
+                entry.get("owner_session_id").and_then(Value::as_str)
+                    == Some(owner_session_id.as_str())
+                    && entry.get("deployed").and_then(Value::as_bool) == Some(true)
+            })
+            .map(|entry| {
+                (
+                    entry.get("id").and_then(Value::as_str).map(str::to_string),
+                    entry.get("deployed_at").and_then(Value::as_i64),
+                )
+            });
+        if let Some((Some(incumbent), deployed_at)) = incumbent {
+            let replay_path = current_session_store_path(ReplayFile::Replay.name())?;
+            let proven = crate::pkfs::read_to_string(&replay_path)
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .is_some_and(|result| {
+                    result.get("owner_session_id").and_then(Value::as_str)
+                        == Some(owner_session_id.as_str())
+                        && result.get("selected_policy_id").and_then(Value::as_str) == Some(policy.id.as_str())
+                        && result.get("baseline_policy_id").and_then(Value::as_str) == Some(incumbent.as_str())
+                        && result.get("improved").and_then(Value::as_bool) == Some(true)
+                        && result.get("never_worse").and_then(Value::as_bool) == Some(true)
+                        && deployed_at.is_some_and(|since| {
+                            result.get("ts").and_then(Value::as_i64).is_some_and(|ts| ts >= since)
+                        })
+                });
+            if !proven {
+                return Err(format!(
+                    "dream-policy-register deployed {} requires a replay-result that selects it over deployed baseline {incumbent}",
+                    policy.id
+                ));
+            }
+        }
+        for entry in &mut policies {
+            if entry.get("owner_session_id").and_then(Value::as_str)
+                == Some(owner_session_id.as_str())
+                && entry.get("deployed") != Some(&Value::Bool(false))
+            {
+                entry["deployed"] = Value::Bool(false);
+                flipped.push(entry.clone());
+            }
+        }
+    }
+    let deployed_at = deployed.then(|| super::state::now_ms() as i64);
+    let new_policy = json!({ "id": policy.id, "owner_session_id": owner_session_id, "roots": policy.roots, "max_nodes": policy.max_nodes, "attempt": policy.attempt, "group_size": policy.group_size, "stop": policy.stop.map(Stop::name), "deployed": deployed, "deployed_at": deployed_at, "max_online_rounds": max_online_rounds, "online_rounds": Vec::<u64>::new() });
+    flipped.push(new_policy);
+    let signed = flipped
+        .into_iter()
+        .map(|record| signed_record("policy", record))
+        .collect::<Result<Vec<_>, _>>()?;
+    append_store(&policy_path, "dream-policy", signed)
+        .map_err(|_| "dream-policy-register could not persist policy".to_string())?;
+    if deployed {
+        let strategy = json!({ "policy_id": policy.id, "owner_session_id": owner_session_id, "deployed_at": deployed_at });
+        let path = session_store_path(&owner_session_id, &format!("{ACTIVE_STRATEGY_FILE}.json"));
+        if !crate::pkfs::write(&path, &format!("{strategy}\n")) {
+            return Err("dream-policy-register could not write active strategy".to_string());
+        }
+    }
+    Ok(json!({ "ok": true, "policy_id": policy.id, "deployed": deployed }))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1548,7 +2005,645 @@ fn outcome_score(exit_code: i64, no_match: bool, output_bytes: Option<u64>) -> f
 }
 
 #[cfg(target_arch = "wasm32")]
+fn evaluator_receipt(content: &str) -> Result<Value, String> {
+    let body: Value = serde_json::from_str(content)
+        .map_err(|error| format!("dream-evaluator-receipt requires JSON: {error}"))?;
+    let receipt_id = string_field(&body, "receipt_id")?;
+    let policy_id = string_field(&body, "policy_id")?;
+    let dispatch_id = string_field(&body, "dispatch_id")?;
+    let parent_id = body
+        .get("parent_id")
+        .map(|_| string_field(&body, "parent_id"))
+        .transpose()?;
+    let owner_session_id = session_id()?;
+    let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id)?.ok_or_else(|| {
+        "dream-evaluator-receipt dispatch_id is not a completed GM dispatch".to_string()
+    })?;
+    let dispatch_session_id = dispatch
+        .get("session_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "dream-evaluator-receipt dispatch lacks session".to_string())?
+        .to_owned();
+    let lean_node = lean_node_for_dispatch(&dispatch_session_id, &dispatch_id);
+    let verb = dispatch
+        .get("verb")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "dream-evaluator-receipt dispatch lacks verb".to_string())?;
+    let fingerprint = dispatch
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "dream-evaluator-receipt dispatch lacks fingerprint".to_string())?;
+    let exit_code = dispatch
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "dream-evaluator-receipt dispatch lacks exit code".to_string())?;
+    let output_bytes = dispatch.get("output_bytes").and_then(Value::as_u64);
+    let target = format!("{}:{}", verb, fingerprint);
+    let signed = signed_record(
+        "evaluator",
+        json!({ "id": receipt_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "dispatch_session_id": dispatch_session_id, "lean_node": lean_node, "exit_code": exit_code, "evaluator_score": outcome_score(exit_code, false, output_bytes), "cost": 1, "parent_id": parent_id, "owner_session_id": owner_session_id, "metric": "completed-dispatch-success" }),
+    )?;
+    let path = evaluator_receipt_path()?;
+    append_store(&path, "dream-evaluator-receipt", vec![signed.clone()])
+        .map_err(|_| "dream-evaluator-receipt could not persist receipt".to_string())?;
+    Ok(signed)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn record_discovery(content: &str) -> Result<Value, String> {
+    let body: Value = serde_json::from_str(content)
+        .map_err(|error| format!("dream-discovery-record requires JSON: {error}"))?;
+    let id = string_field(&body, "id")?;
+    let owner_session_id = session_id()?;
+    let receipt_id = string_field(&body, "evaluator_receipt_id")?;
+    let round = body
+        .get("round")
+        .map(|_| {
+            body.get("round").and_then(Value::as_u64).ok_or_else(|| {
+                "dream-discovery-record round must be a non-negative integer when present"
+                    .to_string()
+            })
+        })
+        .transpose()?;
+    let receipt_path = evaluator_receipt_path()?;
+    let raw_receipts = crate::pkfs::read_to_string(&receipt_path)
+        .ok_or_else(|| "dream-discovery-record has no evaluator receipts".to_string())?;
+    let receipts = parse_store(&raw_receipts, "dream-discovery-record evaluator receipt")?;
+    let signed_receipt = receipts
+        .iter()
+        .find(|receipt| receipt.get("id").and_then(Value::as_str) == Some(receipt_id.as_str()))
+        .ok_or_else(|| "dream-discovery-record evaluator receipt is absent".to_string())?;
+    let evaluator = verify_record("evaluator", signed_receipt)?;
+    let target = string_field(&evaluator, "target")?;
+    let policy_id = string_field(&evaluator, "policy_id")?;
+    let dispatch_id = string_field(&evaluator, "dispatch_id")?;
+    let evaluator_score = evaluator
+        .get("evaluator_score")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| {
+            "dream-discovery-record evaluator receipt requires finite evaluator_score".to_string()
+        })?;
+    let cost = evaluator
+        .get("cost")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "dream-discovery-record evaluator receipt requires non-negative integer cost"
+                .to_string()
+        })?;
+    let parent_id = evaluator
+        .get("parent_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned);
+    let policy_path = current_session_store_path("policies")?;
+    let raw_policies = crate::pkfs::read_to_string(&policy_path)
+        .ok_or_else(|| "dream-discovery-record has no registered policies".to_string())?;
+    let mut policies = latest_per_owner_id(
+        parse_store(&raw_policies, "dream-discovery-record policy")?
+            .into_iter()
+            .map(|entry| verify_record("policy", &entry))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    let policy_index = policies
+        .iter()
+        .position(|policy| {
+            policy.get("id").and_then(Value::as_str) == Some(policy_id.as_str())
+                && policy.get("owner_session_id").and_then(Value::as_str)
+                    == Some(owner_session_id.as_str())
+        })
+        .ok_or_else(|| {
+            "dream-discovery-record policy_id is not registered in this session".to_string()
+        })?;
+    let mut policies_dirty = false;
+    if let Some(max_online_rounds) = policies[policy_index]
+        .get("max_online_rounds")
+        .and_then(Value::as_u64)
+    {
+        let round = round.ok_or_else(|| format!("dream-discovery-record policy {policy_id} caps online rounds at {max_online_rounds}; round is required"))?;
+        let mut online_rounds: Vec<u64> = policies[policy_index]
+            .get("online_rounds")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().filter_map(Value::as_u64).collect())
+            .unwrap_or_default();
+        if !online_rounds.contains(&round) {
+            if online_rounds.len() as u64 >= max_online_rounds {
+                return Err(format!("dream-discovery-record policy {policy_id} has used all {max_online_rounds} online rounds; seal the recorded discoveries and dream-replay-cycle/dream-replay-round before continuing this policy's online rollout"));
+            }
+            online_rounds.push(round);
+            policies[policy_index]["online_rounds"] =
+                Value::Array(online_rounds.into_iter().map(Value::from).collect());
+            policies_dirty = true;
+        }
+    }
+    let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let dispatch = crate::dispatch_ledger::lookup(&cwd, &dispatch_id)?.ok_or_else(|| {
+        "dream-discovery-record dispatch_id is not a completed gm dispatch".to_string()
+    })?;
+    if dispatch.get("exit_code").and_then(Value::as_i64) != Some(0) {
+        return Err("dream-discovery-record requires a successful completed dispatch".to_string());
+    }
+    let discovery_path = current_session_store_path("discovery")?;
+    let raw = crate::pkfs::read_to_string(&discovery_path).unwrap_or_else(|| "[]".to_string());
+    let records = parse_store(&raw, "dream-discovery-record")?
+        .into_iter()
+        .map(|entry| verify_record("discovery", &entry))
+        .collect::<Result<Vec<_>, _>>()?;
+    if records
+        .iter()
+        .any(|record| record.get("id").and_then(Value::as_str) == Some(id.as_str()))
+    {
+        return Err(format!("dream-discovery-record {id} already exists"));
+    }
+    if let Some(parent_id) = &parent_id {
+        if !records.iter().any(|record| {
+            record.get("id").and_then(Value::as_str) == Some(parent_id.as_str())
+                && record.get("owner_session_id").and_then(Value::as_str)
+                    == Some(owner_session_id.as_str())
+        }) {
+            return Err(format!(
+                "dream-discovery-record parent {parent_id} is absent"
+            ));
+        }
+    }
+    let record = json!({ "id": id, "evaluator_receipt_id": receipt_id, "owner_session_id": owner_session_id, "target": target, "policy_id": policy_id, "dispatch_id": dispatch_id, "evaluator_score": evaluator_score, "cost": cost, "round": round, "parent_id": parent_id });
+    let signed = signed_record("discovery", record)?;
+    append_store(&discovery_path, "dream-discovery-record", vec![signed])
+        .map_err(|_| "dream-discovery-record could not persist discovery record".to_string())?;
+    if policies_dirty {
+        let signed_policy = signed_record("policy", policies[policy_index].clone())?;
+        append_store(&policy_path, "dream-policy", vec![signed_policy]).map_err(|_| {
+            "dream-discovery-record could not persist policy online-round usage".to_string()
+        })?;
+    }
+    Ok(json!({ "ok": true, "discovery_id": id }))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn seal(content: &str) -> Result<Value, String> {
+    let body: Value = serde_json::from_str(content)
+        .map_err(|error| format!("dream-world-seal requires JSON: {error}"))?;
+    let world_id = string_field(&body, "world_id")?;
+    let owner_session_id = session_id()?;
+    let discovery_ids = array_field(&body, "discovery_ids")?;
+    if discovery_ids.is_empty() {
+        return Err("dream-world-seal requires recorded discovery_ids".to_string());
+    }
+    let discovery_path = current_session_store_path("discovery")?;
+    let raw_records = crate::pkfs::read_to_string(&discovery_path)
+        .ok_or_else(|| "dream-world-seal has no discovery records".to_string())?;
+    let records = parse_store(&raw_records, "dream-world-seal discovery record")?
+        .into_iter()
+        .map(|entry| verify_record("discovery", &entry))
+        .collect::<Result<Vec<_>, _>>()?;
+    let nodes = discovery_ids.iter().enumerate().map(|(index, value)| {
+        let id = value.as_str().ok_or_else(|| "dream-world-seal discovery_ids must contain strings".to_string())?;
+        let record = records.iter().find(|record| record.get("id").and_then(Value::as_str) == Some(id)).ok_or_else(|| format!("dream-world-seal discovery {id} is absent"))?;
+        if record.get("owner_session_id").and_then(Value::as_str) != Some(owner_session_id.as_str()) { return Err(format!("dream-world-seal discovery {id} belongs to another session")); }
+        let receipt_id = string_field(record, "evaluator_receipt_id")?;
+        let receipt_path = evaluator_receipt_path()?;
+        let raw_receipts = crate::pkfs::read_to_string(&receipt_path).ok_or_else(|| "dream-world-seal has no evaluator receipts".to_string())?;
+        let receipts = parse_store(&raw_receipts, "dream-world-seal evaluator receipt")?;
+        let receipt = receipts.iter().find(|receipt| receipt.get("id").and_then(Value::as_str) == Some(receipt_id.as_str())).ok_or_else(|| format!("dream-world-seal evaluator receipt {receipt_id} is absent"))?;
+        let evaluator = verify_record("evaluator", receipt)?;
+        if evaluator.get("policy_id").and_then(Value::as_str) != record.get("policy_id").and_then(Value::as_str)
+            || evaluator.get("dispatch_id").and_then(Value::as_str) != record.get("dispatch_id").and_then(Value::as_str) { return Err(format!("dream-world-seal discovery {id} does not match evaluator receipt")); }
+        let score = evaluator.get("evaluator_score").and_then(Value::as_f64).ok_or_else(|| format!("dream-world-seal evaluator receipt {receipt_id} lacks score"))?;
+        let cost = evaluator.get("cost").and_then(Value::as_u64).ok_or_else(|| format!("dream-world-seal evaluator receipt {receipt_id} lacks cost"))?;
+        let round = record.get("round").and_then(Value::as_u64).unwrap_or(index as u64);
+        let children = records.iter()
+            .filter(|other| other.get("parent_id").and_then(Value::as_str) == Some(id)
+                && discovery_ids.iter().any(|listed| listed.as_str() == Some(other.get("id").and_then(Value::as_str).unwrap_or(""))))
+            .filter_map(|other| other.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        Ok(json!({ "id": id, "score": score, "cost": cost, "round": round, "children": children }))
+    }).collect::<Result<Vec<_>, String>>()?;
+    let world = parse_world(&json!({ "id": world_id, "nodes": nodes }))?;
+    let world_path = current_session_store_path("worlds")?;
+    let raw = crate::pkfs::read_to_string(&world_path).unwrap_or_default();
+    let worlds = parse_store(&raw, "dream-world-seal world")?
+        .iter()
+        .map(|entry| verify_record("world", entry))
+        .collect::<Result<Vec<_>, _>>()?;
+    if worlds
+        .iter()
+        .any(|entry| entry.get("id").and_then(Value::as_str) == Some(world.id.as_str()))
+    {
+        return Err(format!(
+            "dream-world-seal world {} already exists",
+            world.id
+        ));
+    }
+    let record = signed_record(
+        "world",
+        json!({ "id": world.id, "owner_session_id": owner_session_id, "discovery_ids": discovery_ids, "nodes": nodes }),
+    )?;
+    append_store(&world_path, "dream-world", vec![record])
+        .map_err(|_| "dream-world-seal could not persist sealed world".to_string())?;
+    Ok(json!({ "ok": true, "world_id": world.id, "node_count": world.nodes.len() }))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn replay_rounds_path() -> Result<String, String> {
+    current_session_store_path("replay-rounds")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn eligible_nodes(
+    roots: &[String],
+    revealed: &BTreeSet<String>,
+    world: &World,
+) -> BTreeSet<String> {
+    roots
+        .iter()
+        .cloned()
+        .chain(
+            revealed
+                .iter()
+                .filter(|id| {
+                    world
+                        .nodes
+                        .get(id.as_str())
+                        .map(|node| !node.children.iter().any(|child| revealed.contains(child)))
+                        .unwrap_or(false)
+                })
+                .cloned(),
+        )
+        .filter(|id| world.nodes.contains_key(id))
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn replay_round(content: &str) -> Result<Value, String> {
+    let body: Value = serde_json::from_str(content)
+        .map_err(|error| format!("dream-replay-round requires JSON: {error}"))?;
+    let owner_session_id = session_id()?;
+    let replay_id = string_field(&body, "replay_id")?;
+    let path = replay_rounds_path()?;
+    let raw = crate::pkfs::read_to_string(&path).unwrap_or_default();
+    let states = parse_store(&raw, "dream-replay-round state")?;
+    let existing_index = states.iter().rposition(|state| {
+        state.get("replay_id").and_then(Value::as_str) == Some(replay_id.as_str())
+            && state.get("owner_session_id").and_then(Value::as_str)
+                == Some(owner_session_id.as_str())
+    });
+
+    let mut state = if let Some(index) = existing_index {
+        states[index].clone()
+    } else {
+        let policy_id = string_field(&body, "policy_id")?;
+        let world_id = string_field(&body, "world_id")?;
+        let max_rounds = body
+            .get("max_rounds")
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "dream-replay-round requires positive integer max_rounds".to_string())?;
+        let beta1 = nonneg_f64_field(&body, "beta1")?;
+        let beta2 = nonneg_f64_field(&body, "beta2")?;
+        let round_budget = body.get("round_budget").and_then(Value::as_u64);
+        let policy_path = current_session_store_path("policies")?;
+        let raw_policies = crate::pkfs::read_to_string(&policy_path)
+            .ok_or_else(|| "dream-replay-round has no registered policies".to_string())?;
+        let stored_policies = latest_per_owner_id(
+            parse_store(&raw_policies, "dream-replay-round policy")?
+                .into_iter()
+                .map(|entry| verify_record("policy", &entry))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let stored_policy = stored_policies
+            .iter()
+            .find(|policy| {
+                policy.get("id").and_then(Value::as_str) == Some(policy_id.as_str())
+                    && policy.get("owner_session_id").and_then(Value::as_str)
+                        == Some(owner_session_id.as_str())
+            })
+            .ok_or_else(|| format!("dream-replay-round registered policy {policy_id} is absent"))?;
+        let policy = parse_policy(stored_policy)?;
+        let world_path = current_session_store_path("worlds")?;
+        let raw_worlds = crate::pkfs::read_to_string(&world_path)
+            .ok_or_else(|| "dream-replay-round has no sealed worlds".to_string())?;
+        let stored_worlds = parse_store(&raw_worlds, "dream-replay-round world")?
+            .into_iter()
+            .map(|entry| verify_record("world", &entry))
+            .collect::<Result<Vec<_>, _>>()?;
+        let stored_world = stored_worlds
+            .iter()
+            .find(|world| world.get("id").and_then(Value::as_str) == Some(world_id.as_str()))
+            .ok_or_else(|| format!("dream-replay-round sealed world {world_id} is absent"))?;
+        if stored_world.get("owner_session_id").and_then(Value::as_str)
+            != Some(owner_session_id.as_str())
+        {
+            return Err(format!(
+                "dream-replay-round sealed world {world_id} belongs to another session"
+            ));
+        }
+        parse_world(stored_world)?;
+        json!({
+            "replay_id": replay_id,
+            "owner_session_id": owner_session_id,
+            "policy_id": policy_id,
+            "world_id": world_id,
+            "roots": policy.roots,
+            "max_nodes": policy.max_nodes,
+            "max_rounds": max_rounds,
+            "beta1": beta1,
+            "beta2": beta2,
+            "round_budget": round_budget,
+            "revealed": Vec::<String>::new(),
+            "rounds_used": 0,
+            "quality": Value::Null,
+            "cost": 0,
+            "closed": false,
+        })
+    };
+
+    if state.get("closed").and_then(Value::as_bool) == Some(true) {
+        return Err(format!("dream-replay-round {replay_id} is already closed"));
+    }
+
+    let world_id = string_field(&state, "world_id")?;
+    let world_path = current_session_store_path("worlds")?;
+    let raw_worlds = crate::pkfs::read_to_string(&world_path)
+        .ok_or_else(|| "dream-replay-round has no sealed worlds".to_string())?;
+    let stored_worlds = parse_store(&raw_worlds, "dream-replay-round world")?
+        .into_iter()
+        .map(|entry| verify_record("world", &entry))
+        .collect::<Result<Vec<_>, _>>()?;
+    let stored_world = stored_worlds
+        .iter()
+        .find(|world| world.get("id").and_then(Value::as_str) == Some(world_id.as_str()))
+        .ok_or_else(|| format!("dream-replay-round sealed world {world_id} is absent"))?;
+    let world = parse_world(stored_world)?;
+
+    let roots: Vec<String> = state
+        .get("roots")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let max_nodes = state
+        .get("max_nodes")
+        .and_then(Value::as_u64)
+        .unwrap_or(u64::MAX) as usize;
+    let max_rounds = state.get("max_rounds").and_then(Value::as_u64).unwrap_or(0);
+    let beta1 = state.get("beta1").and_then(Value::as_f64).unwrap_or(0.0);
+    let beta2 = state.get("beta2").and_then(Value::as_f64).unwrap_or(0.0);
+    let mut revealed: BTreeSet<String> = state
+        .get("revealed")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut rounds_used = state
+        .get("rounds_used")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mut quality = state
+        .get("quality")
+        .and_then(Value::as_f64)
+        .unwrap_or(f64::NEG_INFINITY);
+    let mut cost = state.get("cost").and_then(Value::as_u64).unwrap_or(0);
+    let round_budget = state.get("round_budget").and_then(Value::as_u64);
+
+    let eligible = eligible_nodes(&roots, &revealed, &world);
+    let requested_batch: Vec<String> = body
+        .get("batch")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let finalize =
+        requested_batch.is_empty() || rounds_used >= max_rounds || revealed.len() >= max_nodes;
+
+    let mut newly_revealed = Vec::new();
+    if !finalize {
+        for id in &requested_batch {
+            if !eligible.contains(id) {
+                return Err(format!(
+                    "dream-replay-round {id} is not an eligible continuation this round"
+                ));
+            }
+        }
+        let mut round_cost = 0_u64;
+        for id in &requested_batch {
+            let node = world
+                .nodes
+                .get(id)
+                .ok_or_else(|| format!("dream-replay-round world {world_id} has no node {id}"))?;
+            for child_id in &node.children {
+                if revealed.len() >= max_nodes {
+                    break;
+                }
+                if revealed.insert(child_id.clone()) {
+                    let child = world.nodes.get(child_id).ok_or_else(|| format!("dream-replay-round world {world_id} node {id} references unobserved child {child_id}"))?;
+                    quality = quality.max(child.score);
+                    cost = cost
+                        .checked_add(child.cost)
+                        .ok_or_else(|| "dream-replay-round cost overflow".to_string())?;
+                    round_cost = round_cost
+                        .checked_add(child.cost)
+                        .ok_or_else(|| "dream-replay-round round cost overflow".to_string())?;
+                    newly_revealed
+                        .push(json!({ "id": child_id, "score": child.score, "cost": child.cost }));
+                }
+            }
+        }
+        rounds_used += 1;
+    }
+
+    let closed = finalize || rounds_used >= max_rounds || revealed.len() >= max_nodes;
+    state["revealed"] = Value::Array(revealed.iter().cloned().map(Value::String).collect());
+    state["rounds_used"] = Value::from(rounds_used);
+    state["quality"] = if quality.is_finite() {
+        Value::from(quality)
+    } else {
+        Value::Null
+    };
+    state["cost"] = Value::from(cost);
+    state["closed"] = Value::Bool(closed);
+
+    let response = if closed {
+        let attempts = revealed.len() as f64;
+        let parallelism_bonus = if rounds_used > 0 {
+            attempts / rounds_used as f64
+        } else {
+            0.0
+        };
+        let final_quality = if quality.is_finite() { quality } else { 0.0 };
+        let replay_score = final_quality - beta1 * cost as f64 + beta2 * parallelism_bonus;
+        state["replay_score"] = Value::from(replay_score);
+        json!({
+            "ok": true, "replay_id": replay_id, "closed": true, "rounds_used": rounds_used,
+            "revealed_count": revealed.len(), "quality": final_quality, "cost": cost,
+            "parallelism_bonus": parallelism_bonus, "replay_score": replay_score,
+            "round_budget": round_budget,
+        })
+    } else {
+        json!({
+            "ok": true, "replay_id": replay_id, "closed": false, "rounds_used": rounds_used,
+            "rounds_remaining": max_rounds.saturating_sub(rounds_used), "revealed_now": newly_revealed,
+            "eligible_next": eligible_nodes(&roots, &revealed, &world).into_iter().collect::<Vec<_>>(),
+            "quality_so_far": if quality.is_finite() { Value::from(quality) } else { Value::Null },
+            "cost_so_far": cost,
+            "round_budget": round_budget,
+        })
+    };
+
+    append_store(&path, "dream-replay-round", vec![state])
+        .map_err(|_| "dream-replay-round could not persist state".to_string())?;
+    Ok(response)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn evaluate(content: &str) -> Result<Value, String> {
+    let body: Value = serde_json::from_str(content)
+        .map_err(|error| format!("dream-replay-cycle requires JSON: {error}"))?;
+    let owner_session_id = session_id()?;
+    if body.get("worlds").is_some() {
+        return Err(
+            "dream-replay-cycle accepts sealed world_ids, never caller-supplied worlds".to_string(),
+        );
+    }
+    let ids = array_field(&body, "world_ids")?;
+    let baseline_id = string_field(&body, "baseline_policy_id")?;
+    let policy_ids = array_field(&body, "policy_ids")?;
+    let beta1 = nonneg_f64_field(&body, "beta1")?;
+    let beta2 = nonneg_f64_field(&body, "beta2")?;
+    let policy_path = current_session_store_path("policies")?;
+    let raw_policies = crate::pkfs::read_to_string(&policy_path)
+        .ok_or_else(|| "dream-replay-cycle has no registered policies".to_string())?;
+    let stored_policies = latest_per_owner_id(
+        parse_store(&raw_policies, "dream-replay-cycle policy")?
+            .into_iter()
+            .map(|entry| verify_record("policy", &entry))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    let policies = policy_ids
+        .iter()
+        .map(|id| {
+            let id = id
+                .as_str()
+                .ok_or_else(|| "dream-replay-cycle policy_ids must contain strings".to_string())?;
+            let stored_policy = stored_policies
+                .iter()
+                .find(|policy| {
+                    policy.get("id").and_then(Value::as_str) == Some(id)
+                        && policy.get("owner_session_id").and_then(Value::as_str)
+                            == Some(owner_session_id.as_str())
+                })
+                .ok_or_else(|| format!("dream-replay-cycle registered policy {id} is absent"))?;
+            parse_policy(stored_policy)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !stored_policies.iter().any(|policy| {
+        policy.get("id").and_then(Value::as_str) == Some(baseline_id.as_str())
+            && policy.get("owner_session_id").and_then(Value::as_str)
+                == Some(owner_session_id.as_str())
+            && policy.get("deployed").and_then(Value::as_bool) == Some(true)
+    }) {
+        return Err(
+            "dream-replay-cycle baseline_policy_id is not this session's deployed policy".to_string(),
+        );
+    }
+    let world_path = current_session_store_path("worlds")?;
+    let raw = crate::pkfs::read_to_string(&world_path)
+        .ok_or_else(|| "dream-replay-cycle has no sealed worlds".to_string())?;
+    let stored = parse_store(&raw, "dream-replay-cycle sealed world")?
+        .into_iter()
+        .map(|entry| verify_record("world", &entry))
+        .collect::<Result<Vec<_>, _>>()?;
+    let worlds = ids
+        .iter()
+        .map(|id| {
+            let id = id
+                .as_str()
+                .ok_or_else(|| "dream-replay-cycle world_ids must contain strings".to_string())?;
+            let stored_world = stored
+                .iter()
+                .find(|world| world.get("id").and_then(Value::as_str) == Some(id))
+                .ok_or_else(|| format!("dream-replay-cycle sealed world {id} is absent"))?;
+            if stored_world.get("owner_session_id").and_then(Value::as_str)
+                != Some(owner_session_id.as_str())
+            {
+                return Err(format!(
+                    "dream-replay-cycle sealed world {id} belongs to another session"
+                ));
+            }
+            parse_world(stored_world)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    evaluate_worlds(baseline_id, policies, worlds, beta1, beta2)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn dream_round(content: &str) -> Result<Value, String> {
+    let mut body: Value = serde_json::from_str(content)
+        .map_err(|error| format!("dream-round requires JSON: {error}"))?;
+    let baseline_id = string_field(&body, "baseline_policy_id")?;
+    let mut policy_ids = vec![Value::String(baseline_id.clone())];
+    for candidate in array_field(&body, "candidate_policy_ids")? {
+        if !policy_ids.contains(candidate) {
+            policy_ids.push(candidate.clone());
+        }
+    }
+    body["policy_ids"] = Value::Array(policy_ids);
+    let mut result = evaluate(&body.to_string())?;
+    let mut rankings = result
+        .get("rankings")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| "dream-round ranking missing".to_string())?;
+    rankings.sort_by(|left, right| {
+        right
+            .get("score")
+            .and_then(Value::as_f64)
+            .partial_cmp(&left.get("score").and_then(Value::as_f64))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    result["rankings"] = Value::Array(rankings);
+    persist_sealed_replay("dream-round", &mut result);
+    Ok(result)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn evaluate(content: &str) -> Result<Value, String> {
+    let body: Value = serde_json::from_str(content)
+        .map_err(|error| format!("dream-replay-cycle requires JSON: {error}"))?;
+    let baseline_id = string_field(&body, "baseline_policy_id")?;
+    let policies = array_field(&body, "policies")?
+        .iter()
+        .map(parse_policy)
+        .collect::<Result<Vec<_>, _>>()?;
+    let worlds = array_field(&body, "worlds")?
+        .iter()
+        .map(parse_world)
+        .collect::<Result<Vec<_>, _>>()?;
+    let beta1 = nonneg_f64_field(&body, "beta1")?;
+    let beta2 = nonneg_f64_field(&body, "beta2")?;
+    evaluate_worlds(baseline_id, policies, worlds, beta1, beta2)
+}
+
+#[cfg(target_arch = "wasm32")]
 pub const ACTIVE_STRATEGY_FILE: &str = "active-strategy";
+
+#[cfg(target_arch = "wasm32")]
+pub const REPLAY_RESULT_FILE: &str = "replay-result";
 
 #[cfg(target_arch = "wasm32")]
 pub const CYCLE_RESULT_FILE: &str = "cycle-result";
@@ -1567,9 +2662,11 @@ fn write_index() {
         "files": {
             "observations": OBSERVATIONS_FILE,
             "active_strategy": format!("{ACTIVE_STRATEGY_FILE}.json"),
+            "replay_result": format!("{REPLAY_RESULT_FILE}.json"),
             "cycle_result": format!("{CYCLE_RESULT_FILE}.json"),
         },
         "record_kinds": {
+            "replay_result": "replay-result",
             "cycle_result": "cycle-result",
         },
         "fields": ["kind", "source", "owner_session_id", "ts"],
@@ -1580,6 +2677,7 @@ fn write_index() {
 #[cfg(target_arch = "wasm32")]
 pub enum ReplayFile {
     Cycle,
+    Replay,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1587,6 +2685,7 @@ impl ReplayFile {
     fn name(&self) -> &'static str {
         match self {
             ReplayFile::Cycle => CYCLE_RESULT_FILE,
+            ReplayFile::Replay => REPLAY_RESULT_FILE,
         }
     }
 }
@@ -1605,6 +2704,7 @@ pub(super) fn persist_replay_result(
     let path = current_session_store_path(name)?;
     let kind = match file {
         ReplayFile::Cycle => "cycle-result",
+        ReplayFile::Replay => "replay-result",
     };
     let mut record = fields;
     record.insert("kind".into(), json!(kind));
@@ -1616,5 +2716,441 @@ pub(super) fn persist_replay_result(
         Ok(path)
     } else {
         Err(format!("could not write replay result to {path}"))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn persist_sealed_replay(source: &'static str, replay: &mut Value) {
+    let baseline_score = replay.get("baseline_score").and_then(Value::as_f64);
+    let selected_score = replay.get("selected_score").and_then(Value::as_f64);
+    let rankings = replay
+        .get("rankings")
+        .and_then(Value::as_array)
+        .map(|rankings| {
+            rankings
+                .iter()
+                .map(|ranking| json!({
+                    "policy_id": ranking.get("policy_id"),
+                    "score": ranking.get("score"),
+                    "cost": ranking.get("cost"),
+                }))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let ranked_score = |id: Option<&str>| {
+        id.and_then(|id| rankings.iter().find(|ranking| ranking.get("policy_id").and_then(Value::as_str) == Some(id)))
+            .and_then(|ranking| ranking.get("score").and_then(Value::as_f64))
+    };
+    let never_worse = match (
+        ranked_score(replay.get("selected_policy_id").and_then(Value::as_str)),
+        ranked_score(replay.get("baseline_policy_id").and_then(Value::as_str)),
+    ) {
+        (Some(selected), Some(baseline)) => selected >= baseline,
+        _ => false,
+    };
+    let summary = json!({
+        "baseline_policy_id": replay.get("baseline_policy_id"),
+        "selected_policy_id": replay.get("selected_policy_id"),
+        "baseline_score": baseline_score,
+        "selected_score": selected_score,
+        "n_observations": replay.get("n_observations"),
+        "domain": replay.get("domain"),
+        "improved": replay.get("improved"),
+        "never_worse": never_worse,
+        "beta1": replay.get("beta1"),
+        "beta2": replay.get("beta2"),
+        "rankings": rankings,
+    });
+    match persist_replay_result(
+        ReplayFile::Replay,
+        ReplaySource(source),
+        summary.as_object().cloned().unwrap_or_default(),
+    ) {
+        Ok(path) => replay["replay_result_path"] = Value::String(path),
+        Err(error) => {
+            replay["ok"] = Value::Bool(false);
+            replay["error_code"] = Value::String("persist_failed".to_string());
+            replay["error"] = Value::String(error);
+            replay["replay_result_path"] = Value::Null;
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn observations_for_result() -> Result<(Vec<ObservationRecord>, usize), String> {
+    let session = session_id()?;
+    Ok(session_history(&session))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct VerbTally {
+    count: u64,
+    failures: u64,
+    drifts: u64,
+    not_found: u64,
+    unclassified: u64,
+    causes: BTreeMap<String, u64>,
+    exit_codes: BTreeMap<i64, u64>,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn per_verb_stats(observations: &[ObservationRecord]) -> Vec<VerbStat> {
+    let mut tallies: BTreeMap<String, VerbTally> = BTreeMap::new();
+    for record in observations {
+        let verb = record.verb.clone().unwrap_or_else(|| "unknown".to_owned());
+        let tally = tallies.entry(verb).or_default();
+        tally.count += 1;
+        if !record.succeeded() {
+            if record.no_match {
+                tally.not_found += 1;
+            } else {
+                tally.failures += 1;
+                match record.error_code.as_deref() {
+                    Some(code) => *tally.causes.entry(code.to_owned()).or_default() += 1,
+                    None => tally.unclassified += 1,
+                }
+            }
+        }
+        if let Some(code) = record.exit_code.filter(|code| *code != 0) {
+            *tally.exit_codes.entry(code).or_default() += 1;
+        }
+        if record.is_gate_drift_failure() {
+            tally.drifts += 1;
+        }
+    }
+    tallies
+        .into_iter()
+        .map(|(verb, tally)| VerbStat {
+            verb,
+            count: tally.count,
+            failure_rate: tally.failures as f64 / tally.count as f64,
+            gate_drift_rate: tally.drifts as f64 / tally.count as f64,
+            not_found: tally.not_found,
+            unclassified: tally.unclassified,
+            causes: tally.causes,
+            exit_codes: tally.exit_codes,
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn replay_proposals(replay: &Value) -> Vec<VerbProposal> {
+    let rankings = replay
+        .get("rankings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let Some(baseline) = rankings.first() else {
+        return Vec::new();
+    };
+    let baseline_id = baseline
+        .get("policy_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let baseline_score = baseline.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+    rankings
+        .iter()
+        .skip(1)
+        .filter_map(|ranking| {
+            let policy_id = ranking.get("policy_id").and_then(Value::as_str)?;
+            let score = ranking.get("score").and_then(Value::as_f64)?;
+            (score > baseline_score).then(|| VerbProposal {
+                verb: policy_id.to_owned(),
+                change: format!("replace baseline {baseline_id}"),
+                evidence: format!("replay score {score:.6} above baseline {baseline_score:.6}"),
+                target: "dream-replay-cycle".to_owned(),
+            })
+        })
+        .take(MAX_PART_A_PROPOSALS)
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+struct LeanWalkFile {
+    node: String,
+    session: String,
+    verified_by: Option<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn lean_walk_files() -> Vec<LeanWalkFile> {
+    dir_entry_names(".gm/lean-walk")
+        .into_iter()
+        .filter_map(|name| {
+            let stem = name.strip_suffix(".json")?;
+            let (file_node, file_session) = stem.split_once('.')?;
+            let record = crate::pkfs::read_to_string(&format!(".gm/lean-walk/{name}"))
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+            let field = |key: &str| {
+                record
+                    .as_ref()
+                    .and_then(|value| value.get(key))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_owned)
+            };
+            Some(LeanWalkFile {
+                node: field("node").unwrap_or_else(|| file_node.to_owned()),
+                session: field("session").unwrap_or_else(|| file_session.to_owned()),
+                verified_by: field("verified_by"),
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+struct ReceiptedWalk {
+    node: String,
+    dispatch_session: String,
+    dispatch_id: String,
+    succeeded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+enum WalkVerdict {
+    Verified,
+    Missing,
+    SelfScored,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn walk_verdict(scorer: &str, dispatch_session: &str, succeeded: bool) -> WalkVerdict {
+    if dispatch_session == scorer {
+        WalkVerdict::SelfScored
+    } else if succeeded {
+        WalkVerdict::Verified
+    } else {
+        WalkVerdict::Missing
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn lean_node_for_dispatch(dispatch_session: &str, dispatch_id: &str) -> Option<String> {
+    session_history(dispatch_session)
+        .0
+        .into_iter()
+        .find(|record| record.dispatch_id.as_deref() == Some(dispatch_id))
+        .and_then(|record| record.lean_node)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn receipted_walks() -> Vec<ReceiptedWalk> {
+    let Ok(path) = evaluator_receipt_path() else {
+        return Vec::new();
+    };
+    let Some(raw) = crate::pkfs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(receipts) = parse_store(&raw, "dream-evaluator-receipt") else {
+        return Vec::new();
+    };
+    receipts
+        .iter()
+        .filter_map(|receipt| verify_record("evaluator", receipt).ok())
+        .filter_map(|receipt| {
+            Some(ReceiptedWalk {
+                node: receipt.get("lean_node").and_then(Value::as_str)?.to_owned(),
+                dispatch_session: receipt.get("dispatch_session_id").and_then(Value::as_str)?.to_owned(),
+                dispatch_id: receipt.get("dispatch_id").and_then(Value::as_str)?.to_owned(),
+                succeeded: receipt.get("exit_code").and_then(Value::as_i64) == Some(0),
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn derive_part_b(
+    observations: &[ObservationRecord],
+    scorer: &str,
+    walk_files: &[LeanWalkFile],
+    receipted: &[ReceiptedWalk],
+) -> PartB {
+    let mut self_scored: BTreeSet<String> = walk_files
+        .iter()
+        .filter(|walk| {
+            walk.session == scorer
+                || walk
+                    .verified_by
+                    .as_deref()
+                    .map_or(false, |verifier| verifier == walk.session.as_str())
+        })
+        .map(|walk| walk.node.clone())
+        .collect();
+    let mut walks: BTreeMap<String, (bool, Vec<String>)> = BTreeMap::new();
+    for record in observations {
+        let Some(node) = record.lean_node.as_deref() else {
+            continue;
+        };
+        walks.entry(node.to_owned()).or_insert((false, Vec::new()));
+        self_scored.insert(node.to_owned());
+    }
+    for walk in receipted {
+        let entry = walks.entry(walk.node.clone()).or_insert((false, Vec::new()));
+        match walk_verdict(scorer, &walk.dispatch_session, walk.succeeded) {
+            WalkVerdict::Verified => entry.0 = true,
+            WalkVerdict::Missing => entry.1.push(walk.dispatch_id.clone()),
+            WalkVerdict::SelfScored => {
+                self_scored.insert(walk.node.clone());
+            }
+        }
+    }
+    let traversable_nodes = walks.len() as u64;
+    let nodes_verified = walks
+        .iter()
+        .filter(|(node, (verified, _))| *verified && !self_scored.contains(node.as_str()))
+        .count() as u64;
+    let mut rejected: BTreeMap<String, RejectedWalk> = walks
+        .iter()
+        .filter(|(node, (verified, _))| !*verified || self_scored.contains(node.as_str()))
+        .map(|(node, (_, missing))| {
+            let reason = self_scored.contains(node.as_str()).then_some("self_scored");
+            (
+                node.clone(),
+                RejectedWalk {
+                    node: node.clone(),
+                    missing_dispatch_ids: missing.clone(),
+                    reason,
+                },
+            )
+        })
+        .collect();
+    for node in &self_scored {
+        rejected.entry((*node).to_owned()).or_insert_with(|| RejectedWalk {
+            node: (*node).to_owned(),
+            missing_dispatch_ids: Vec::new(),
+            reason: Some("self_scored"),
+        });
+    }
+    let rejected_walks = rejected.into_values().collect();
+    PartB {
+        traversable_nodes,
+        nodes_verified,
+        backreference_edges: 0,
+        backreferences_verified: 0,
+        forward_edge_coverage_approx: if traversable_nodes == 0 {
+            0.0
+        } else {
+            nodes_verified as f64 / traversable_nodes as f64
+        },
+        rejected_walks,
+        proposals: Vec::new(),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn produce_result(
+    observations: &[ObservationRecord],
+    replay: &Value,
+    scorer: &str,
+    walk_files: &[LeanWalkFile],
+    receipted: &[ReceiptedWalk],
+) -> DreamRsiResult {
+    let records = observations.len() as u64;
+    let part_a = if records < INSUFFICIENT_RECORD_THRESHOLD {
+        PartA::Insufficient { records }
+    } else {
+        PartA::Measured {
+            records,
+            per_verb: per_verb_stats(observations),
+            proposals: replay_proposals(replay),
+        }
+    };
+    DreamRsiResult {
+        status: DreamRsiStatus::Proposed,
+        part_a,
+        part_b: derive_part_b(observations, scorer, walk_files, receipted),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn result_json(result: &DreamRsiResult) -> Value {
+    let part_a = match &result.part_a {
+        PartA::Insufficient { records } => json!({ "state": "insufficient", "records": records }),
+        PartA::Measured {
+            records,
+            per_verb,
+            proposals,
+        } => json!({
+            "state": "measured",
+            "records": records,
+            "per_verb": per_verb
+                .iter()
+                .map(|stat| json!({
+                    "verb": stat.verb,
+                    "count": stat.count,
+                    "failure_rate": stat.failure_rate,
+                    "gate_drift_rate": stat.gate_drift_rate,
+                    "not_found": stat.not_found,
+                    "unclassified": stat.unclassified,
+                    "causes": stat.causes,
+                    "exit_codes": stat.exit_codes,
+                }))
+                .collect::<Vec<_>>(),
+            "proposals": proposals
+                .iter()
+                .map(|proposal| json!({
+                    "verb": proposal.verb,
+                    "change": proposal.change,
+                    "evidence": proposal.evidence,
+                    "target": proposal.target,
+                }))
+                .collect::<Vec<_>>(),
+        }),
+    };
+    let part_b = &result.part_b;
+    json!({
+        "status": "proposed",
+        "part_a": part_a,
+        "part_b": {
+            "traversable_nodes": part_b.traversable_nodes,
+            "nodes_verified": part_b.nodes_verified,
+            "backreference_edges": part_b.backreference_edges,
+            "backreferences_verified": part_b.backreferences_verified,
+            "backreference_judgement": "model-judged",
+            "forward_edge_coverage_approx": part_b.forward_edge_coverage_approx,
+            "rejected_walks": part_b
+                .rejected_walks
+                .iter()
+                .map(|walk| json!({
+                    "node": walk.node,
+                    "missing_dispatch_ids": walk.missing_dispatch_ids,
+                    "reason": walk.reason,
+                }))
+                .collect::<Vec<_>>(),
+            "proposals": part_b
+                .proposals
+                .iter()
+                .map(|proposal| json!({
+                    "node": proposal.node,
+                    "walk_when": proposal.walk_when,
+                    "evidence_that_counts": proposal.evidence_that_counts,
+                }))
+                .collect::<Vec<_>>(),
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{walk_verdict, WalkVerdict};
+
+    #[test]
+    fn walk_run_by_another_session_is_verified_when_it_succeeds() {
+        assert_eq!(walk_verdict("scorer-s", "lw-jtbd-live", true), WalkVerdict::Verified);
+    }
+
+    #[test]
+    fn walk_run_by_another_session_is_missing_when_it_fails() {
+        assert_eq!(walk_verdict("scorer-s", "lw-jtbd-live", false), WalkVerdict::Missing);
+    }
+
+    #[test]
+    fn scorer_own_walk_is_self_scored_and_never_verified() {
+        assert_eq!(walk_verdict("scorer-s", "scorer-s", true), WalkVerdict::SelfScored);
+        assert_eq!(walk_verdict("scorer-s", "scorer-s", false), WalkVerdict::SelfScored);
     }
 }
