@@ -7062,7 +7062,13 @@ pub(super) fn ci_status_shell_result(code: &str) -> Value {
         )
     };
     let raw = unpack_to_string(packed).unwrap_or_default();
-    serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({ "stdout": raw }))
+    let result = serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({ "stdout": raw }));
+    match result.get("task_id").and_then(Value::as_str) {
+        Some(task_id) if result.get("background").and_then(Value::as_bool) == Some(true) => {
+            ci_log_await_background_task(task_id, &result)
+        }
+        _ => result,
+    }
 }
 
 pub(super) fn ci_status_shell_stream(result: &Value, key: &str) -> String {
