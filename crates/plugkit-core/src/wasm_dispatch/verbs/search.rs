@@ -1867,7 +1867,16 @@ pub(super) fn scan_partial_reason(out: &serde_json::Map<String, Value>) -> Optio
     }
     let unreadable = num("files_unreadable");
     if unreadable > 0 {
-        bounds.push(format!("{unreadable} listed files could not be read"));
+        let sample: Vec<&str> = out
+            .get("files_unreadable_sample")
+            .and_then(|v| v.as_array())
+            .map(|paths| paths.iter().filter_map(|p| p.as_str()).collect())
+            .unwrap_or_default();
+        let cause = out.get("files_unreadable_cause").and_then(|v| v.as_str()).unwrap_or("");
+        bounds.push(format!(
+            "{unreadable} listed files could not be read (sample: {}); {cause}",
+            if sample.is_empty() { "none".to_string() } else { sample.join(", ") }
+        ));
     }
     let too_large = num("files_skipped_too_large_count");
     if too_large > 0 {
