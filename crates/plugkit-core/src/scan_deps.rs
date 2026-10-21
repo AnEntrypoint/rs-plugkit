@@ -355,11 +355,7 @@ impl Containment {
 }
 
 fn dependency_scan_base(root: &str) -> &str {
-    if is_absolute_root(root) {
-        root
-    } else {
-        "."
-    }
+    root
 }
 
 fn node_modules_directory(base: &str) -> String {
