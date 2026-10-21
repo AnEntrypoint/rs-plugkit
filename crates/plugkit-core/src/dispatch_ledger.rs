@@ -174,6 +174,32 @@ fn redact_secrets(body: &str) -> String {
     out
 }
 
+fn ledger_request_body(verb: &str, body: &str) -> String {
+    if verb != "kv_put" {
+        return body.to_string();
+    }
+    let Ok(mut parsed) = serde_json::from_str::<Value>(body) else {
+        return "[REDACTED kv_put body]".to_string();
+    };
+    if let Some(map) = parsed.as_object_mut() {
+        if let Some(value) = map.get("value").cloned() {
+            use sha2::{Digest, Sha256};
+            let text = value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string());
+            map.insert(
+                "value".to_string(),
+                json!(format!(
+                    "[REDACTED sha256:{:x}]",
+                    Sha256::digest(text.as_bytes())
+                )),
+            );
+        }
+    }
+    parsed.to_string()
+}
+
 fn bounded_request_body(body: &str) -> (String, bool) {
     let redacted = redact_secrets(body);
     let text: String = redacted.chars().take(LEDGER_BODY_MAX_CHARS).collect();
@@ -192,7 +218,7 @@ pub fn record(
 ) -> Result<String, String> {
     let path = ledger_path(cwd);
     sweep_stale_spool_tmp(cwd, now_ms());
-    let (body_text, body_truncated) = bounded_request_body(request_body);
+    let (body_text, body_truncated) = bounded_request_body(&ledger_request_body(verb, request_body));
     let mut attempt = 0;
     loop {
         attempt += 1;
