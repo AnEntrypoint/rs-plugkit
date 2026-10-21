@@ -233,8 +233,22 @@ pub fn record(
                 .is_some_and(|t| t.saturating_add(RETAIN_MS) >= ts)
         });
         if list.len() > MAX_ENTRIES {
-            let drop = list.len() - MAX_ENTRIES;
-            list.drain(0..drop);
+            let cited = crate::orchestrator::prd::open_row_witness_dispatch_ids();
+            let mut excess = list.len() - MAX_ENTRIES;
+            list = list
+                .into_iter()
+                .filter(|e| {
+                    let is_cited = e
+                        .get("dispatch_id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|id| cited.contains(id));
+                    if excess > 0 && !is_cited {
+                        excess -= 1;
+                        return false;
+                    }
+                    true
+                })
+                .collect();
         }
         let serialized = Value::Array(list).to_string();
         match host_cas_write(&path, &existing, &serialized) {
