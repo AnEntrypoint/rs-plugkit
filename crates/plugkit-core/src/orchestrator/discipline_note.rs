@@ -434,6 +434,7 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
     let Some(_witness) = safe else {
         let payload = serde_json::json!({
             "ok": false,
+            "error_code": "discipline_not_removable",
             "discipline": discipline,
             "lifecycle": lifecycle,
             "safe_to_remove": false,
