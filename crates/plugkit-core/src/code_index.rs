@@ -748,6 +748,23 @@ pub(crate) fn load_codesearchignore(root: &str) -> Option<ignore::gitignore::Git
     build_repo_gitignore(root, None, custom_content.as_deref())
 }
 
+pub(crate) fn load_nested_codesearchignore(dir: &str) -> Option<ignore::gitignore::Gitignore> {
+    let custom_content = host_read(&ignore_file_path(dir, ".codesearchignore"))?;
+    build_repo_gitignore(dir, None, Some(custom_content.as_str()))
+}
+
+pub(crate) fn nested_codesearchignore_excludes(
+    nested: &[(String, ignore::gitignore::Gitignore)],
+    path: &str,
+    is_dir: bool,
+) -> bool {
+    nested.iter().any(|(dir, gi)| {
+        path.strip_prefix(dir.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(|rel| gi.matched_path_or_any_parents(rel, is_dir).is_ignore())
+    })
+}
+
 pub(crate) fn gitignore_excludes(
     gi: &Option<ignore::gitignore::Gitignore>,
     rel_path: &str,

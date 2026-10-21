@@ -4,7 +4,8 @@ use serde_json::Value;
 
 use crate::code_index::{
     gitignore_excludes, is_dependency_noise_dir_segment, is_hidden_segment, is_skipped_dir_segment,
-    list_dir, load_codesearchignore, load_repo_gitignore,
+    list_dir, load_codesearchignore, load_nested_codesearchignore, load_repo_gitignore,
+    nested_codesearchignore_excludes,
 };
 use crate::ragconfig::IndexConfig;
 use crate::wasm_dispatch::{git_call_argv, host_exists, host_now_ms, host_stat_is_directory};
@@ -480,6 +481,20 @@ fn codesearchignore_rule(gi: &Option<ignore::gitignore::Gitignore>, path: &str) 
     matcher.matched_path_or_any_parents(path, false).is_ignore().then_some("codesearchignore")
 }
 
+fn load_nested_codesearchignores(root: &str, files: &[String]) -> Vec<(String, ignore::gitignore::Gitignore)> {
+    let root = root.trim_end_matches(['/', '\\']);
+    files
+        .iter()
+        .filter_map(|file| {
+            let dir = file.strip_suffix("/.codesearchignore")?;
+            if dir == root {
+                return None;
+            }
+            Some((dir.to_string(), load_nested_codesearchignore(dir)?))
+        })
+        .collect()
+}
+
 fn runtime_artifact_rule(path: &str) -> Option<&'static str> {
     let normalized_path = path.replace('\\', "/");
     let mut segments = normalized_path.split('/');
@@ -558,7 +573,10 @@ fn walk_policy(cause: WalkCause, origin: TargetOrigin, no_ignore: bool) -> WalkP
 
 struct RuleRecordingWalk<'a> {
     cfg: &'a IndexConfig,
+    root: String,
     gitignore: Option<ignore::gitignore::Gitignore>,
+    honour_codesearchignore: bool,
+    nested_codesearchignore: Vec<(String, ignore::gitignore::Gitignore)>,
     noise: NoiseDirs,
     named_scope: bool,
     named_target: String,
@@ -573,8 +591,28 @@ struct RuleRecordingWalk<'a> {
 
 impl RuleRecordingWalk<'_> {
     fn descend(&mut self, dir: &str) {
+        let entries = list_dir(dir);
+        let nested = if self.honour_codesearchignore
+            && dir.trim_end_matches(['/', '\\']) != self.root.trim_end_matches(['/', '\\'])
+            && entries.iter().any(|entry| entry == ".codesearchignore")
+        {
+            load_nested_codesearchignore(dir)
+        } else {
+            None
+        };
+        let pushed = nested.is_some();
+        if let Some(gi) = nested {
+            self.nested_codesearchignore.push((dir.to_string(), gi));
+        }
+        self.descend_entries(dir, entries);
+        if pushed {
+            self.nested_codesearchignore.pop();
+        }
+    }
+
+    fn descend_entries(&mut self, dir: &str, entries: Vec<String>) {
         let children_of_granted_root = self.granted_root.as_deref() == Some(dir);
-        for entry in list_dir(dir) {
+        for entry in entries {
             if self.reached_cap || self.reached_deadline {
                 return;
             }
@@ -618,6 +656,7 @@ impl RuleRecordingWalk<'_> {
     fn exclusion_rule(&self, name: &str, path: &str, is_dir: bool, granted_child: bool) -> Option<&'static str> {
         if self.named_target_is_at_or_above(path) { return None; }
         if gitignore_excludes(&self.gitignore, path, is_dir) { return Some("gitignore"); }
+        if nested_codesearchignore_excludes(&self.nested_codesearchignore, path, is_dir) { return Some("codesearchignore"); }
         if !is_dir { return None; }
         if is_own_state_name(name) { return Some(OWN_STATE_RULE); }
         if is_hidden_segment(name) { return Some("hidden_dir"); }
@@ -782,9 +821,12 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
                         (kept, pruned)
                     };
                     let codesearchignore = if no_ignore { None } else { load_codesearchignore(root) };
+                    let nested_codesearchignore = if no_ignore { Vec::new() } else { load_nested_codesearchignores(root, &files) };
                     let mut kept = Vec::with_capacity(files.len());
                     for path in files {
-                        let rule = runtime_artifact_rule(&path).or_else(|| codesearchignore_rule(&codesearchignore, &path));
+                        let rule = runtime_artifact_rule(&path)
+                            .or_else(|| codesearchignore_rule(&codesearchignore, &path))
+                            .or_else(|| nested_codesearchignore_excludes(&nested_codesearchignore, &path, false).then_some("codesearchignore"));
                         match rule {
                             Some(rule) => pruned.push(RuleExclusion {
                                 path,
@@ -810,11 +852,14 @@ fn list_scan_scope(root: &str, scope: Option<&str>, max_files: usize, cfg: &Inde
     let granted_root = (origin == TargetOrigin::CallerNamed && policy.noise == NoiseDirs::DependencyStoresVcsCachesOnly).then(|| target.clone());
     let mut walk = RuleRecordingWalk {
         cfg,
+        root: root.to_string(),
         gitignore: if policy.honour_gitignore {
             load_repo_gitignore(root)
         } else {
             None
         },
+        honour_codesearchignore: policy.honour_gitignore,
+        nested_codesearchignore: Vec::new(),
         noise: policy.noise,
         named_scope,
         named_target: target.clone(),
