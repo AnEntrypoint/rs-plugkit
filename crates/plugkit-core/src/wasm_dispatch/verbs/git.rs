@@ -11365,15 +11365,11 @@ fn worktree_dirt_names(path: &str) -> String {
     if names.is_empty() {
         return String::new();
     }
-    let mut shown = String::new();
-    for name in &names {
-        let next = if shown.is_empty() { name.to_string() } else { format!("{shown}, {name}") };
-        if next.len() > 80 {
-            break;
-        }
-        shown = next;
-    }
-    format!("(dirty paths, {} total: {})", names.len(), shown)
+    format!(
+        "(dirty paths, {} total: {}; to drop the worktree with its untracked output, dispatch git_worktree_remove with force:true and allow_rewrite:true)",
+        names.len(),
+        names.join(", ")
+    )
 }
 
 fn worktree_dirt_is_gm_state_only(path: &str) -> bool {
