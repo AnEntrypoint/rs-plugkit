@@ -6440,16 +6440,17 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         .filter(|path| gitlink_paths.contains(path))
         .collect();
     let incoming_paths = incoming_changed_paths(cwd, branch.as_str());
-    if !staged_gitlinks.is_empty() {
-        let colliding_paths: Vec<String> = staged_gitlinks
-            .iter()
-            .filter(|path| incoming_paths.iter().any(|incoming| incoming == *path))
-            .cloned()
-            .collect();
+    let colliding_gitlinks: Vec<String> = staged_gitlinks
+        .iter()
+        .filter(|path| incoming_paths.iter().any(|incoming| incoming == *path))
+        .cloned()
+        .collect();
+    if !staged_gitlinks.is_empty() && (autostash_requested || !colliding_gitlinks.is_empty()) {
+        let colliding_paths = colliding_gitlinks;
         return err_json(
             "git_pull",
             json!({
-                "error": "a submodule pin is staged in the index; git_pull would shelve it under autostash and conflict on pop",
+                "error": "a submodule pin is staged in the index and this pull would touch it (autostash shelves it, or the incoming commit changes it); git_pull would conflict with it",
                 "error_code": "dirty_worktree",
                 "dirty_paths": staged_gitlinks,
                 "colliding_paths": colliding_paths,
