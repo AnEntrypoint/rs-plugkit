@@ -753,6 +753,8 @@ struct ObservationRecord {
     first_error_line: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     run_end: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy_id: Option<String>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1570,6 +1572,7 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         no_match: failure.no_match(),
         failure_class: Some(failure.name().to_owned()),
         run_end,
+        policy_id: Some(incumbent_policy(session_id).id),
         ..Default::default()
     };
     let Ok(line) = serde_json::to_string(&record) else {
