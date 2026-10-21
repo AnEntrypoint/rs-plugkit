@@ -2695,6 +2695,45 @@ pub(super) fn codesearch_comments_requested(body: &Value) -> bool {
         || body.get("comments_only").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
+const DUAL_REPLY_CACHE_TTL_MS: u64 = 60_000;
+const DUAL_REPLY_CACHE_CAP: usize = 32;
+
+static DUAL_REPLY_CACHE: std::sync::Mutex<
+    Option<std::collections::HashMap<String, (u64, Value)>>,
+> = std::sync::Mutex::new(None);
+
+fn dual_reply_cache_key(body: &Value) -> String {
+    let mut keyed = body.clone();
+    if let Some(obj) = keyed.as_object_mut() {
+        obj.remove("auto_indexed");
+        obj.remove("rebuild");
+    }
+    let index_digest = crate::code_index::stored_digest().unwrap_or_default();
+    format!("{index_digest}|{keyed}")
+}
+
+fn dual_reply_cache_get(key: &str) -> Option<Value> {
+    let now = unsafe { host_now_ms() };
+    let guard = DUAL_REPLY_CACHE.lock().ok()?;
+    let entry = guard.as_ref()?.get(key)?;
+    if now.saturating_sub(entry.0) < DUAL_REPLY_CACHE_TTL_MS {
+        Some(entry.1.clone())
+    } else {
+        None
+    }
+}
+
+fn dual_reply_cache_put(key: String, reply: &Value) {
+    let now = unsafe { host_now_ms() };
+    if let Ok(mut guard) = DUAL_REPLY_CACHE.lock() {
+        let map = guard.get_or_insert_with(std::collections::HashMap::new);
+        if map.len() >= DUAL_REPLY_CACHE_CAP {
+            map.clear();
+        }
+        map.insert(key, (now, reply.clone()));
+    }
+}
+
 pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
     let cfg = crate::ragconfig::RagConfig::resolved();
     if codesearch_comments_requested(body) {
@@ -2915,6 +2954,10 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             return with_index_topup(codesearch_dispatch(&retry), reason, &pass, topup_ms);
         }
     }
+    let reply_cache_key = dual_reply_cache_key(body);
+    if let Some(cached) = dual_reply_cache_get(&reply_cache_key) {
+        return ok("codesearch", cached);
+    }
     let cand_k = scoped_candidate_k(cfg.budget.pool(k as usize).max(50) as u32, scope.as_ref());
     let embedding = embed_query(query);
     let code_ns = cfg.namespaces.code.as_str();
@@ -3016,7 +3059,9 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         if let Some(scope) = scope.as_ref() {
             apply_scope_echo(&mut raw, scope, &[&vector_ranked, &bm25_ranked_response]);
         }
-        return ok("codesearch", compact_dual_reply(body, query, k, raw));
+        let reply = compact_dual_reply(body, query, k, raw);
+        dual_reply_cache_put(reply_cache_key, &reply);
+        return ok("codesearch", reply);
     }
     let ns = cfg.namespaces.code.as_str();
     let packed = unsafe {
