@@ -3406,6 +3406,7 @@ pub fn handle_witness_request(content: &str) -> (String, String, i32) {
         );
     };
     let note = body_str(&body, &["note", "expect", "observe"]);
+    let witness_dispatch = body_str(&body, &["witness_dispatch_id"]);
     let requester = super::state::dispatch_session_id();
     let ts = super::state::now_ms() as u64;
     let store = row_store::Store::prd();
@@ -3435,6 +3436,9 @@ pub fn handle_witness_request(content: &str) -> (String, String, i32) {
         }
         if let Some(n) = note.as_deref() {
             request.insert(Value::String("note".to_string()), Value::String(n.to_string()));
+        }
+        if let Some(d) = witness_dispatch.as_deref() {
+            request.insert(Value::String("witness_dispatch_id".to_string()), Value::String(d.to_string()));
         }
         map.insert(Value::String("witness_request".to_string()), Value::Mapping(request));
         cas::CasOutcome::Write(doc, executor)
