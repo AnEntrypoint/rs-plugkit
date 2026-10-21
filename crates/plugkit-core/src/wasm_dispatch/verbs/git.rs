@@ -4914,13 +4914,13 @@ pub(super) fn pull_and_repush_remote_moved(
                 "clashing_paths": clash.clone(),
                 "recovery_steps": [
                     { "step": 1, "verb": "git_status", "paths": clash.clone(), "action": "git refused the pull over these dirty paths that the incoming range also changes: commit or revert each in the lane named by live_lane_markers" },
-                    { "step": 2, "verb": "git_push", "rev": "HEAD", "action": "publish the committed sha; do not re-dispatch git_push unchanged, it repeats this same refusal" },
+                    { "step": 2, "verb": "git_pull", "action": "once the owning lane has committed or reverted clashing_paths, re-dispatch git_pull; publish with git_push rev set to the head_after that pull reports. HEAD is not published by git_push while the pull is refused, so git_push rev HEAD repeats this refusal" },
                 ],
             });
             stamp_dirty_split(&mut refusal, &dirty_split);
             refusal["next_dispatch"] = json!("git_status");
             refusal["next_action_hint"] = json!(
-                "Dispatch git_status {\"paths\":[...]} over clashing_paths, resolve them in the lane named by live_lane_markers, then re-dispatch git_push with the resulting HEAD rev."
+                "Dispatch git_status {\"paths\":[...]} over clashing_paths, resolve them in the lane named by live_lane_markers, then re-dispatch git_pull and git_push with the head_after that pull reports as rev."
             );
             refusal
         }
