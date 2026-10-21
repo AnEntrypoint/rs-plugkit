@@ -42,6 +42,12 @@ verified dispatch returns `status: "deferred"` with a reason and no acknowledgme
 ID. Ordinary pending-pipeline gates remain authoritative. This maintenance verb
 does not refresh agent phase-prose timestamps.
 
+`dream-status` is the read-only companion. It takes `session_id`, which must equal
+the dispatch session, and returns `kind: "dream-status"`, `owner_session_id`, `status`
+(`recorded` once the owner has a cycle result, else `none`), `cycle_result` (the
+owner's `cycle-result.json`, or null) and `probe_strategy` (the owner's
+`probe-strategy.json`, or null). It writes nothing and serves no phase prose.
+
 Callers write request JSON to `.gm/exec-spool/in/<verb>/<N>.txt` (or
 `in/<lang>/<N>.<ext>` for language-execution stems); the watcher processes on
 read and writes `out/<N>.json` (metadata) alongside `out/<N>.out`/`.err` for
