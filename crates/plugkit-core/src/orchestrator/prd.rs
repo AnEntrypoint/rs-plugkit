@@ -3002,9 +3002,16 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         if let Some(dispatch_id) = witness_dispatch_id.as_deref() {
             let cwd = resolve_cwd.as_deref().unwrap_or("");
             let host_root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+            let mut ledger_error: Option<String> = None;
             let dispatch_session = [cwd, host_root.as_str()]
                 .into_iter()
-                .find_map(|root| crate::dispatch_ledger::lookup_in_scope(root, dispatch_id).ok().flatten())
+                .find_map(|root| match crate::dispatch_ledger::lookup_in_scope(root, dispatch_id) {
+                    Ok(found) => found,
+                    Err(reason) => {
+                        ledger_error.get_or_insert(reason);
+                        None
+                    }
+                })
                 .and_then(|entry| entry.get("session_id")?.as_str().map(str::to_string));
             let resolving_session = body_session_id(&request_object(trimmed))
                 .or_else(crate::orchestrator::state::dispatch_session_id);
@@ -3036,6 +3043,14 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                         dispatch_session.as_deref().unwrap_or_default(),
                         id_target,
                         id_target
+                    ),
+                ))
+            } else if let Some(reason) = ledger_error.as_ref().filter(|_| dispatch_session.is_none()) {
+                Some((
+                    "ledger_unreadable",
+                    format!(
+                        "prd-resolve refused: the dispatch ledger could not be read while looking up witness_dispatch_id {}: {}",
+                        dispatch_id, reason
                     ),
                 ))
             } else if unattributed {
