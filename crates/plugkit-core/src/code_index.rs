@@ -6423,6 +6423,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             "files_unreadable_sample".to_string(),
             json!(unreadable_sample),
         );
+        out.insert(
+            "files_unreadable_cause".to_string(),
+            json!(format!("each listed file was enumerated but its content could not be read through the host (no bytes returned, not a binary or size skip); the sample holds the first {} of files_unreadable", UNREADABLE_SAMPLE_LEN)),
+        );
     }
     if unreadable_dependency_files > 0 {
         out.insert(
