@@ -6327,6 +6327,7 @@ pub(super) const GIT_PULL_ACCEPTED_FIELDS: &[&str] = &[
     "author_name",
     "user_email",
     "author_email",
+    "path",
 ];
 
 fn git_pull_record_own_merge(cwd: Option<&str>, head_before: &str, head_after: &str) {
