@@ -2196,6 +2196,22 @@ pub(super) fn grep(body: &Value) -> u64 {
         Ok(globs) => globs,
         Err(e) => return err("grep", &e),
     };
+    let grep_combine: &'static str = if body.get("verbatim").and_then(|v| v.as_bool()).unwrap_or(false) {
+        "phrase"
+    } else {
+        match body
+            .get("combine")
+            .and_then(|v| v.as_str())
+            .or_else(|| body.get("term_combination").and_then(|v| v.as_str()))
+        {
+            None | Some("phrase") | Some("") => "phrase",
+            Some("or") => "or",
+            Some("and") => "and",
+            Some(other) => return err("grep", &format!(
+                "combine \"{other}\" is not a term combination -- valid values are \"phrase\", \"and\" and \"or\""
+            )),
+        }
+    };
     let scan = crate::code_index::LiteralScan {
         pattern,
         root: root.as_deref(),
@@ -2220,7 +2236,7 @@ pub(super) fn grep(body: &Value) -> u64 {
             .unwrap_or(crate::code_index::LITERAL_SCAN_MAX_FILES as u64)
             as usize,
         context,
-        term_combination: Some("phrase"),
+        term_combination: Some(grep_combine),
         budget_ms: None,
         max_matches_per_file: None,
         walk_every_file_in_scope: false,
