@@ -2843,9 +2843,7 @@ pub(super) fn handle(content: &str) -> (String, String, i32) {
 #[cfg(target_arch = "wasm32")]
 fn observations_for_result() -> Result<(Vec<ObservationRecord>, usize), String> {
     let session = session_id()?;
-    let path = format!(".gm/dream-rsi/{session}/observations.json");
-    let raw = recover_observations_tail(&path).unwrap_or_default();
-    Ok(read_observations(&raw))
+    Ok(session_history(&session))
 }
 
 #[cfg(target_arch = "wasm32")]
