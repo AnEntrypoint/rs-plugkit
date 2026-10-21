@@ -7185,6 +7185,40 @@ pub(super) fn ci_status_gh_rate_limit_reset_epoch() -> Option<i64> {
         .and_then(Value::as_i64)
 }
 
+pub(super) const CI_STATUS_SHA_CACHE_NS: &str = "ci_status_sha";
+
+fn ci_status_sha_cache_key(repo: &str, sha: &str) -> String {
+    format!("{repo}@{sha}")
+}
+
+// Remembers a concluded status (success or failure) per repo and sha, so a
+// rate-limited call for the same sha answers it instead of unknown.
+fn ci_status_cache_concluded(repo: &str, sha: &str, reply: &Value) {
+    let Some(data) = reply.get("data") else {
+        return;
+    };
+    let status = data.get("run_status").and_then(Value::as_str).unwrap_or("");
+    if status != "success" && status != "failure" {
+        return;
+    }
+    let record = json!({
+        "run_status": status,
+        "run_url": data.get("run_url").cloned().unwrap_or(Value::Null),
+        "failing_runs": data.get("failing_runs").cloned().unwrap_or(json!([])),
+        "cached_at_ms": unsafe { host_now_ms() },
+    });
+    git_async_kv_put(CI_STATUS_SHA_CACHE_NS, &ci_status_sha_cache_key(repo, sha), &record.to_string());
+}
+
+fn ci_status_cached_concluded(repo: &str, sha: &str) -> Option<Value> {
+    let raw = super::host_abi::host_kv_read(CI_STATUS_SHA_CACHE_NS, &ci_status_sha_cache_key(repo, sha))?;
+    let record: Value = serde_json::from_str(&raw).ok()?;
+    match record.get("run_status").and_then(Value::as_str) {
+        Some("success") | Some("failure") => Some(record),
+        _ => None,
+    }
+}
+
 pub(super) fn ci_status_rate_limit_wait_ms(rate: &CiStatusRateLimit) -> Option<u64> {
     let now = unsafe { host_now_ms() } as i64 / 1000;
     if let Some(secs) = rate.retry_after_secs.filter(|s| *s > 0) {
@@ -7453,18 +7487,17 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
             match ci_status_attempt(transport, &runs_path, &rest_opts, attempt) {
                 Ok(parsed) => {
                     let runs = ci_status_runs_from(&parsed);
-                    return Ok(ci_status_annotate_sha_resolution(
-                        ci_status_reply_shape(ci_status_summarize(
-                            body,
-                            &repo,
-                            &sha,
-                            &runs,
-                            transport,
-                            &tree_path,
-                            &rest_opts,
-                        )),
-                        &resolution,
+                    let reply = ci_status_reply_shape(ci_status_summarize(
+                        body,
+                        &repo,
+                        &sha,
+                        &runs,
+                        transport,
+                        &tree_path,
+                        &rest_opts,
                     ));
+                    ci_status_cache_concluded(&repo, &sha, &reply);
+                    return Ok(ci_status_annotate_sha_resolution(reply, &resolution));
                 }
                 Err(failure) => {
                     let wait_ms = failure
@@ -7494,6 +7527,24 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
             .or_else(ci_status_gh_rate_limit_reset_epoch);
         let now_secs = unsafe { host_now_ms() } as i64 / 1000;
         let seconds_until_reset = reset_epoch.map(|r| (r - now_secs).max(0));
+        if let Some(cached) = ci_status_cached_concluded(&repo, &sha) {
+            return Ok(ci_status_annotate_sha_resolution(
+                json!({
+                    "ok": true, "verb": "ci-status",
+                    "data": {
+                        "run_status": cached.get("run_status").cloned().unwrap_or(Value::Null),
+                        "repo": repo, "sha": sha,
+                        "run_url": cached.get("run_url").cloned().unwrap_or(Value::Null),
+                        "failing_runs": cached.get("failing_runs").cloned().unwrap_or(json!([])),
+                        "served_from_cache": true,
+                        "cached_at_ms": cached.get("cached_at_ms").cloned().unwrap_or(Value::Null),
+                        "rate_limited": true,
+                        "rate_limit_reset_at": reset_epoch.map(ci_status_epoch_to_utc_iso),
+                    }
+                }),
+                &resolution,
+            ));
+        }
         let reason = match (reset_epoch, seconds_until_reset) {
             (Some(_), Some(secs)) => format!(
                 "GitHub API rate limit reached for this host; quota resets at {} ({}s from now)",
