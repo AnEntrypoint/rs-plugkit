@@ -208,6 +208,18 @@ pub fn handle_output(content: &str) -> (String, String, i32) {
         .and_then(|v| v.as_u64())
         .unwrap_or(65536);
     let result = host_task("output", &json!({ "id": id, "max_bytes": max_bytes }));
+    if result.get("ok").and_then(Value::as_bool) == Some(false) {
+        let message = result
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("task output unavailable")
+            .to_string();
+        let mut envelope = json!({ "ok": false, "error": message });
+        if let Some(code) = result.get("error_code") {
+            envelope["error_code"] = code.clone();
+        }
+        return (envelope.to_string(), message, 1);
+    }
     ok_resp("task-output", result)
 }
 
