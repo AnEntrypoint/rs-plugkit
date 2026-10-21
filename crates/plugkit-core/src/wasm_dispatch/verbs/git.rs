@@ -6668,8 +6668,22 @@ pub(super) fn ci_status_resolve_repo_preferring_unambiguous_github_repo_field(
         .or_else(|| body.get("repo").and_then(|v| v.as_str()))
     {
         let explicit = explicit.trim();
-        if !explicit.is_empty() {
+        if explicit.contains('/') && !explicit.is_empty() {
             return Ok(explicit.to_string());
+        }
+        if !explicit.is_empty() {
+            let origin = exec_git_in(cwd, "remote get-url origin").trim().to_string();
+            let owner = origin
+                .trim_end_matches(".git")
+                .rsplit_once('/')
+                .and_then(|(rest, _)| rest.rsplit_once(['/', ':']).map(|(_, owner)| owner.to_string()));
+            return match owner {
+                Some(owner) if !owner.is_empty() => Ok(format!("{}/{}", owner, explicit)),
+                _ => Err(err(
+                    "ci-status",
+                    &format!("repo {explicit} has no owner and origin remote gives none; pass github_repo as owner/name"),
+                )),
+            };
         }
     }
     let url = exec_git_in(cwd, "remote get-url origin")

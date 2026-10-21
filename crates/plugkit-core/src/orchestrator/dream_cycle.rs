@@ -7,7 +7,7 @@ pub fn handle(content: &str) -> (String, String, i32) {
     match result {
         Ok(value) => (value.to_string(), String::new(), 0),
         Err(error) => (
-            json!({"ok": false, "error": error}).to_string(),
+            json!({"ok": false, "error_code": "dream_cycle_failed", "error": error}).to_string(),
             String::new(),
             1,
         ),

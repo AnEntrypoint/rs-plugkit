@@ -2488,6 +2488,7 @@ fn index_cfg_impl(
         Err(error) => {
                 return json!({
                     "ok": false,
+                    "error_code": "file_enumeration_failed",
                     "error": "file_enumeration_failed",
                     "reason": error,
                     "root": r,
@@ -2535,6 +2536,7 @@ fn index_cfg_impl(
         );
         return json!({
             "ok": false,
+            "error_code": "zero_scan_aborted",
             "error": "zero_scan_aborted",
             "reason": format!("scanned zero files under root={} while {} previously-indexed files exist on disk; refusing to delete the existing index. Check that root resolves inside the sandboxed project directory.", r, prior.len()),
             "files_scanned": 0,
@@ -4174,6 +4176,7 @@ pub fn scan_filenames(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> V
     if listed.is_empty() && !crate::scan_universe::scope_has_no_entries(root, scope) {
         return json!({
             "ok": false,
+            "error_code": "empty_universe",
             "error": crate::scan_universe::empty_universe_refusal(
                 root,
                 scope,
@@ -5333,6 +5336,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         Ok(m) => m,
         Err(e) => return json!({
             "ok": false,
+            "error_code": "invalid_pattern",
             "error": format!("mode \"{}\" got an {e}", if req.regex { "regex" } else { "literal" }),
             "error_kind": "pattern",
             "pattern": req.pattern,
@@ -5385,6 +5389,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     if listed.is_empty() && !crate::scan_universe::scope_has_no_entries(root, scope) {
         return json!({
             "ok": false,
+            "error_code": "empty_universe",
             "error": crate::scan_universe::empty_universe_refusal(
                 root,
                 scope,
@@ -5888,6 +5893,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     if budget_exhausted && files_scanned == 0 {
         return json!({
             "ok": false,
+            "error_code": "budget_exhausted_before_any_read",
             "error": crate::scan_universe::budget_exhausted_before_any_read_refusal(
                 root,
                 scope,
