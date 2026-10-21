@@ -516,8 +516,14 @@ fn request_limit(request: &serde_json::Value) -> Result<Option<usize>, String> {
         Some(value) => value
             .as_u64()
             .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-            .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
-            .ok_or_else(|| "prd-list limit must be a non-negative integer".to_string()),
+            .ok_or_else(|| "prd-list limit must be a non-negative integer".to_string())
+            .and_then(|n| {
+                if n == 0 {
+                    Err("prd-list refused: limit 0 returns no rows and no next_offset, so a pager would loop; pass limit >= 1 or omit limit for the default page".to_string())
+                } else {
+                    Ok(Some(usize::try_from(n).unwrap_or(usize::MAX)))
+                }
+            }),
     }
 }
 
@@ -902,6 +908,22 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             )
         }
     };
+    let cause_key = Value::String("cause".to_string());
+    match item_map.get(&cause_key).cloned() {
+        None | Some(Value::Null) => {
+            item_map.remove(&cause_key);
+        }
+        Some(Value::String(cause)) if !cause.trim().is_empty() => {
+            item_map.insert(cause_key, Value::String(cause.trim().to_string()));
+        }
+        Some(_) => {
+            return (
+                String::new(),
+                "prd-add refused: cause must be a non-empty string naming the shared cause (rows with one cause fold together)".to_string(),
+                1,
+            );
+        }
+    }
     if let Some(disposition) = mapping_text(&item_map, "disposition") {
         if !DISPOSITIONS.contains(&disposition_head(&disposition)) {
             return (
