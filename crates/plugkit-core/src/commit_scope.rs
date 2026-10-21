@@ -2,12 +2,35 @@ use serde_json::{json, Value};
 
 pub const BLANKET_REFUSAL_LISTED_PATHS: usize = 50;
 
+fn normalize_pathspec(pathspec: &str) -> &str {
+    let trimmed = pathspec.trim();
+    let trimmed = trimmed.strip_prefix("./").unwrap_or(trimmed);
+    trimmed.strip_suffix('/').unwrap_or(trimmed)
+}
+
+fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
+    match (pattern.first().copied(), text.first().copied()) {
+        (None, None) => true,
+        (Some(b'*'), _) => {
+            glob_match(&pattern[1..], text)
+                || (matches!(text.first().copied(), Some(c) if c != b'/') && glob_match(pattern, &text[1..]))
+        }
+        (Some(b'?'), Some(c)) if c != b'/' => glob_match(&pattern[1..], &text[1..]),
+        (Some(p), Some(c)) if p == c => glob_match(&pattern[1..], &text[1..]),
+        _ => false,
+    }
+}
+
 pub fn pathspec_covers_path(pathspec: &str, path: &str) -> bool {
-    if path == pathspec {
+    let spec = normalize_pathspec(pathspec);
+    let path = path.trim_start_matches("./");
+    if spec.is_empty() || spec == "." || path == spec {
         return true;
     }
-    let dir = pathspec.strip_suffix('/').unwrap_or(pathspec);
-    path.starts_with(&format!("{dir}/"))
+    if spec.contains('*') || spec.contains('?') {
+        return glob_match(spec.as_bytes(), path.as_bytes());
+    }
+    path.starts_with(&format!("{spec}/"))
 }
 
 pub fn blanket_stage_refusal(verb: &str, paths: &[String]) -> Value {
