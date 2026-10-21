@@ -138,7 +138,7 @@ built and dispatched directly through `agentplug-runner`, not just
    writing gm's native 384-dim embeddings into a namespace already resolved
    at 768 either corrupts the fixed-width `F32_BLOB` column or (with a
    dim-suffixed table-name override, the first fix attempted) makes the
-   import permanently unreachable through `recall`'s router, which always
+   import permanently unreachable through the memory search router, which always
    queries via the project-resolved (not import-specific) config. Fixed by
    refusing the import outright unless the destination namespace's
    resolved `vectors_db_dims` is actually 384 -- a project wanting both
@@ -151,7 +151,7 @@ Verified live (scratch git repo, real release wasm built via
 --features slim --lib`, dispatched with `agentplug-runner dispatch gm
 <verb> <body>`): a memory write into `default` -> the import step
 into a `vectors_db_dims: 384`-configured namespace (1 doc imported) ->
-`recall` against that namespace (real cosine-similarity hit, 0.845,
+a memory search against that namespace (real cosine-similarity hit, 0.845,
 correct `file_path`, content lazily read from the pointer file, not stored
 inline in the index row) -> a memory prune (index row marked deleted,
 file removed from disk). Full CRUD round trip confirmed against the actual
