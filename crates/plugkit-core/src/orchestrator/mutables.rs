@@ -6,6 +6,43 @@ use crate::pkfs;
 use serde_yaml::Value;
 use std::collections::BTreeMap;
 
+const RENAME_VERBS: [&str; 8] = [
+    "unknown-add",
+    "unknown-resolve",
+    "unknown-list",
+    "unknown-defer",
+    "mutable-add",
+    "mutable-resolve",
+    "mutable-list",
+    "mutable-defer",
+];
+
+const fn verb_listed(list: &[&str], verb: &str) -> bool {
+    let mut i = 0;
+    while i < list.len() {
+        let (name, wanted) = (list[i].as_bytes(), verb.as_bytes());
+        if name.len() == wanted.len() {
+            let mut j = 0;
+            while j < name.len() && name[j] == wanted[j] {
+                j += 1;
+            }
+            if j == name.len() {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+const _: () = {
+    let mut i = 0;
+    while i < RENAME_VERBS.len() {
+        assert!(verb_listed(super::NON_DECISION_VERBS, RENAME_VERBS[i]));
+        i += 1;
+    }
+};
+
 pub fn mutables_path() -> std::path::PathBuf {
     gm_dir().join("mutables.yml")
 }
