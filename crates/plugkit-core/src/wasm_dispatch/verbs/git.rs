@@ -11319,7 +11319,7 @@ pub(super) fn git_worktree_remove(body: &Value) -> u64 {
         r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
     if code != 0 {
         let first_line = output.lines().next().unwrap_or("").trim();
-        return err("git_worktree_remove", &format!("{first_line} {}", worktree_dirt_names(path)));
+        return err("git_worktree_remove", &format!("{first_line} {}", worktree_dirt_names(&path)));
     }
     ok("git_worktree_remove", json!({ "removed": true, "path": path, "output": output.trim() }))
 }
