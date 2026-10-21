@@ -1436,11 +1436,6 @@ fn bin_drift_commit_refusal(
     if !touches_gate {
         return None;
     }
-    let explicit_without_bundle = !add_all
-        && !committed_inputs.iter().any(|p| p == "bin/gm-mcp-server.js");
-    if explicit_without_bundle {
-        return None;
-    }
     bin_drift_run(repo, "HEAD", &committed_inputs, index_only)
         .err()
         .map(|detail| format!("bin drift gate refused the commit: {detail}"))
