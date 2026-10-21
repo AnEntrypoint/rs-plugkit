@@ -2217,18 +2217,38 @@ fn project_status(body: &Value) -> u64 {
         .as_ref()
         .and_then(|h| h.get("ts").and_then(|t| t.as_u64()))
         .map(|ts| now.saturating_sub(ts));
+    let heartbeat_stale = heartbeat_age_ms.map_or(true, |age| age > STATUS_HEARTBEAT_STALE_MS);
+    let full = body.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
+    let daemon = if full {
+        json!({
+            "heartbeat": heartbeat,
+            "heartbeat_age_ms": heartbeat_age_ms,
+            "heartbeat_stale_after_ms": STATUS_HEARTBEAT_STALE_MS,
+            "heartbeat_stale": heartbeat_stale,
+        })
+    } else {
+        let field = |key: &str| {
+            heartbeat
+                .as_ref()
+                .and_then(|h| h.get(key))
+                .cloned()
+                .unwrap_or(Value::Null)
+        };
+        json!({
+            "heartbeat_age_ms": heartbeat_age_ms,
+            "heartbeat_stale_after_ms": STATUS_HEARTBEAT_STALE_MS,
+            "heartbeat_stale": heartbeat_stale,
+            "queue_depth": field("queue_depth"),
+            "runner_update_in_progress": field("runner_update_in_progress"),
+        })
+    };
     ok(
         "status",
         json!({
             "cwd": cwd,
             "session_id": session_id,
             "taskId": Value::Null,
-            "daemon": {
-                "heartbeat": heartbeat,
-                "heartbeat_age_ms": heartbeat_age_ms,
-                "heartbeat_stale_after_ms": STATUS_HEARTBEAT_STALE_MS,
-                "heartbeat_stale": heartbeat_age_ms.map_or(true, |age| age > STATUS_HEARTBEAT_STALE_MS),
-            },
+            "daemon": daemon,
             "lifecycle": lifecycle_liveness(),
         }),
     )
