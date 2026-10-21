@@ -77,11 +77,15 @@ fn evaluate(content: &str) -> Result<Value, String> {
     fields["last_dispatch_id"] = json!(latest);
     let replayed_worlds = fields["history"]["worlds"].clone();
     let replayed_observations = fields["history"]["observations"].clone();
-    match super::dream_rsi::persist_replay_result(
+    let persisted = super::dream_rsi::persist_replay_result(
         super::dream_rsi::ReplayFile::Cycle,
         super::dream_rsi::ReplaySource("dream-replay-cycle"),
         fields.as_object().cloned().unwrap_or_default(),
-    ) {
+    );
+    if persisted.is_ok() {
+        super::dream_rsi::update_probe(owner, &fields);
+    }
+    match persisted {
         Ok(replay_result_path) => Ok(json!({
             "ok": true, "kind": "observations", "status": "replayed",
             "owner_session_id": owner, "cycle_id": cycle_id,
