@@ -1449,7 +1449,15 @@ pub struct Outcome {
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn outcome(result: &Value) -> Outcome {
-    let data = result.get("data").filter(|value| value.is_object()).unwrap_or(result);
+    let decoded = result
+        .get("data")
+        .and_then(Value::as_str)
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .filter(|value| value.is_object());
+    let data = decoded
+        .as_ref()
+        .or_else(|| result.get("data").filter(|value| value.is_object()))
+        .unwrap_or(result);
     let flag = |key: &str| {
         result
             .get(key)
