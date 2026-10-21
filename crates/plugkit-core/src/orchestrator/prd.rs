@@ -2706,6 +2706,13 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         Err(denial) => denial["count_of_record"].clone(),
     };
     if !annotate_only {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let preflight_cwd = resolve_cwd.as_deref().unwrap_or("");
+            if let Err(e) = crate::dispatch_ledger::read_entries(preflight_cwd) {
+                return ledger_unreadable_refusal(preflight_cwd, &e);
+            }
+        }
         let closed_store = row_store::Store::prd();
         let open_here = match row_store::read_blocks(&closed_store) {
             Ok(read) => read
