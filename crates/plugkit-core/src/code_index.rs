@@ -5366,7 +5366,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         None => root.to_string(),
     };
     if let Err(listing) = list_dir_checked(&probe_dir) {
-        if listing.contains("EACCES") || listing.contains("Permission denied") {
+        let is_dir = crate::wasm_dispatch::host_stat(&probe_dir)
+            .and_then(|s| s.get("isDirectory").and_then(|v| v.as_bool()))
+            == Some(true);
+        if is_dir || listing.contains("EACCES") || listing.contains("Permission denied") {
             return json!({
                 "ok": false,
                 "error_code": "EACCES",
