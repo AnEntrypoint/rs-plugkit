@@ -1925,6 +1925,13 @@ fn register_policy(content: &str) -> Result<Value, String> {
         .collect::<Result<Vec<_>, _>>()?;
     append_store(&policy_path, "dream-policy", signed)
         .map_err(|_| "dream-policy-register could not persist policy".to_string())?;
+    if deployed {
+        let strategy = json!({ "policy_id": policy.id, "owner_session_id": owner_session_id, "deployed_at": deployed_at });
+        let path = format!(".gm/dream-rsi/{owner_session_id}/{ACTIVE_STRATEGY_FILE}.json");
+        if !crate::pkfs::write(&path, &format!("{strategy}\n")) {
+            return Err("dream-policy-register could not write active strategy".to_string());
+        }
+    }
     Ok(json!({ "ok": true, "policy_id": policy.id, "deployed": deployed }))
 }
 
