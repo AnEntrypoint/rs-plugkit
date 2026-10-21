@@ -3330,6 +3330,10 @@ pub fn handle_block(content: &str) -> (String, String, i32) {
             .unwrap_or_default();
         notes.push(Value::String(note.clone()));
         map.insert(notes_key, Value::Sequence(notes));
+        map.insert(
+            Value::String("status".to_string()),
+            Value::String("blocked".to_string()),
+        );
         cas::CasOutcome::Write(doc, ())
     });
     match outcome {
