@@ -494,6 +494,7 @@ pub(super) fn request_flag(request: &serde_json::Value, fields: &[&str]) -> Opti
 }
 
 pub fn handle_list_full() -> (String, String, i32) {
+    sweep_orphan_receipts();
     let (rows, skipped) = match load_rows() {
         Ok(loaded) => loaded,
         Err((message, code)) => return (String::new(), message, code),
@@ -2538,6 +2539,35 @@ fn prune_receipts(id: &str) {
     let plain_segment = !id.is_empty() && id != "." && id != ".." && !id.contains(['/', '\\']);
     if plain_segment {
         crate::pkfs::remove_tree(&format!(".gm/receipts/{}", id));
+    }
+}
+
+fn sweep_orphan_receipts() {
+    let Ok((set, skipped)) = row_store::read_blocks_listing(&row_store::Store::prd()) else {
+        return;
+    };
+    if !skipped.is_empty() {
+        return;
+    }
+    let live: std::collections::HashSet<String> = set
+        .blocks
+        .iter()
+        .filter_map(row_to_json)
+        .filter_map(|row| row.get("id").and_then(serde_json::Value::as_str).map(str::to_string))
+        .collect();
+    let Some(serde_json::Value::Array(entries)) = crate::pkfs::readdir(".gm/receipts") else {
+        return;
+    };
+    for entry in entries {
+        let Some(name) = entry
+            .as_str()
+            .or_else(|| entry.get("name").and_then(serde_json::Value::as_str))
+        else {
+            continue;
+        };
+        if !live.contains(name) {
+            prune_receipts(name);
+        }
     }
 }
 
