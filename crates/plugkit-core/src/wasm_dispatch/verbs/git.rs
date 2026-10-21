@@ -6437,13 +6437,20 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         .filter_map(|line| line.get(3..).map(|path| path.trim().to_string()))
         .filter(|path| gitlink_paths.contains(path))
         .collect();
+    let incoming_paths = incoming_changed_paths(cwd, branch.as_str());
     if !staged_gitlinks.is_empty() {
+        let colliding_paths: Vec<String> = staged_gitlinks
+            .iter()
+            .filter(|path| incoming_paths.iter().any(|incoming| incoming == *path))
+            .cloned()
+            .collect();
         return err_json(
             "git_pull",
             json!({
                 "error": "a submodule pin is staged in the index; git_pull would shelve it under autostash and conflict on pop",
                 "error_code": "dirty_worktree",
                 "dirty_paths": staged_gitlinks,
+                "colliding_paths": colliding_paths,
                 "remote": remote,
                 "hint": "Nothing was fetched or merged. Commit or unstage these submodule pins from their own writer, then re-dispatch git_pull.",
             }),
@@ -6454,7 +6461,6 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         .filter(|path| !gitlink_paths.contains(path))
         .collect();
     // Only a log the incoming range also changes can conflict on the autostash pop.
-    let incoming_paths = incoming_changed_paths(cwd, branch.as_str());
     let dirty_runtime_logs: Vec<String> = dirty_tracked
         .iter()
         .filter(|path| path.starts_with(".gm/") && path.ends_with("-log.jsonl"))
@@ -6468,7 +6474,8 @@ pub(super) fn git_pull(body: &Value) -> u64 {
             json!({
                 "error": "a tracked append-only runtime log under .gm/ is dirty; git_pull would shelve it under autostash and conflict on pop",
                 "error_code": "dirty_worktree",
-                "dirty_paths": dirty_runtime_logs,
+                "dirty_paths": dirty_runtime_logs.clone(),
+                "colliding_paths": dirty_runtime_logs,
                 "remote": remote,
                 "hint": "Nothing was fetched or merged. Commit or revert these logs from their own writer, then re-dispatch git_pull.",
             }),
@@ -6609,6 +6616,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
                     "ff_only": ff_only,
                     "conflicted": false,
                     "conflicts": [],
+                    "colliding_paths": blocking_paths.clone(),
                     "blocking_paths": blocking_paths,
                     "head_before": head_before,
                     "hint": "The incoming commit changes paths this worktree holds staged or modified (possibly another session's work). Nothing was merged, stashed or unstaged. Commit or unstage those paths from their own writer, then re-dispatch git_pull. Do not git_add them from this session.",
