@@ -1382,6 +1382,9 @@ pub(super) fn codesearch_exhaustive(
         crate::code_index::scan_literal(&scan, cfg)
     };
     if scanned.get("ok").and_then(|b| b.as_bool()) == Some(false) {
+        if let Some(code) = scanned.get("error_code").and_then(|c| c.as_str()) {
+            return super::err_json_coded("codesearch", code, scanned.clone());
+        }
         return err(
             "codesearch",
             scanned
