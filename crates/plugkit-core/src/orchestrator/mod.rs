@@ -430,7 +430,6 @@ orchestrator_dispatch_table! {
     "prd-resolve" => prd::handle_resolve(content),
     "prd-list" => prd::handle_list(content),
     "pool-observe" => pool_slots::handle_observe(content),
-    "prd-block" => prd::handle_block(content),
     "prd-repair" => prd_repair::handle_repair(content),
     "prd-defer" => prd::handle_defer(content),
     "prd-witness-request" => prd::handle_witness_request(content),
