@@ -88,6 +88,7 @@ fn evaluate(content: &str) -> Result<Value, String> {
             "last_dispatch_id": latest, "cycle": fields,
             "replay": {
                 "replays": [{"dispatch_id": latest}],
+                "replayed_count": replayed_observations,
                 "replayed_worlds": replayed_worlds,
                 "replayed_observations": replayed_observations
             },
