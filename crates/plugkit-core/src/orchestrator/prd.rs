@@ -1014,6 +1014,30 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         .get(&Value::String("overwrite".to_string()))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // A resolved row leaves .gm/prd/ for .gm/prd-log.jsonl, so the folder check
+    // alone cannot see it: refuse an id whose newest log record is closed,
+    // with or without overwrite.
+    match row_store::log_row(&store, &id) {
+        Ok(Some(logged)) => {
+            let closed_status = logged
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !status_is_open(&closed_status) {
+                return (
+                    String::new(),
+                    format!(
+                        "prd-add refused: id '{}' is closed (status '{}') in .gm/prd-log.jsonl. A resolved row cannot be re-added or reopened; log the new work under a new id.",
+                        id, closed_status
+                    ),
+                    1,
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(message) => return (String::new(), message, 1),
+    }
 
     let verify_id = id.clone();
     let outcome = row_store::cas_retry_write_verified(
