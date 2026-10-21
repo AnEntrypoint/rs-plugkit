@@ -1302,16 +1302,7 @@ pub(crate) fn observe_recorded(
 }
 
 #[cfg(target_arch = "wasm32")]
-const NON_DECISION_VERBS: &[&str] = &[
-    "unknown-add",
-    "unknown-resolve",
-    "unknown-list",
-    "unknown-defer",
-    "mutable-add",
-    "mutable-resolve",
-    "mutable-list",
-    "mutable-defer",
-];
+use super::NON_DECISION_VERBS;
 
 #[cfg(target_arch = "wasm32")]
 fn observe_dispatch(observed: ObservedDispatch<'_>) {

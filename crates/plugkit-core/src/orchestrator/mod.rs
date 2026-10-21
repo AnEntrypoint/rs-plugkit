@@ -329,6 +329,17 @@ pub fn gm_dir() -> PathBuf {
     resolve_project_root_with_retry().join(".gm")
 }
 
+const NON_DECISION_VERBS: &[&str] = &[
+    "unknown-add",
+    "unknown-resolve",
+    "unknown-list",
+    "unknown-defer",
+    "mutable-add",
+    "mutable-resolve",
+    "mutable-list",
+    "mutable-defer",
+];
+
 macro_rules! orchestrator_dispatch_table {
     ( $content:ident, $( $verb:literal => $handler:expr ),+ $(,)? ) => {
         pub const ORCHESTRATOR_VERBS: &[&str] = &[ $( $verb ),+ ];
