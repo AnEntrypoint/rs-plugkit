@@ -6431,9 +6431,12 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         .into_iter()
         .filter(|path| !gitlink_paths.contains(path))
         .collect();
+    // Only a log the incoming range also changes can conflict on the autostash pop.
+    let incoming_paths = incoming_changed_paths(cwd, branch.as_str());
     let dirty_runtime_logs: Vec<String> = dirty_tracked
         .iter()
         .filter(|path| path.starts_with(".gm/") && path.ends_with("-log.jsonl"))
+        .filter(|path| incoming_paths.iter().any(|incoming| incoming == *path))
         .cloned()
         .collect();
     if !dirty_runtime_logs.is_empty() {
