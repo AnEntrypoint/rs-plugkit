@@ -77,6 +77,24 @@ const END_MARKER: &str = "# <<< plugkit managed";
 const LEGACY_START_GM: &str = "# >>> gm managed";
 const LEGACY_END_GM: &str = "# <<< gm managed";
 
+const DURABLE_CLASS_COMMENT: &[&str] = &[
+    "# .gm/prd.yml + .gm/mutables.yml: per-dispatch runtime state, rewritten on\n",
+    "# nearly every PLAN/EXECUTE/VERIFY dispatch -- same class as .gm/witness/\n",
+    "# and gm.db above (transient, regenerated, never durable source). Tracking\n",
+    "# it committed a near-full-file version on every single dispatch (970\n",
+    "# revisions, 743MB logical history for a currently-2.1MB file), roughly\n",
+    "# half of .git on-disk blob weight -- untracked here per this project own\n",
+    "# derived-stores-are-transient-never-tracked policy.\n",
+    "#\n",
+    "# The successors of those two files: PRD rows and mutables now live one file\n",
+    "# per row under .gm/prd/ and .gm/mutables/, so two lanes can never lose each\n",
+    "# other's row to one whole-file rewrite, and a resolved row's material moves\n",
+    "# into .gm/prd-log.jsonl / .gm/mutables-log.jsonl, append-only and hash-chained.\n",
+    "# The row folders are the same transient class as the files they replace. The chained\n",
+    "# logs (.gm/prd-log.jsonl, .gm/mutables-log.jsonl, .gm/expansion-audit.jsonl) are authored\n",
+    "# project state and are never ignored (MUST_STAY_TRACKED in rs-plugkit crates/plugkit-core/src/gitignore.rs).\n",
+];
+
 fn log_warn(msg: &str) {
     unsafe {
         host_log(2, msg.as_ptr(), msg.len() as u32);
@@ -204,6 +222,9 @@ pub fn ensure_managed_gitignore(cwd: &str) -> Result<bool, String> {
     block.push_str(START_MARKER);
     block.push('\n');
     block.push_str("# .gm/prd-log.jsonl, .gm/mutables-log.jsonl and .gm/expansion-audit.jsonl are append-only state that stays tracked, so no rule here ignores them\n");
+    for line in DURABLE_CLASS_COMMENT {
+        block.push_str(line);
+    }
     for entry in MANAGED_ENTRIES {
         block.push_str(entry);
         block.push('\n');
