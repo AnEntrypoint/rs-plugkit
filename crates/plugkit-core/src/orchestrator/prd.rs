@@ -1543,7 +1543,6 @@ fn spool_out_completed_ms(out_dir: &str, name: &str) -> Option<u64> {
 }
 
 #[cfg(target_arch = "wasm32")]
-#[cfg(target_arch = "wasm32")]
 fn ledger_unreadable_refusal(cwd: &str, detail: &str) -> (String, String, i32) {
     let searched = crate::dispatch_ledger::ledger_path(cwd);
     let message = format!(
