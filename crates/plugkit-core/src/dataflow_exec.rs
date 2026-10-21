@@ -157,7 +157,7 @@ fn dispatch_gm_internal(verb: &str, body: &Value) -> Value {
             json!({ "bodies": bodies, "chunks": structured })
         }
         other => {
-            json!({ "ok": false, "error": format!("unknown gm-internal dataflow verb: {other}") })
+            json!({ "ok": false, "error_code": "unknown_dataflow_verb", "error": format!("unknown gm-internal dataflow verb: {other}") })
         }
     }
 }
@@ -241,6 +241,6 @@ fn run_fuse(fuse: &FuseNode, state: &RunState) -> Value {
             }
             Value::Object(obj)
         }
-        other => json!({ "ok": false, "error": format!("unknown fuse strategy: {other}") }),
+        other => json!({ "ok": false, "error_code": "unknown_fuse_strategy", "error": format!("unknown fuse strategy: {other}") }),
     }
 }

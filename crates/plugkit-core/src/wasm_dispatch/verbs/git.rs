@@ -42,12 +42,7 @@ pub(super) fn git_commit_dedup_lookup(key: &str, cwd: Option<&str>) -> Option<Va
         return None;
     }
     let sha_full = record.get("sha_full").and_then(|v| v.as_str())?.to_string();
-    let still_reachable = git_call_argv(&["cat-file", "-e", &sha_full], cwd)
-        .get("exit_code")
-        .and_then(|x| x.as_i64())
-        .unwrap_or(1)
-        == 0;
-    if !still_reachable {
+    if resolve_ref(cwd, "HEAD").as_deref() != Some(sha_full.as_str()) {
         return None;
     }
     Some(record)
@@ -1587,6 +1582,17 @@ pub(super) fn git_push(body: &Value) -> u64 {
         Some(name) => name.to_string(),
         None => "origin".to_string(),
     };
+    for key in ["rev", "sha"] {
+        if body
+            .get(key)
+            .is_some_and(|v| v.as_str().map_or(true, |s| s.trim().is_empty()))
+        {
+            return err(
+                "git_push",
+                &format!("{key} must be a non-empty string naming the commit to publish"),
+            );
+        }
+    }
     let origin_remote = remote_name == "origin";
     let explicit_branch = body
         .get("branch")
@@ -1594,6 +1600,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
         .map(String::from);
     let explicit_source_ref = body
         .get("rev")
+        .or_else(|| body.get("sha"))
         .or_else(|| body.get("source_ref"))
         .and_then(|v| v.as_str())
         .map(str::trim)
@@ -6062,7 +6069,18 @@ pub(super) fn git_show(body: &Value) -> u64 {
                 .collect()
         })
         .unwrap_or_default();
-    let combined_ref = match path {
+    if path.is_some() && refspec.contains(':') {
+            return err_json(
+                "git_show",
+                json!({
+                    "error_code": "git_show_rev_path_combined",
+                    "error": format!("rev {} already carries a path; pass the commit alone as rev and the file as path", refspec),
+                    "rev": refspec,
+                    "path": path,
+                }),
+            );
+        }
+        let combined_ref = match path {
         Some(p) => format!("{}:{}", refspec, p),
         None => refspec.to_string(),
     };
@@ -6494,6 +6512,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
                 "ff_only": ff_only,
                 "conflicted": true,
                 "conflicts": conflicts,
+                "colliding_paths": conflicts,
                 "head_before": head_before,
                 "head_after": head_after,
                 "hint": "The pull landed, but the shelved local changes conflict with it and the stash remains. Resolve the conflicted paths, git_add them, then git_commit; git_stash_pop restores the shelved changes once the worktree is clean.",
@@ -6594,6 +6613,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
                 "ff_only": ff_only,
                 "conflicted": !conflicts.is_empty(),
                 "conflicts": conflicts,
+                "colliding_paths": conflicts,
                 "head_before": head_before,
                 "hint": "resolve conflicted paths, git_add them, then git_commit; or git_merge_abort to restore the pre-pull HEAD",
             }),
@@ -6612,6 +6632,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
                 "ff_only": ff_only,
                 "conflicted": true,
                 "conflicts": conflicts,
+                "colliding_paths": conflicts,
                 "head_before": head_before,
                 "head_after": head_after,
                 "hint": "The pull landed, but the shelved local changes conflict with it and the stash remains. Resolve the conflicted paths, git_add them, then git_commit; git_stash_pop restores the shelved changes once the worktree is clean.",
@@ -6642,8 +6663,22 @@ pub(super) fn ci_status_resolve_repo_preferring_unambiguous_github_repo_field(
         .or_else(|| body.get("repo").and_then(|v| v.as_str()))
     {
         let explicit = explicit.trim();
-        if !explicit.is_empty() {
+        if explicit.contains('/') && !explicit.is_empty() {
             return Ok(explicit.to_string());
+        }
+        if !explicit.is_empty() {
+            let origin = exec_git_in(cwd, "remote get-url origin").trim().to_string();
+            let owner = origin
+                .trim_end_matches(".git")
+                .rsplit_once('/')
+                .and_then(|(rest, _)| rest.rsplit_once(['/', ':']).map(|(_, owner)| owner.to_string()));
+            return match owner {
+                Some(owner) if !owner.is_empty() => Ok(format!("{}/{}", owner, explicit)),
+                _ => Err(err(
+                    "ci-status",
+                    &format!("repo {explicit} has no owner and origin remote gives none; pass github_repo as owner/name"),
+                )),
+            };
         }
     }
     let url = exec_git_in(cwd, "remote get-url origin")
@@ -7633,10 +7668,7 @@ pub(super) fn ci_status_summarize(
         let gh_status = run.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let conclusion = run.get("conclusion").and_then(|v| v.as_str()).unwrap_or("");
         let mut per_run_status = ci_status_conclusion_to_status(conclusion, gh_status);
-        let html_url = run
-            .get("html_url")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let html_url = ci_status_run_url(repo, run);
         if run_url.is_none() {
             run_url = html_url.clone();
         }
@@ -7688,6 +7720,17 @@ pub(super) fn ci_status_summarize(
             "transport": source,
         },
     })
+}
+
+fn ci_status_run_url(repo: &str, run: &Value) -> Option<String> {
+    run.get("html_url")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .or_else(|| {
+            run.get("id")
+                .and_then(Value::as_u64)
+                .map(|id| format!("https://github.com/{}/actions/runs/{}", repo, id))
+        })
 }
 
 pub(super) fn ci_status_collect_run_jobs(

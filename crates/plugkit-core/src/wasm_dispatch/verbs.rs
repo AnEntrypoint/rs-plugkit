@@ -3283,7 +3283,8 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
     };
     #[cfg(not(target_arch = "wasm32"))]
     let recorded: Option<(String, ())> = None;
-    let reply = stamp_request_identity(
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
+    let mut reply = stamp_request_identity(
         result_value,
         &fingerprint,
         body_parse_failed,
@@ -3296,7 +3297,12 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
             use sha2::Digest;
             format!("{:x}", sha2::Sha256::digest(reply.as_bytes()))
         };
-        crate::dispatch_ledger::attach_reply_sha256(cwd, &dispatch_id, &reply_sha);
+        if let Err(reason) = crate::dispatch_ledger::attach_reply_sha256(cwd, &dispatch_id, &reply_sha) {
+            if let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(&reply) {
+                map.insert("reply_attach_failed".to_string(), serde_json::Value::String(reason));
+                reply = serde_json::Value::Object(map).to_string();
+            }
+        }
         crate::orchestrator::dream_rsi::observe_recorded(
             outcome,
             &dispatch_id,

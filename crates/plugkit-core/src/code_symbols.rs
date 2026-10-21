@@ -1017,6 +1017,7 @@ fn sync_tree_with_budget(
     if !accessible_directory && !crate::wasm_dispatch::host_allow_root(root) {
         return json!({
             "ok": false,
+            "error_code": "root_not_granted",
             "complete": false,
             "listing_complete": false,
             "root_granted": false,
