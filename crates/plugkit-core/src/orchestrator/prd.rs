@@ -516,8 +516,14 @@ fn request_limit(request: &serde_json::Value) -> Result<Option<usize>, String> {
         Some(value) => value
             .as_u64()
             .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-            .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
-            .ok_or_else(|| "prd-list limit must be a non-negative integer".to_string()),
+            .ok_or_else(|| "prd-list limit must be a non-negative integer".to_string())
+            .and_then(|n| {
+                if n == 0 {
+                    Err("prd-list refused: limit 0 returns no rows and no next_offset, so a pager would loop; pass limit >= 1 or omit limit for the default page".to_string())
+                } else {
+                    Ok(Some(usize::try_from(n).unwrap_or(usize::MAX)))
+                }
+            }),
     }
 }
 
@@ -902,6 +908,22 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             )
         }
     };
+    let cause_key = Value::String("cause".to_string());
+    match item_map.get(&cause_key).cloned() {
+        None | Some(Value::Null) => {
+            item_map.remove(&cause_key);
+        }
+        Some(Value::String(cause)) if !cause.trim().is_empty() => {
+            item_map.insert(cause_key, Value::String(cause.trim().to_string()));
+        }
+        Some(_) => {
+            return (
+                String::new(),
+                "prd-add refused: cause must be a non-empty string naming the shared cause (rows with one cause fold together)".to_string(),
+                1,
+            );
+        }
+    }
     if let Some(disposition) = mapping_text(&item_map, "disposition") {
         if !DISPOSITIONS.contains(&disposition_head(&disposition)) {
             return (
@@ -1520,7 +1542,6 @@ fn spool_out_completed_ms(out_dir: &str, name: &str) -> Option<u64> {
     mtime.as_u64().or_else(|| mtime.as_f64().map(|ms| ms as u64))
 }
 
-#[cfg(target_arch = "wasm32")]
 #[cfg(target_arch = "wasm32")]
 fn ledger_unreadable_refusal(cwd: &str, detail: &str) -> (String, String, i32) {
     let searched = crate::dispatch_ledger::ledger_path(cwd);
@@ -2980,9 +3001,16 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         if let Some(dispatch_id) = witness_dispatch_id.as_deref() {
             let cwd = resolve_cwd.as_deref().unwrap_or("");
             let host_root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+            let mut ledger_error: Option<String> = None;
             let dispatch_session = [cwd, host_root.as_str()]
                 .into_iter()
-                .find_map(|root| crate::dispatch_ledger::lookup_in_scope(root, dispatch_id).ok().flatten())
+                .find_map(|root| match crate::dispatch_ledger::lookup_in_scope(root, dispatch_id) {
+                    Ok(found) => found,
+                    Err(reason) => {
+                        ledger_error.get_or_insert(reason);
+                        None
+                    }
+                })
                 .and_then(|entry| entry.get("session_id")?.as_str().map(str::to_string));
             let resolving_session = body_session_id(&request_object(trimmed))
                 .or_else(crate::orchestrator::state::dispatch_session_id);
@@ -3014,6 +3042,14 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                         dispatch_session.as_deref().unwrap_or_default(),
                         id_target,
                         id_target
+                    ),
+                ))
+            } else if let Some(reason) = ledger_error.as_ref().filter(|_| dispatch_session.is_none()) {
+                Some((
+                    "ledger_unreadable",
+                    format!(
+                        "prd-resolve refused: the dispatch ledger could not be read while looking up witness_dispatch_id {}: {}",
+                        dispatch_id, reason
                     ),
                 ))
             } else if unattributed {
@@ -3308,6 +3344,10 @@ pub fn handle_block(content: &str) -> (String, String, i32) {
             .unwrap_or_default();
         notes.push(Value::String(note.clone()));
         map.insert(notes_key, Value::Sequence(notes));
+        map.insert(
+            Value::String("status".to_string()),
+            Value::String("blocked".to_string()),
+        );
         cas::CasOutcome::Write(doc, ())
     });
     match outcome {

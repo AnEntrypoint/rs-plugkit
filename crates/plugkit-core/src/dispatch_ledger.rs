@@ -280,24 +280,25 @@ const CAS_SWAPPED: u32 = 1;
 const CAS_MISMATCH: u32 = 2;
 const CAS_MAX_ATTEMPTS: u32 = 16;
 
-pub fn attach_reply_sha256(cwd: &str, dispatch_id: &str, reply_sha256: &str) {
+pub fn attach_reply_sha256(cwd: &str, dispatch_id: &str, reply_sha256: &str) -> Result<(), String> {
     let path = ledger_path(cwd);
     for _ in 0..CAS_MAX_ATTEMPTS {
-        let existing = host_read(&path).unwrap_or_default();
+        let existing = host_read(&path).ok_or_else(|| ledger_unavailable(&path))?;
         let Ok(Value::Array(mut list)) = serde_json::from_str::<Value>(&existing) else {
-            return;
+            return Err(ledger_unavailable(&path));
         };
         let Some(entry) = list
             .iter_mut()
             .find(|e| e.get("dispatch_id").and_then(|v| v.as_str()) == Some(dispatch_id))
         else {
-            return;
+            return Err(format!("dispatch {dispatch_id} has no ledger row to attach its reply hash to"));
         };
         entry["reply_sha256"] = json!(reply_sha256);
         if host_cas_write(&path, &existing, &Value::Array(list).to_string()) == CAS_SWAPPED {
-            return;
+            return Ok(());
         }
     }
+    Err(format!("reply hash for {dispatch_id} lost {CAS_MAX_ATTEMPTS} compare-and-swap races"))
 }
 
 pub fn subagent_running_count(

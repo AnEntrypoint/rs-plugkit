@@ -27,7 +27,7 @@ pub fn handle_reconcile(content: &str) -> (String, String, i32) {
 
     if next.is_empty() && parsed.get("next").is_none() {
         return (
-            serde_json::json!({"ok": false, "error": "component-loader-reconcile requires next: [entry...]"}).to_string(),
+            serde_json::json!({"ok": false, "error_code": "component_loader_requires_next", "error": "component-loader-reconcile requires next: [entry...]"}).to_string(),
             String::new(),
             1,
         );
@@ -62,14 +62,14 @@ pub fn handle_reconcile(content: &str) -> (String, String, i32) {
             pkfs::CasWriteOutcome::Mismatch if attempt < MAX_CAS_ATTEMPTS => continue,
             pkfs::CasWriteOutcome::Mismatch => {
                 return (
-                    serde_json::json!({"ok": false, "error": "component-loader-reconcile: loader-state.json kept changing under concurrent dispatches; exhausted retries"}).to_string(),
+                    serde_json::json!({"ok": false, "error_code": "loader_state_contended", "error": "component-loader-reconcile: loader-state.json kept changing under concurrent dispatches; exhausted retries"}).to_string(),
                     String::new(),
                     1,
                 );
             }
             pkfs::CasWriteOutcome::IoError => {
                 return (
-                    serde_json::json!({"ok": false, "error": "component-loader-reconcile: could not write loader-state.json"}).to_string(),
+                    serde_json::json!({"ok": false, "error_code": "loader_state_write_failed", "error": "component-loader-reconcile: could not write loader-state.json"}).to_string(),
                     String::new(),
                     1,
                 );
@@ -136,7 +136,7 @@ pub fn handle_hmr(content: &str) -> (String, String, i32) {
 
     if stashed.is_empty() {
         return (
-            serde_json::json!({"ok": false, "error": "component-loader-hmr requires a non-empty stashed: [url...]"}).to_string(),
+            serde_json::json!({"ok": false, "error_code": "component_loader_requires_stashed", "error": "component-loader-hmr requires a non-empty stashed: [url...]"}).to_string(),
             String::new(),
             1,
         );

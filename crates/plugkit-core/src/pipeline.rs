@@ -180,7 +180,7 @@ pub fn build_pending_step(text: &str, namespace: &str, project_path: Option<&str
     });
 
     if let Err(e) = persist_state(&step_id, &state, deadline_ms, now) {
-        return json!({ "ok": false, "error": format!("pipeline persist failed: {}", e) });
+        return json!({ "ok": false, "error_code": "persist_failed", "error": format!("pipeline persist failed: {}", e) });
     }
 
     let token = match mint_token(&step_id, &kv_key, deadline_ms) {
