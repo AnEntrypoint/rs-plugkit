@@ -419,7 +419,7 @@ fn evaluate_worlds(
             "score": score,
             "cost": cost,
             "attempt": policy.attempt.unwrap_or(1).max(1),
-            "group_size": policy.group_size,
+            "group_size": policy.group_size.unwrap_or(1).max(1),
             "stop": policy.stop.map(Stop::name),
             "replays": replays,
         }));
