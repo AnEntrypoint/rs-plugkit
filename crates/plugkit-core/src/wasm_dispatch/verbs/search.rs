@@ -1684,7 +1684,8 @@ prd-resolve {id (string), witness_evidence (string), commit_comment (string, opt
          commit_sha_attached, witness_bound. A help request writes no state.";
 
 pub(super) const PRD_ADD_HELP: &str = "\
-prd-add {id, subject, description, notes, status, blockedBy, overwrite, owner, disposition, recheck_by}.
+prd-add {id, subject, description, notes, status, blockedBy, overwrite, owner, disposition, recheck_by, cause}.
+  cause: optional non-empty string naming the shared root cause; stored on the row so duplicate rows with one cause can be folded.
   owner defaults to the filing session_id. disposition starts with open, accepted, rejected or deferred (a reason may follow ':'). prd-resolve is refused while disposition is open, and from the session named in recheck_by.
   id: a non-empty kebab-case string, unique in .gm/prd.yml. It is derived, not required: omit it and
       send a non-empty subject (or title, name, task, goal, description, notes -- the first of those
