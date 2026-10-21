@@ -6506,7 +6506,9 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         argv.push(branch.to_string());
     }
     let argv_refs: Vec<&str> = argv.iter().map(|arg| arg.as_str()).collect();
+    let child_started = unsafe { host_now_ms() };
     let r = git_call_argv(&argv_refs, cwd);
+    let child_ms = unsafe { host_now_ms() }.saturating_sub(child_started);
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let output = format!(
         "{}{}",
@@ -6705,6 +6707,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
             "head_before": head_before,
             "head_after": head_after,
             "already_up_to_date": head_before == head_after,
+            "child_ms": child_ms,
             "output": output,
         }),
     )
