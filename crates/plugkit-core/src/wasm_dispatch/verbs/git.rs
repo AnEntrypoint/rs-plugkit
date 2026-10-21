@@ -5906,7 +5906,9 @@ pub(super) fn git_log(body: &Value) -> u64 {
                 })
             })
             .collect();
-        Ok(ok("git_log", json!({ "commits": commits })))
+        let read_repo = log_cwd.clone().or_else(|| cwd.map(String::from)).unwrap_or_default();
+        let read_ref = if range.is_empty() { "HEAD".to_string() } else { range.to_string() };
+        Ok(ok("git_log", json!({ "commits": commits, "repo": read_repo, "ref": read_ref })))
     })
 }
 
