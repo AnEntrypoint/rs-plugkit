@@ -148,7 +148,7 @@ fn parse_retry_state_v2(s: &str) -> (String, u32, u64) {
 }
 
 const LONGGAP_GATED_STATE_CHANGING_VERBS: &[&str] = &[
-    "fs_write", "kv_put", "cache_put", "cache_invalidate",
+    "fs_write", "fs_edit", "kv_put", "cache_put", "cache_invalidate",
     "sql_open", "sql_close", "sql_exec", "sql_serialize", "sql_deserialize", "sql_smoke",
     "codeinsight_index",
     "config-sync-now", "discipline", "close",
