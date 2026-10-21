@@ -526,8 +526,18 @@ fn evaluate_worlds(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn session_store_path(name: &str) -> Result<String, String> {
-    Ok(format!(".gm/dream-rsi/{}/{}.json", session_id()?, name))
+fn session_store_path(session: &str, file: &str) -> String {
+    let dir = format!(".gm/dream-rsi/{session}");
+    if file.is_empty() {
+        dir
+    } else {
+        format!("{dir}/{file}")
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn current_session_store_path(name: &str) -> Result<String, String> {
+    Ok(session_store_path(&session_id()?, &format!("{name}.json")))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -878,7 +888,7 @@ fn dir_entry_names(dir: &str) -> Vec<String> {
 
 #[cfg(target_arch = "wasm32")]
 fn archive_names(session_id: &str) -> Vec<String> {
-    let mut names: Vec<(i64, String)> = dir_entry_names(&format!(".gm/dream-rsi/{session_id}"))
+    let mut names: Vec<(i64, String)> = dir_entry_names(&session_store_path(session_id, ""))
         .into_iter()
         .filter_map(|name| {
             let ts = name
@@ -895,20 +905,20 @@ fn archive_names(session_id: &str) -> Vec<String> {
 
 #[cfg(target_arch = "wasm32")]
 fn archive_observations(session_id: &str, ts: i64, raw: &str) -> Option<String> {
-    let path = format!(".gm/dream-rsi/{session_id}/{OBSERVATIONS_ARCHIVE_PREFIX}{ts}.json");
+    let path = session_store_path(session_id, &format!("{OBSERVATIONS_ARCHIVE_PREFIX}{ts}.json"));
     if crate::pkfs::exists(&path) || !crate::pkfs::write(&path, raw) {
         return None;
     }
     let names = archive_names(session_id);
     for stale in names.iter().take(names.len().saturating_sub(OBSERVATIONS_ARCHIVE_MAX_CHUNKS)) {
-        crate::pkfs::remove_file(&format!(".gm/dream-rsi/{session_id}/{stale}"));
+        crate::pkfs::remove_file(&session_store_path(session_id, stale));
     }
     Some(path)
 }
 
 #[cfg(target_arch = "wasm32")]
 fn live_count_path(session_id: &str) -> String {
-    format!(".gm/dream-rsi/{session_id}/{OBSERVATIONS_LIVE_COUNT_FILE}")
+    session_store_path(session_id, OBSERVATIONS_LIVE_COUNT_FILE)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1009,11 +1019,11 @@ fn session_history(session_id: &str) -> (Vec<ObservationRecord>, usize) {
         rejected += dropped;
     };
     for name in archive_names(session_id) {
-        if let Some(raw) = crate::pkfs::read_to_string(&format!(".gm/dream-rsi/{session_id}/{name}")) {
+        if let Some(raw) = crate::pkfs::read_to_string(&session_store_path(session_id, &name)) {
             absorb(&raw);
         }
     }
-    if let Some(raw) = recover_observations_tail(&format!(".gm/dream-rsi/{session_id}/observations.json")) {
+    if let Some(raw) = recover_observations_tail(&session_store_path(session_id, "observations.json")) {
         absorb(&raw);
     }
     (records, rejected)
@@ -1216,7 +1226,7 @@ fn prune_idle_sessions(now_ms: i64, keep: &str) {
         if session.starts_with('.') || session == keep || exempt.contains(&session) {
             continue;
         }
-        let dir = format!(".gm/dream-rsi/{session}");
+        let dir = session_store_path(&session, "");
         if let Some(newest) = newest_entry_mtime_ms(&dir) {
             if now_ms.saturating_sub(newest) > SESSION_RETENTION_MS {
                 crate::pkfs::remove_tree(&dir);
@@ -1546,7 +1556,7 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         return;
     }
     let failure = failure.for_exit(exit_code);
-    let path = format!(".gm/dream-rsi/{session_id}/observations.json");
+    let path = session_store_path(session_id, "observations.json");
     let ts = super::state::now_ms() as i64;
     rotate_observations_if_full(session_id, &path, ts);
     if recover_observations_tail(&path).is_none() {
@@ -1642,9 +1652,7 @@ pub(super) fn active_strategy(session_id: Option<&str>) -> Value {
     let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
         return Value::Null;
     };
-    crate::pkfs::read_to_string(&format!(
-        ".gm/dream-rsi/{session_id}/{ACTIVE_STRATEGY_FILE}.json"
-    ))
+    crate::pkfs::read_to_string(&session_store_path(session_id, &format!("{ACTIVE_STRATEGY_FILE}.json")))
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or(Value::Null)
 }
@@ -1715,9 +1723,7 @@ pub(super) fn persisted_cycle_result(session_id: Option<&str>) -> Value {
     let Some(session_id) = session_id.filter(|id| !id.trim().is_empty()) else {
         return Value::Null;
     };
-    crate::pkfs::read_to_string(&format!(
-        ".gm/dream-rsi/{session_id}/{CYCLE_RESULT_FILE}.json"
-    ))
+    crate::pkfs::read_to_string(&session_store_path(session_id, &format!("{CYCLE_RESULT_FILE}.json")))
     .and_then(|raw| serde_json::from_str(&raw).ok())
     .unwrap_or(Value::Null)
 }
@@ -1748,7 +1754,7 @@ fn propose_strategy() -> Result<Value, String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| SELECTION_CONTINUE_CURRENT_EXPLORATION.to_string());
-    let path = format!(".gm/dream-rsi/{owner}/proposed-strategy.json");
+    let path = session_store_path(&owner, "proposed-strategy.json");
     let proposal = json!({
         "ok": true,
         "kind": "strategy-proposal",
@@ -1786,7 +1792,7 @@ pub(super) fn handle_strategy_propose(_content: &str) -> (String, String, i32) {
 
 #[cfg(target_arch = "wasm32")]
 fn evaluator_receipt_path() -> Result<String, String> {
-    session_store_path("evaluator-receipts")
+    current_session_store_path("evaluator-receipts")
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1862,7 +1868,7 @@ fn register_policy(content: &str) -> Result<Value, String> {
     let max_online_rounds = body.get("max_online_rounds").map(|value| value.as_u64()
         .filter(|value| *value > 0)
         .ok_or_else(|| "dream-policy-register max_online_rounds must be a positive integer when present".to_string())).transpose()?;
-    let policy_path = session_store_path("policies")?;
+    let policy_path = current_session_store_path("policies")?;
     let raw = crate::pkfs::read_to_string(&policy_path).unwrap_or_else(|| "[]".to_string());
     let mut policies = latest_per_owner_id(
         parse_store(&raw, "dream-policy-register policy")?
@@ -1896,7 +1902,7 @@ fn register_policy(content: &str) -> Result<Value, String> {
                 )
             });
         if let Some((Some(incumbent), deployed_at)) = incumbent {
-            let replay_path = session_store_path(ReplayFile::Replay.name())?;
+            let replay_path = current_session_store_path(ReplayFile::Replay.name())?;
             let proven = crate::pkfs::read_to_string(&replay_path)
                 .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
                 .is_some_and(|result| {
@@ -1938,7 +1944,7 @@ fn register_policy(content: &str) -> Result<Value, String> {
         .map_err(|_| "dream-policy-register could not persist policy".to_string())?;
     if deployed {
         let strategy = json!({ "policy_id": policy.id, "owner_session_id": owner_session_id, "deployed_at": deployed_at });
-        let path = format!(".gm/dream-rsi/{owner_session_id}/{ACTIVE_STRATEGY_FILE}.json");
+        let path = session_store_path(&owner_session_id, &format!("{ACTIVE_STRATEGY_FILE}.json"));
         if !crate::pkfs::write(&path, &format!("{strategy}\n")) {
             return Err("dream-policy-register could not write active strategy".to_string());
         }
@@ -2069,7 +2075,7 @@ fn record_discovery(content: &str) -> Result<Value, String> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(ToOwned::to_owned);
-    let policy_path = session_store_path("policies")?;
+    let policy_path = current_session_store_path("policies")?;
     let raw_policies = crate::pkfs::read_to_string(&policy_path)
         .ok_or_else(|| "dream-discovery-record has no registered policies".to_string())?;
     let mut policies = latest_per_owner_id(
@@ -2116,7 +2122,7 @@ fn record_discovery(content: &str) -> Result<Value, String> {
     if dispatch.get("exit_code").and_then(Value::as_i64) != Some(0) {
         return Err("dream-discovery-record requires a successful completed dispatch".to_string());
     }
-    let discovery_path = session_store_path("discovery")?;
+    let discovery_path = current_session_store_path("discovery")?;
     let raw = crate::pkfs::read_to_string(&discovery_path).unwrap_or_else(|| "[]".to_string());
     let records = parse_store(&raw, "dream-discovery-record")?
         .into_iter()
@@ -2162,7 +2168,7 @@ fn seal(content: &str) -> Result<Value, String> {
     if discovery_ids.is_empty() {
         return Err("dream-world-seal requires recorded discovery_ids".to_string());
     }
-    let discovery_path = session_store_path("discovery")?;
+    let discovery_path = current_session_store_path("discovery")?;
     let raw_records = crate::pkfs::read_to_string(&discovery_path)
         .ok_or_else(|| "dream-world-seal has no discovery records".to_string())?;
     let records = parse_store(&raw_records, "dream-world-seal discovery record")?
@@ -2192,7 +2198,7 @@ fn seal(content: &str) -> Result<Value, String> {
         Ok(json!({ "id": id, "score": score, "cost": cost, "round": round, "children": children }))
     }).collect::<Result<Vec<_>, String>>()?;
     let world = parse_world(&json!({ "id": world_id, "nodes": nodes }))?;
-    let world_path = session_store_path("worlds")?;
+    let world_path = current_session_store_path("worlds")?;
     let raw = crate::pkfs::read_to_string(&world_path).unwrap_or_else(|| "[]".to_string());
     let mut worlds = serde_json::from_str::<Value>(&raw)
         .map_err(|_| "dream-world-seal world store is invalid".to_string())?
@@ -2224,7 +2230,7 @@ fn seal(content: &str) -> Result<Value, String> {
 
 #[cfg(target_arch = "wasm32")]
 fn replay_rounds_path() -> Result<String, String> {
-    session_store_path("replay-rounds")
+    current_session_store_path("replay-rounds")
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2284,7 +2290,7 @@ fn replay_round(content: &str) -> Result<Value, String> {
         let beta1 = nonneg_f64_field(&body, "beta1")?;
         let beta2 = nonneg_f64_field(&body, "beta2")?;
         let round_budget = body.get("round_budget").and_then(Value::as_u64);
-        let policy_path = session_store_path("policies")?;
+        let policy_path = current_session_store_path("policies")?;
         let raw_policies = crate::pkfs::read_to_string(&policy_path)
             .ok_or_else(|| "dream-replay-round has no registered policies".to_string())?;
         let stored_policies = latest_per_owner_id(
@@ -2302,7 +2308,7 @@ fn replay_round(content: &str) -> Result<Value, String> {
             })
             .ok_or_else(|| format!("dream-replay-round registered policy {policy_id} is absent"))?;
         let policy = parse_policy(stored_policy)?;
-        let world_path = session_store_path("worlds")?;
+        let world_path = current_session_store_path("worlds")?;
         let raw_worlds = crate::pkfs::read_to_string(&world_path)
             .ok_or_else(|| "dream-replay-round has no sealed worlds".to_string())?;
         let stored_worlds = serde_json::from_str::<Value>(&raw_worlds)
@@ -2349,7 +2355,7 @@ fn replay_round(content: &str) -> Result<Value, String> {
     }
 
     let world_id = string_field(&state, "world_id")?;
-    let world_path = session_store_path("worlds")?;
+    let world_path = current_session_store_path("worlds")?;
     let raw_worlds = crate::pkfs::read_to_string(&world_path)
         .ok_or_else(|| "dream-replay-round has no sealed worlds".to_string())?;
     let stored_worlds = serde_json::from_str::<Value>(&raw_worlds)
@@ -2545,7 +2551,7 @@ fn evaluate(content: &str) -> Result<Value, String> {
     let policy_ids = array_field(&body, "policy_ids")?;
     let beta1 = nonneg_f64_field(&body, "beta1")?;
     let beta2 = nonneg_f64_field(&body, "beta2")?;
-    let policy_path = session_store_path("policies")?;
+    let policy_path = current_session_store_path("policies")?;
     let raw_policies = crate::pkfs::read_to_string(&policy_path)
         .ok_or_else(|| "dream-replay has no registered policies".to_string())?;
     let stored_policies = latest_per_owner_id(
@@ -2581,7 +2587,7 @@ fn evaluate(content: &str) -> Result<Value, String> {
             "dream-replay baseline_policy_id is not this session's deployed policy".to_string(),
         );
     }
-    let world_path = session_store_path("worlds")?;
+    let world_path = current_session_store_path("worlds")?;
     let raw = crate::pkfs::read_to_string(&world_path)
         .ok_or_else(|| "dream-replay has no sealed worlds".to_string())?;
     let stored = serde_json::from_str::<Value>(&raw)
@@ -2772,7 +2778,7 @@ pub(super) fn persist_replay_result(
 ) -> Result<String, String> {
     let owner = session_id()?;
     let name = file.name();
-    let path = session_store_path(name)?;
+    let path = current_session_store_path(name)?;
     let kind = match file {
         ReplayFile::Cycle => "cycle-result",
         ReplayFile::Replay => "replay-result",
