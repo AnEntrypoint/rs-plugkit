@@ -10374,14 +10374,15 @@ pub(super) fn refuse_unknown_fields(verb: &str, body: &Value, accepted: &[&str])
     if unknown.is_empty() {
         return None;
     }
-    Some(err_json(
-        verb,
-        json!({
-            "error": format!("unknown body fields for {}: {}", verb, unknown.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")),
-            "unknown_fields": unknown,
-            "accepted_fields": accepted,
-        }),
-    ))
+    let mut refusal = json!({
+        "error": format!("unknown body fields for {}: {}", verb, unknown.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")),
+        "unknown_fields": unknown,
+        "accepted_fields": accepted,
+    });
+    if unknown.iter().any(|k| k.as_str() == "path") {
+        refusal["hint"] = json!("the repository directory is passed as cwd (repo, root and projectPath are also accepted); path is not an alias for it");
+    }
+    Some(err_json(verb, refusal))
 }
 
 pub(super) fn body_bool_flag(body: &Value, field: &str, verb: &str) -> Result<bool, Value> {
