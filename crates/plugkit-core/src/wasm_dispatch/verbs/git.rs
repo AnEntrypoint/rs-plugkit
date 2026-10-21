@@ -11314,8 +11314,34 @@ pub(super) fn git_worktree_remove(body: &Value) -> u64 {
     let output = format!("{}{}",
         r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
         r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
-    if code != 0 { return err("git_worktree_remove", &output); }
+    if code != 0 {
+        let first_line = output.lines().next().unwrap_or("").trim();
+        return err("git_worktree_remove", &format!("{first_line} {}", worktree_dirt_names(path)));
+    }
     ok("git_worktree_remove", json!({ "removed": true, "path": path, "output": output.trim() }))
+}
+
+fn worktree_dirt_names(path: &str) -> String {
+    let r = git_call_argv(&["status", "--porcelain", "--untracked-files=all"], Some(path));
+    let names: Vec<&str> = r
+        .get("stdout")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .lines()
+        .filter_map(|line| line.get(3..))
+        .collect();
+    if names.is_empty() {
+        return String::new();
+    }
+    let mut shown = String::new();
+    for name in &names {
+        let next = if shown.is_empty() { name.to_string() } else { format!("{shown}, {name}") };
+        if next.len() > 80 {
+            break;
+        }
+        shown = next;
+    }
+    format!("(dirty paths, {} total: {})", names.len(), shown)
 }
 
 fn worktree_dirt_is_gm_state_only(path: &str) -> bool {
