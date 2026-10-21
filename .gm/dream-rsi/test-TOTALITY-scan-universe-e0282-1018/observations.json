@@ -1,2 +1,0 @@
-{"dispatch_id":"1792370328951-3055-6a5d9b0377c19d7e","verb":"git_diff","fingerprint":"9462d3bc6786b785","exit_code":0,"gate_drift":false,"quality":0.5,"ts":1792370329246,"reply_sha256":"93619c538d24dd527462685d2be98d98cc0a10c8bbdcc9a559e1de4b90580810","failure_class":"ok"}
-{"dispatch_id":"1792370330799-3056-52325a5f1eed95cd","verb":"git_status","fingerprint":"34a98ede18a96955","exit_code":0,"gate_drift":false,"quality":0.5,"ts":1792370331025,"reply_sha256":"058d1e1bfe6e89f2488b9d7dc5ae30e36a6b4e295bf7513b1704d9c0f64354e0","failure_class":"ok"}
