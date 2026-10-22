@@ -3450,7 +3450,13 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         let spill_file = if reply.contains("\"spill_file\"") {
             serde_json::from_str::<serde_json::Value>(&reply)
                 .ok()
-                .and_then(|v| v.get("spill_file").and_then(serde_json::Value::as_str).map(str::to_owned))
+                .and_then(|v| {
+                    v.get("data")
+                        .and_then(|d| d.get("spill_file"))
+                        .or_else(|| v.get("spill_file"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
         } else {
             None
         };
