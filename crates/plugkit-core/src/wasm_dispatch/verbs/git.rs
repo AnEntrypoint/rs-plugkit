@@ -6394,6 +6394,7 @@ fn union_append_only_log_conflicts(cwd: Option<&str>, conflicts: &[String], outp
 }
 
 pub(super) fn git_pull(body: &Value) -> u64 {
+    let pull_started = unsafe { host_now_ms() };
     if let Some(refusal) = refuse_unknown_fields("git_pull", body, GIT_PULL_ACCEPTED_FIELDS) {
         return refusal;
     }
@@ -6536,8 +6537,10 @@ pub(super) fn git_pull(body: &Value) -> u64 {
     }
     let argv_refs: Vec<&str> = argv.iter().map(|arg| arg.as_str()).collect();
     let child_started = unsafe { host_now_ms() };
+    let probe_ms = child_started.saturating_sub(pull_started);
     let r = git_call_argv(&argv_refs, cwd);
     let child_ms = unsafe { host_now_ms() }.saturating_sub(child_started);
+    let post_started = unsafe { host_now_ms() };
     let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
     let output = format!(
         "{}{}",
@@ -6709,6 +6712,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
     }
     let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
     git_pull_record_own_merge(cwd, &head_before, &head_after);
+    let post_ms = unsafe { host_now_ms() }.saturating_sub(post_started);
     if !conflicts.is_empty() {
         return err_json(
             "git_pull",
@@ -6737,6 +6741,12 @@ pub(super) fn git_pull(body: &Value) -> u64 {
             "head_after": head_after,
             "already_up_to_date": head_before == head_after,
             "child_ms": child_ms,
+            "phases": {
+                "probe_ms": probe_ms,
+                "child_ms": child_ms,
+                "post_ms": post_ms,
+                "total_ms": unsafe { host_now_ms() }.saturating_sub(pull_started),
+            },
             "output": output,
         }),
     )
