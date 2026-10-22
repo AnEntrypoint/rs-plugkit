@@ -6,13 +6,9 @@ pub fn handle(content: &str) -> (String, String, i32) {
     adapt(evaluate(content))
 }
 
-#[cfg(target_arch = "wasm32")]
-pub fn handle_status(content: &str) -> (String, String, i32) {
-    adapt(status(content))
-}
 
 #[cfg(target_arch = "wasm32")]
-fn adapt(result: Result<Value, String>) -> (String, String, i32) {
+pub(super) fn adapt(result: Result<Value, String>) -> (String, String, i32) {
     match result {
         Ok(value) => (value.to_string(), String::new(), 0),
         Err(error) => (
@@ -23,25 +19,6 @@ fn adapt(result: Result<Value, String>) -> (String, String, i32) {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn status(content: &str) -> Result<Value, String> {
-    let body: Value = serde_json::from_str(content).map_err(|error| error.to_string())?;
-    if !body.is_object() {
-        return Err("dream-status requires a JSON object".into());
-    }
-    let owner = canonical_owner(&body, "dream-status")?;
-    if super::state::dispatch_session_id().as_deref() != Some(owner) {
-        return Err("dream-status owner differs from dispatch session".into());
-    }
-    let cycle = super::dream_rsi::persisted_cycle_result(Some(owner));
-    let status = if cycle.is_null() { "none" } else { "recorded" };
-    Ok(json!({
-        "ok": true, "kind": "dream-status", "owner_session_id": owner,
-        "status": status,
-        "cycle_result": cycle,
-        "probe_strategy": super::dream_rsi::persisted_probe(owner),
-    }))
-}
 
 #[cfg(target_arch = "wasm32")]
 fn evaluate(content: &str) -> Result<Value, String> {
@@ -160,7 +137,7 @@ fn run(owner: &str, body: &Value) -> Result<Value, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn canonical_owner<'a>(body: &'a Value, verb: &str) -> Result<&'a str, String> {
+pub(super) fn canonical_owner<'a>(body: &'a Value, verb: &str) -> Result<&'a str, String> {
     body.get("session_id")
         .and_then(Value::as_str)
         .filter(|owner| {

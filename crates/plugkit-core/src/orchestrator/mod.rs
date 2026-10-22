@@ -11,6 +11,7 @@ pub mod config_notify;
 pub mod deviations;
 pub mod discipline_note;
 pub mod dream_cycle;
+pub mod dream_status;
 pub mod dream_rsi;
 pub mod fiber_lifecycle;
 pub mod fsm;
@@ -411,7 +412,7 @@ orchestrator_dispatch_table! {
     "unknown-list" => mutables::handle_list(content),
     "unknown-defer" => mutables::handle_defer(content),
     "dream-replay-cycle" => dream_cycle::handle(content),
-    "dream-status" => dream_cycle::handle_status(content),
+    "dream-status" => dream_status::handle(content),
     "discipline-note" => discipline_note::handle(content),
     "discipline-check-removal" => discipline_note::handle_check_removal(content),
     "discipline-audit" => discipline_note::handle_audit(content),
