@@ -1,5 +1,5 @@
 use rs_plugkit::orchestrator::yaml_util;
-use serde_yaml::{Mapping, Value};
+use yaml_serde::{Mapping, Value};
 
 fn row_with_why(value: &str) -> Value {
     let mut map = Mapping::new();
@@ -18,7 +18,7 @@ fn main() {
             let doc = row_with_why(&value);
             match yaml_util::serialize_checked(&doc) {
                 Ok(raw) => {
-                    let back: Value = serde_yaml::from_str(&raw).expect("emitted text must parse");
+                    let back: Value = yaml_serde::from_str(&raw).expect("emitted text must parse");
                     let got = back.as_sequence().and_then(|s| s.first())
                         .and_then(|m| m.get("why")).and_then(|v| v.as_str())
                         .unwrap_or("");
@@ -49,7 +49,7 @@ fn main() {
                 }
             };
             let prefix = text.strip_prefix('\u{feff}').unwrap_or(&text);
-            match serde_yaml::from_str::<Value>(prefix) {
+            match yaml_serde::from_str::<Value>(prefix) {
                 Ok(doc) => {
                     println!("PARSE_OK rows={} bytes={} path={path}",
                         doc.as_sequence().map(|s| s.len()).unwrap_or(0), text.len());
@@ -68,13 +68,13 @@ fn main() {
                     for f in &plan.faults {
                         println!("FAULT {} -> requoted", f.describe());
                     }
-                    let guarded = serde_yaml::from_str::<Value>(&plan.repaired)
+                    let guarded = yaml_serde::from_str::<Value>(&plan.repaired)
                         .ok()
                         .and_then(|d| yaml_util::serialize_checked(&d).ok())
                         .unwrap_or_else(|| plan.repaired.clone());
                     let out = format!("{path}.repaired");
                     std::fs::write(&out, &guarded).expect("write repaired copy");
-                    let verify: Value = serde_yaml::from_str(&guarded).expect("repaired copy parses");
+                    let verify: Value = yaml_serde::from_str(&guarded).expect("repaired copy parses");
                     println!("REPAIR_OK changed={} rows_after={} bytes_before={} bytes_after={} wrote={}",
                         plan.changed,
                         verify.as_sequence().map(|s| s.len()).unwrap_or(0),

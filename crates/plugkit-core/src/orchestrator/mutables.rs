@@ -3,7 +3,7 @@ use super::gm_dir;
 use super::row_store;
 use super::yaml_util::{invalidate_residual_marker, levenshtein, yaml_to_json};
 use crate::pkfs;
-use serde_yaml::Value;
+use yaml_serde::Value;
 use std::collections::BTreeMap;
 
 const RENAME_VERBS: [&str; 8] = [
@@ -97,7 +97,7 @@ fn collapse_duplicate_ids_keeping_resolved_else_last(
     *seq = kept;
 }
 
-fn extract_depends_on(map: &serde_yaml::Mapping) -> Vec<String> {
+fn extract_depends_on(map: &yaml_serde::Mapping) -> Vec<String> {
     map.get(&Value::String("depends_on".to_string()))
         .and_then(|v| v.as_sequence())
         .map(|seq| {
@@ -161,7 +161,7 @@ const MUTABLE_OWNER_SESSION_FIELDS: &[&str] = &["session_id", "SESSION_ID", "ses
 
 const MUTABLE_OWNER_ROW_FIELDS: &[&str] = &["row", "row_id", "prd_id", "prd_row"];
 
-fn owner_field(map: &serde_yaml::Mapping, fields: &[&str]) -> Option<String> {
+fn owner_field(map: &yaml_serde::Mapping, fields: &[&str]) -> Option<String> {
     fields.iter().find_map(|field| {
         map.get(&Value::String((*field).to_string()))
             .and_then(|v| v.as_str())
@@ -213,11 +213,11 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             1,
         );
     }
-    let new_item: Value = match serde_yaml::from_str::<Value>(trimmed) {
+    let new_item: Value = match yaml_serde::from_str::<Value>(trimmed) {
         Ok(v) => v,
         Err(_) => match serde_json::from_str::<serde_json::Value>(trimmed)
             .ok()
-            .and_then(|j| serde_yaml::to_value(j).ok())
+            .and_then(|j| yaml_serde::to_value(j).ok())
         {
             Some(v) => v,
             None => return (String::new(), "parse failed".to_string(), 1),
@@ -769,7 +769,7 @@ pub fn obligations_blocker_message(kinds: &[&str]) -> String {
     }
 }
 
-fn mutable_blocked_external(item: &serde_yaml::Value) -> bool {
+fn mutable_blocked_external(item: &yaml_serde::Value) -> bool {
     item.get("blockedBy")
         .and_then(|v| v.as_sequence())
         .map(|seq| {

@@ -1,4 +1,4 @@
-use serde_yaml::Value;
+use yaml_serde::Value;
 
 pub fn levenshtein(a: &str, b: &str) -> usize {
     let av: Vec<char> = a.chars().collect();
@@ -231,7 +231,7 @@ impl YamlFault {
     }
 }
 
-pub fn parse_fault(text: &str, err: &serde_yaml::Error) -> Option<YamlFault> {
+pub fn parse_fault(text: &str, err: &yaml_serde::Error) -> Option<YamlFault> {
     let (line, column) = error_position(err)
         .or_else(|| error_position_from_message(&err.to_string()))?;
     let line_text = text.split('\n').nth(line.saturating_sub(1))?;
@@ -247,7 +247,7 @@ pub fn parse_fault(text: &str, err: &serde_yaml::Error) -> Option<YamlFault> {
     })
 }
 
-fn error_position(err: &serde_yaml::Error) -> Option<(usize, usize)> {
+fn error_position(err: &yaml_serde::Error) -> Option<(usize, usize)> {
     let loc = err.location()?;
     Some((loc.line(), loc.column()))
 }
@@ -374,9 +374,9 @@ pub fn quote_scalar(value: &str) -> String {
 }
 
 pub fn serialize_checked(doc: &Value) -> Result<String, String> {
-    let raw = serde_yaml::to_string(doc)
+    let raw = yaml_serde::to_string(doc)
         .map_err(|e| format!("the updated document did not serialize ({e})"))?;
-    let back: Value = serde_yaml::from_str(&raw).map_err(|e| {
+    let back: Value = yaml_serde::from_str(&raw).map_err(|e| {
         let where_at = parse_fault(&raw, &e)
             .map(|f| f.describe())
             .unwrap_or_else(|| "unknown position".to_string());
@@ -548,7 +548,7 @@ pub fn repair_text(
 ) -> Result<RepairPlan, (String, Vec<YamlFault>)> {
     let mut current = text.to_string();
     let mut faults: Vec<YamlFault> = Vec::new();
-    if serde_yaml::from_str::<Value>(&current).is_ok() && !text.trim().is_empty() {
+    if yaml_serde::from_str::<Value>(&current).is_ok() && !text.trim().is_empty() {
         let rows = row_count(&current);
         return Ok(RepairPlan {
             repaired: current,
@@ -558,7 +558,7 @@ pub fn repair_text(
         });
     }
     for _ in 0..max_passes.max(1) {
-        let err = match serde_yaml::from_str::<Value>(&current) {
+        let err = match yaml_serde::from_str::<Value>(&current) {
             Ok(_) => {
                 let rows = row_count(&current);
                 return Ok(RepairPlan {
@@ -609,7 +609,7 @@ pub fn repair_text(
 }
 
 fn row_count(text: &str) -> usize {
-    serde_yaml::from_str::<Value>(text)
+    yaml_serde::from_str::<Value>(text)
         .ok()
         .and_then(|v| v.as_sequence().map(|s| s.len()))
         .unwrap_or(0)

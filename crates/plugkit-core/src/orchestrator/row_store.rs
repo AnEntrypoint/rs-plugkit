@@ -1,5 +1,5 @@
 use crate::pkfs;
-use serde_yaml::Value;
+use yaml_serde::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::cas;
@@ -184,7 +184,7 @@ fn parse_blocks(path: &str, text: &str) -> Result<Vec<Value>, (String, i32)> {
         return Ok(Vec::new());
     }
     let source = text.strip_prefix(BOM).unwrap_or(text);
-    let doc: Value = serde_yaml::from_str(source).map_err(|e| {
+    let doc: Value = yaml_serde::from_str(source).map_err(|e| {
         (
             format!(
                 "{} contains non-empty content that failed to parse as YAML ({}). Writing would discard it, so the write is aborted; repair the file by hand or remove it",
@@ -284,7 +284,7 @@ fn parse_lenient(text: &str) -> Vec<Value> {
     if source.trim().is_empty() {
         return Vec::new();
     }
-    match serde_yaml::from_str::<Value>(source) {
+    match yaml_serde::from_str::<Value>(source) {
         Ok(Value::Sequence(seq)) => seq,
         Ok(other) => vec![other],
         Err(_) => Vec::new(),
@@ -295,11 +295,11 @@ fn merge_blocks(existing: Vec<Value>, incoming: Vec<Value>) -> Vec<Value> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<Value> = Vec::with_capacity(existing.len() + incoming.len());
     for block in existing {
-        seen.insert(serde_yaml::to_string(&block).unwrap_or_default());
+        seen.insert(yaml_serde::to_string(&block).unwrap_or_default());
         out.push(block);
     }
     for block in incoming {
-        let key = serde_yaml::to_string(&block).unwrap_or_default();
+        let key = yaml_serde::to_string(&block).unwrap_or_default();
         if seen.contains(&key) {
             continue;
         }

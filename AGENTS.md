@@ -157,7 +157,7 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 - `pin_direction_known` claims a direction only when both ends are objects this clone holds; a local-only phantom pin over a published tip is a forward correction.
 - `pin_regressions` reports backwards pins in the index (what the next commit writes) and in this repo's history.
 - `YamlFault`: line and column are 1-based, `substring` is the exact fault text, `token` the breaking token such as `": "` inside an unquoted prose value.
-- `parse_fault` reads the position from the serde_yaml message and `Error::location()`, trying both so a fault is never dropped.
+- `parse_fault` reads the position from the yaml_serde message and `Error::location()`, trying both so a fault is never dropped.
 - `requote_fault` changes only the scalar owning the fault; outside a `key: value` entry it returns None, so callers refuse.
 - `serialize_checked`: a document that does not round-trip is never written.
 - `repair_text`: `max_passes` bounds the loop; prd-repair defaults it to 16.
