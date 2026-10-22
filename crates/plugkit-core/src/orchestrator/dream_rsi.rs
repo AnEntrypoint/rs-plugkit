@@ -219,7 +219,6 @@ fn evaluate_policy(
     }))
 }
 
-const PROMOTION_MARGIN: f64 = 0.02;
 const PROMOTION_MIN_WORLDS: usize = 3;
 const PROMOTION_MIN_WIN_FRACTION: f64 = 0.5;
 
@@ -334,8 +333,9 @@ fn evaluate_worlds(
             wins as f64 / usable_count as f64
         })
         .collect();
+    let promotion_margin = crate::ragconfig::RagConfig::resolved().scoring.promotion_margin;
     let clears_margin = |index: usize| -> bool {
-        finite_score(ranked[index].score).unwrap_or(f64::NEG_INFINITY) > baseline_score + PROMOTION_MARGIN
+        finite_score(ranked[index].score).unwrap_or(f64::NEG_INFINITY) > baseline_score + promotion_margin
     };
     let clears_win_fraction = |index: usize| -> bool { win_fractions[index] >= PROMOTION_MIN_WIN_FRACTION };
     let selected_index = (0..ranked.len())
