@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 mod git;
 mod lane_claims;
 mod search;
+#[cfg(target_arch = "wasm32")]
+mod ref_read;
 mod tree_staleness;
 mod web;
 use git::*;
@@ -3411,6 +3413,10 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
                         )
                         .ok()
                     };
+                    let reason = match fallback.as_ref() {
+                        Some(_) => format!("{reason}; the refusal is recorded in the project ledger at {host_root}"),
+                        None => reason,
+                    };
                     result_value = super::host_abi::unpack_to_value(err_coded(
                         &verb,
                         "dispatch_ledger_unavailable",
@@ -3469,6 +3475,10 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
 }
 
 fn codeinsight_action(verb: &str, action: &str, body: &Value) -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(reply) = ref_read::codeinsight_at_ref(verb, action, body) {
+        return reply;
+    }
     let mut routed = body.clone();
     if let Some(map) = routed.as_object_mut() {
         map.entry("action").or_insert_with(|| json!(action));
