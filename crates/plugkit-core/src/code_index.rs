@@ -4549,7 +4549,7 @@ const COMPACT_TEXT_CHARS: usize = 160;
 const FILES_OUTPUT_DEFAULT_LIMIT: usize = 200;
 const COUNT_OUTPUT_DEFAULT_LIMIT: usize = 20;
 const REPLY_METADATA_RESERVE_CHARS: usize = 3_000;
-const UNREADABLE_SAMPLE_LEN: usize = 5;
+const UNREADABLE_SAMPLE_LEN: usize = 500;
 const DEPENDENCY_STORE_SEGMENTS: &[&str] = &[
     "node_modules",
     ".pnpm",
