@@ -1251,6 +1251,37 @@ fn writer_lock_refusal(path: &str) -> Option<Value> {
     }))
 }
 
+// A git write runs in the checkout named by its cwd (the root when that is the project root); the checkout's
+// writer lock decides it, as for fs_write. Pushes and reads are not writes to the local checkout and are not listed.
+const GIT_CHECKOUT_WRITE_VERBS: &[&str] = &[
+    "git_add",
+    "git_commit",
+    "git_amend",
+    "git_finalize",
+    "git_pull",
+    "git_merge",
+    "git_cherry_pick",
+    "git_revert",
+    "git_reset",
+    "git_rm",
+    "git_stash",
+    "git_stash_pop",
+    "git_stash_drop",
+    "git_checkout",
+    "git_rewrite_authors",
+];
+
+fn checkout_writer_refusal(body: &Value) -> Option<Value> {
+    let root = super::host_abi::host_cwd_string().unwrap_or_default().replace('\\', "/");
+    let cwd = body_cwd(body).unwrap_or("").replace('\\', "/");
+    let rel = match cwd.trim_end_matches('/').strip_prefix(root.trim_end_matches('/')) {
+        Some(rest) => rest.trim_start_matches('/').to_string(),
+        None => cwd.trim_start_matches("./").to_string(),
+    };
+    let probe = if rel.is_empty() { ".".to_string() } else { format!("{rel}/.") };
+    writer_lock_refusal(&probe)
+}
+
 fn fs_write(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let content = ["content", "data", "text"]
@@ -3666,6 +3697,11 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         return err(verb, &format!(
             "no parameter documentation is published for verb \"{verb}\" -- pass the verb's own body without \"help\" to see its error text, which names the fields it accepts"
         ));
+    }
+    if GIT_CHECKOUT_WRITE_VERBS.contains(&verb) {
+        if let Some(detail) = checkout_writer_refusal(&body) {
+            return err_json(verb, detail);
+        }
     }
     let result = match verb {
         "fs_read" => fs_read(&body),
