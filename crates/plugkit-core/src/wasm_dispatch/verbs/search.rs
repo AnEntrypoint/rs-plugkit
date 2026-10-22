@@ -2652,7 +2652,24 @@ pub(super) fn codesearch(body: &Value) -> u64 {
         map.insert("split_form_not_searched".to_string(), json!(note));
     }
     add_match_accounting(body, &mut v);
+    add_dual_timing_split(&mut v);
     pack(v.to_string())
+}
+
+fn add_dual_timing_split(v: &mut Value) {
+    let Some(data) = v.get_mut("data").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if data.get("mode").and_then(Value::as_str) != Some("dual") {
+        return;
+    }
+    data.entry("guest_elapsed_ms").or_insert_with(|| json!(guest_elapsed_ms()));
+    let embed_ms = data
+        .get("stage_ms")
+        .and_then(|stage| stage.get("embed_query"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    data.entry("embed_ms").or_insert_with(|| json!(embed_ms));
 }
 
 fn add_match_accounting(body: &Value, v: &mut Value) {
