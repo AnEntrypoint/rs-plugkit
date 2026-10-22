@@ -115,12 +115,14 @@ fn evaluate(content: &str) -> Result<Value, String> {
                 "replayed_worlds": replayed_worlds,
                 "replayed_observations": replayed_observations
             },
-            "replay_result_path": replay_result_path
+            "replay_result_path": replay_result_path,
+            "dropped_observations": super::dream_rsi::observation_drops(owner)
         })),
         Err(error) => Ok(json!({
             "ok": false, "error_code": "persist_failed", "kind": "observations",
             "status": "persist_failed", "owner_session_id": owner, "cycle_id": cycle_id,
-            "last_dispatch_id": latest, "error": error
+            "last_dispatch_id": latest, "error": error,
+            "dropped_observations": super::dream_rsi::observation_drops(owner)
         })),
     }
 }

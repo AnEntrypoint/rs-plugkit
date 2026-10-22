@@ -1290,6 +1290,7 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
     let ts = super::state::now_ms() as i64;
     rotate_observations_if_full(session_id, &path, ts);
     if recover_observations_tail(&path).is_none() {
+        record_observation_drop(session_id, dispatch_id, "observations_tail_unrecoverable");
         return;
     }
     let (prd_open_count, mutable_open_count) = super::instructions::open_row_counts();
@@ -1316,10 +1317,51 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
         ..Default::default()
     };
     let Ok(line) = serde_json::to_string(&record) else {
+        record_observation_drop(session_id, dispatch_id, "record_serialize_failed");
         return;
     };
     if crate::pkfs::append(&path, &format!("{line}\n")) {
         bump_live_count(session_id);
+    } else {
+        record_observation_drop(session_id, dispatch_id, "append_failed");
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+const OBSERVATION_DROPS_NS: &str = "dream_observation_drops";
+#[cfg(target_arch = "wasm32")]
+const OBSERVATION_DROPS_RECENT: usize = 20;
+
+#[cfg(target_arch = "wasm32")]
+fn observation_drops_record(session: &str) -> Value {
+    crate::wasm_dispatch::host_kv_read(OBSERVATION_DROPS_NS, session)
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .unwrap_or_else(|| json!({ "count": 0, "recent": [] }))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn observation_drops(session: &str) -> Value {
+    observation_drops_record(session)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn record_observation_drop(session_id: &str, dispatch_id: &str, reason: &str) {
+    let previous = observation_drops_record(session_id);
+    let count = previous.get("count").and_then(Value::as_u64).unwrap_or(0) + 1;
+    let mut recent = previous.get("recent").and_then(Value::as_array).cloned().unwrap_or_default();
+    recent.push(json!({ "dispatch_id": dispatch_id, "reason": reason, "ts": super::state::now_ms() as i64 }));
+    let excess = recent.len().saturating_sub(OBSERVATION_DROPS_RECENT);
+    recent.drain(..excess);
+    let value = json!({ "count": count, "recent": recent }).to_string();
+    unsafe {
+        crate::wasm_dispatch::host_kv_put(
+            OBSERVATION_DROPS_NS.as_ptr(),
+            OBSERVATION_DROPS_NS.len() as u32,
+            session_id.as_ptr(),
+            session_id.len() as u32,
+            value.as_ptr(),
+            value.len() as u32,
+        );
     }
 }
 
