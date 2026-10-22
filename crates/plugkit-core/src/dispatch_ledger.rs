@@ -60,17 +60,22 @@ fn parse_head(raw: &str) -> Head {
 }
 
 fn write_head(cwd: &str, entries: u64, seq: u64) -> bool {
+    let current = crate::pkfs::read_to_string(&ledger_head_path(cwd)).unwrap_or_default();
+    write_head_from(cwd, entries, seq, &current)
+}
+
+// Takes the head content the caller already read, so one append reads it once instead of twice.
+fn write_head_from(cwd: &str, entries: u64, seq: u64, current: &str) -> bool {
     let path = ledger_head_path(cwd);
     let next = json!({ "entries": entries, "seq": seq }).to_string();
-    let current = crate::pkfs::read_to_string(&path).unwrap_or_default();
     if current.trim().is_empty() {
         return crate::pkfs::write(&path, &next);
     }
-    if parse_head(&current).raw == next {
+    if parse_head(current).raw == next {
         return true;
     }
     matches!(
-        crate::pkfs::cas_write(&path, &current, &next),
+        crate::pkfs::cas_write(&path, current, &next),
         crate::pkfs::CasWriteOutcome::Swapped
     )
 }
@@ -79,12 +84,17 @@ fn count_lines(raw: &str) -> u64 {
     raw.lines().filter(|line| !line.trim().is_empty()).count() as u64
 }
 
-// One-time conversion of the historical single-array ledger into JSONL. Returns the entry count.
-fn ensure_jsonl(cwd: &str) -> Result<u64, String> {
+fn head_of(raw: String, entries: u64, seq: u64) -> Head {
+    Head { raw, entries, seq }
+}
+
+// One-time conversion of the historical single-array ledger into JSONL. Returns the head it observed, so
+// an append reuses it instead of reading the file again.
+fn ensure_jsonl(cwd: &str) -> Result<Head, String> {
     let path = ledger_path(cwd);
     if let Some(raw) = crate::pkfs::read_to_string(&ledger_head_path(cwd)) {
         if !raw.trim().is_empty() {
-            return Ok(parse_head(&raw).entries);
+            return Ok(parse_head(&raw));
         }
     }
     let existing = match host_read(&path) {
@@ -97,7 +107,7 @@ fn ensure_jsonl(cwd: &str) -> Result<u64, String> {
             return Err(ledger_unavailable(&path));
         }
         let _ = write_head(cwd, 0, 0);
-        return Ok(0);
+        return Ok(head_of(String::new(), 0, 0));
     }
     if let Ok(Value::Array(list)) = serde_json::from_str::<Value>(&existing) {
         let mut out = String::new();
@@ -113,11 +123,11 @@ fn ensure_jsonl(cwd: &str) -> Result<u64, String> {
         }
         let count = list.len() as u64;
         let _ = write_head(cwd, count, count);
-        return Ok(count);
+        return Ok(head_of(String::new(), count, count));
     }
     let count = count_lines(&existing);
     let _ = write_head(cwd, count, count);
-    Ok(count)
+    Ok(head_of(String::new(), count, count))
 }
 
 fn compact_ledger(cwd: &str, ts: u64) -> Result<(), String> {
@@ -213,7 +223,31 @@ fn spool_dir(cwd: &str) -> String {
     }
 }
 
+// The sweep is the one per-dispatch cost that scales with how much the spool holds: it lists the spool
+// directory and stats every candidate it finds. One sweep per project per SWEEP_MIN_INTERVAL_MS is enough,
+// because a file only becomes stale SPOOL_TMP_STALE_MS after it was written, so a second sweep inside that
+// window cannot retire anything the first did not. The memo is per cwd, since one Store serves many projects.
+const SWEEP_MIN_INTERVAL_MS: u64 = 5_000;
+
+static LAST_SWEEP: std::sync::Mutex<Option<(String, u64)>> = std::sync::Mutex::new(None);
+
+fn sweep_due(cwd: &str, now: u64) -> bool {
+    let Ok(mut last) = LAST_SWEEP.lock() else {
+        return true;
+    };
+    if let Some((last_cwd, last_ms)) = last.as_ref() {
+        if last_cwd.as_str() == cwd && now.saturating_sub(*last_ms) < SWEEP_MIN_INTERVAL_MS {
+            return false;
+        }
+    }
+    *last = Some((cwd.to_string(), now));
+    true
+}
+
 fn sweep_stale_spool_tmp(cwd: &str, now: u64) {
+    if !sweep_due(cwd, now) {
+        return;
+    }
     sweep_stale_tmp_entries(&spool_dir(cwd), now, |name| name.contains(SPOOL_TMP_MARKER));
 }
 
@@ -392,15 +426,8 @@ pub fn record(
     let path = ledger_path(cwd);
     sweep_stale_spool_tmp(cwd, now_ms());
     let (body_text, body_truncated) = bounded_request_body(&ledger_request_body(verb, request_body));
-    let entries_before = ensure_jsonl(cwd)?;
+    let head = ensure_jsonl(cwd)?;
     let ts = now_ms();
-    let head = crate::pkfs::read_to_string(&ledger_head_path(cwd))
-        .map(|raw| parse_head(&raw))
-        .unwrap_or(Head {
-            raw: String::new(),
-            entries: entries_before,
-            seq: entries_before,
-        });
     let dispatch_id = new_dispatch_id(verb, fingerprint, ts, head.seq);
     let line = json!({
         "dispatch_id": dispatch_id,
@@ -418,7 +445,11 @@ pub fn record(
     if !crate::pkfs::append(&path, &format!("{}\n", line)) {
         return Err(ledger_unavailable(&path));
     }
-    let _ = write_head(cwd, head.entries + 1, head.seq + 1);
+    if !write_head_from(cwd, head.entries + 1, head.seq + 1, &head.raw) {
+        // Another writer moved the head between the read and the swap; retry from the fresh content so
+        // the sequence keeps advancing.
+        let _ = write_head(cwd, head.entries + 1, head.seq + 1);
+    }
     if head.entries as usize >= LEDGER_COMPACT_ENTRIES {
         let _ = compact_ledger(cwd, ts);
     }
