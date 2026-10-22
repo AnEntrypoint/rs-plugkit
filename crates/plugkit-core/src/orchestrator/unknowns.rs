@@ -375,7 +375,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             } else {
                 return cas::CasOutcome::Abort(
                     String::new(),
-                    "the mutable store is not a sequence".to_string(),
+                    "the unknown row store is not a sequence".to_string(),
                     1,
                 );
             }
@@ -619,7 +619,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         return (
             String::new(),
             format!(
-                "no mutable row with id {} of the {} rows in .gm/unknowns/ or the resolved rows in .gm/unknowns-log.jsonl -- pass no id for the listing",
+                "no unknown row with id {} of the {} rows in .gm/unknowns/ or the resolved rows in .gm/unknowns-log.jsonl -- pass no id for the listing",
                 wanted_ids.join(", "),
                 store_total
             ),
@@ -652,7 +652,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         "truncated": truncated,
         "brief": !want_full,
         "full": want_full,
-        "hint": "pass {\"id\":\"<mutable id>\"} for one full row (repeated rows of an id fold to the last one unless an earlier one is resolved), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), or {\"full\":true} for every full body. .gm/unknowns/ holds OPEN work only: a resolved mutable is moved to .gm/unknowns-log.jsonl, and an id or a resolved status asked for here is answered from that log.",
+        "hint": "pass {\"id\":\"<unknown id>\"} for one full row (repeated rows of an id fold to the last one unless an earlier one is resolved), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), or {\"full\":true} for every full body. .gm/unknowns/ holds OPEN work only: an unknown that is resolved moves to .gm/unknowns-log.jsonl, and an id or a resolved status asked for here is answered from that log.",
     });
     (reply.to_string(), String::new(), 0)
 }
@@ -769,7 +769,7 @@ pub fn obligations_blocker_message(kinds: &[&str]) -> String {
     }
 }
 
-fn mutable_blocked_external(item: &yaml_serde::Value) -> bool {
+fn unknown_blocked_external(item: &yaml_serde::Value) -> bool {
     item.get("blockedBy")
         .and_then(|v| v.as_sequence())
         .map(|seq| {
@@ -794,7 +794,7 @@ pub fn pending_detailed() -> Vec<serde_json::Value> {
             .get("status")
             .and_then(|v| v.as_str())
             .unwrap_or(&policy.mutables_default_status);
-        if !resolved_statuses.iter().any(|s| s == status) && !mutable_blocked_external(item) {
+        if !resolved_statuses.iter().any(|s| s == status) && !unknown_blocked_external(item) {
             if let Some(m) = item.as_mapping() {
                 let mut obj = serde_json::Map::new();
                 for (k, v) in m {
