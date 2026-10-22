@@ -1526,7 +1526,7 @@ pub(super) fn promote_strategy(owner: &str, fields: &Value) -> Value {
         "kind": "project-strategy",
         "scope": "project",
         "owner_session_id": owner,
-        "policy_id": policy_id,
+        "selected_policy_id": policy_id,
         "selected_score": fields.get("selected_score").cloned().unwrap_or(Value::Null),
         "baseline_score": fields.get("baseline_score").cloned().unwrap_or(Value::Null),
         "n_observations": observations,
