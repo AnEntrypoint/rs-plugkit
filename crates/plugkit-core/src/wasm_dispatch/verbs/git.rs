@@ -1568,6 +1568,7 @@ fn push_unnamed_commits(
 }
 
 pub(super) fn git_push(body: &Value) -> u64 {
+    let push_started = unsafe { host_now_ms() };
     if push_body_requests_force(body) && !allow_rewrite_granted(body) {
         return rewrite_refusal("git_push", "force or force_with_lease push");
     }
@@ -1700,8 +1701,10 @@ pub(super) fn git_push(body: &Value) -> u64 {
         return pack(refusal.to_string());
     }
     let mut ssh_fallback: Option<SshHttpsFallback> = None;
+    let fetch_started = unsafe { host_now_ms() };
     let mut remote_before =
         git_fetch_and_resolve_remote(repo.as_deref(), &remote_name, &branch, None);
+    let fetch_ms = unsafe { host_now_ms() }.saturating_sub(fetch_started);
     if let (Some(named), Some(remote_tip)) = (explicit_source_ref.as_deref(), remote_before.as_deref()) {
         if ref_is_ancestor(repo.as_deref(), &local_source_before, remote_tip) {
             return pack(
@@ -1778,6 +1781,10 @@ pub(super) fn git_push(body: &Value) -> u64 {
             .to_string(),
         );
     }
+    let push_call_started = unsafe { host_now_ms() };
+    let gates_ms = push_call_started
+        .saturating_sub(push_started)
+        .saturating_sub(fetch_ms);
     let (mut push_out, mut push_succeeded) =
         exec_git_push_in(repo.as_deref(), &remote_name, source_ref, &branch, None);
     if origin_remote && !push_succeeded && push_output_is_ssh_auth_failure(&push_out) {
@@ -2047,6 +2054,8 @@ pub(super) fn git_push(body: &Value) -> u64 {
             )
         }
     };
+    let verify_started = unsafe { host_now_ms() };
+    let push_ms = verify_started.saturating_sub(push_call_started);
     match verify_push_landed(
         repo.as_deref(),
         &remote_name,
@@ -2089,6 +2098,13 @@ pub(super) fn git_push(body: &Value) -> u64 {
                 "source_ref": source_ref,
                 "source_sha": local_source_after,
                 "preserved_dirty_worktree": preserved_dirty_worktree,
+                "phases": {
+                    "fetch_ms": fetch_ms,
+                    "gates_ms": gates_ms,
+                    "push_ms": push_ms,
+                    "verify_ms": unsafe { host_now_ms() }.saturating_sub(verify_started),
+                    "total_ms": unsafe { host_now_ms() }.saturating_sub(push_started),
+                },
                 "pushed_commits": pushed_commits_published(
                     repo.as_deref(),
                     remote_before.as_deref(),
