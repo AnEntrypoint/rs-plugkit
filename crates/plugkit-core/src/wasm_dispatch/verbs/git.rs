@@ -4897,6 +4897,7 @@ pub(super) fn pull_and_repush_remote_moved(
     if scope.is_empty() {
         scope = unpublished_local_paths(cwd, branch);
     }
+    let mut scope_failure: Option<String> = None;
     if !scope.is_empty() {
         let local_sha = refusal
             .get("source_sha")
@@ -4933,6 +4934,7 @@ pub(super) fn pull_and_repush_remote_moved(
                     return refusal;
                 }
                 RemoteMovedScopeFix::Failed(reason) => {
+                    scope_failure = Some(reason.clone());
                     refusal["auto_recovery"] = json!({
                         "attempted": false,
                         "via": "scope-recommit",
@@ -5058,6 +5060,10 @@ pub(super) fn pull_and_repush_remote_moved(
             stamp_dirty_split(&mut refusal, &dirty_split);
             refusal["next_dispatch"] = json!("git_status");
             refusal["next_action_hint"] = json!(clean_tree_first);
+            if let Some(reason) = scope_failure.as_deref() {
+                refusal["auto_recovery"]["via"] = json!("pull");
+                refusal["auto_recovery"]["scope_recommit_reason"] = json!(reason);
+            }
             refusal
         }
         RemoteMovedPull::Failed(result) => {
@@ -6471,7 +6477,7 @@ fn git_pull_record_own_merge(cwd: Option<&str>, head_before: &str, head_after: &
     }
 }
 
-const APPEND_ONLY_STATE_LOGS: &[&str] = &[".gm/prd-log.jsonl", ".gm/mutables-log.jsonl"];
+const APPEND_ONLY_STATE_LOGS: &[&str] = &[".gm/prd-log.jsonl", ".gm/mutables-log.jsonl", ".gm/unknowns-log.jsonl"];
 
 fn union_append_only_log_conflicts(cwd: Option<&str>, conflicts: &[String], output: &str) -> bool {
     let Some(root) = cwd else { return false };
@@ -11487,10 +11493,18 @@ pub(super) fn git_worktree_remove(body: &Value) -> u64 {
         r.get("stderr").and_then(|x| x.as_str()).unwrap_or(""));
     if code != 0 {
         let first_line = output.lines().next().unwrap_or("").trim();
-        return err("git_worktree_remove", &format!("{first_line} {}", worktree_dirt_names(&path)));
+        let dirt = worktree_dirt_names(&path);
+        let message = if dirt.is_empty() {
+            first_line.to_string()
+        } else {
+            format!("{dirt} | git: {first_line}")
+        };
+        return err("git_worktree_remove", &message);
     }
     ok("git_worktree_remove", json!({ "removed": true, "path": path, "output": output.trim() }))
 }
+
+const DIRT_NAME_SAMPLE: usize = 6;
 
 fn worktree_dirt_names(path: &str) -> String {
     let r = git_call_argv(&["status", "--porcelain", "--untracked-files=all"], Some(path));
@@ -11504,10 +11518,14 @@ fn worktree_dirt_names(path: &str) -> String {
     if names.is_empty() {
         return String::new();
     }
+    let shown: Vec<&str> = names.iter().copied().take(DIRT_NAME_SAMPLE).collect();
+    let mut listed = shown.join(", ");
+    if names.len() > shown.len() {
+        listed.push_str(&format!(", +{} more", names.len() - shown.len()));
+    }
     format!(
-        "(dirty paths, {} total: {}; to drop the worktree with its untracked output, dispatch git_worktree_remove with force:true and allow_rewrite:true)",
-        names.len(),
-        names.join(", ")
+        "git_worktree_remove refused {path}: {} dirty paths; drop the worktree with its untracked output via force:true and allow_rewrite:true; first paths: {listed}",
+        names.len()
     )
 }
 
