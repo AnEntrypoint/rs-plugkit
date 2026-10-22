@@ -93,7 +93,7 @@ fn pool_open_row_count() -> usize {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn pool_concurrency_shortfall() -> usize {
+fn pool_concurrency_shortfall() -> Result<usize, String> {
     let open = pool_open_row_count();
     let session = super::state::read_state().session_id.unwrap_or_default();
     let running = if session.is_empty() {
@@ -102,17 +102,14 @@ fn pool_concurrency_shortfall() -> usize {
         let cwd = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
         let now = unsafe { crate::wasm_dispatch::host_now_ms() };
         let window = super::fsm::graph().policy.concurrency_window_ms;
-        match crate::dispatch_ledger::subagent_running_count(&cwd, &session, now, window) {
-            Ok(n) => n,
-            Err(_) => 0,
-        }
+        crate::dispatch_ledger::subagent_running_count(&cwd, &session, now, window)?
     };
-    open.saturating_sub(running)
+    Ok(open.saturating_sub(running))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn pool_concurrency_shortfall() -> usize {
-    usize::from(prd_has_open_items())
+fn pool_concurrency_shortfall() -> Result<usize, String> {
+    Ok(usize::from(prd_has_open_items()))
 }
 
 pub(super) fn pred_pool_floor_met() -> bool {
@@ -122,7 +119,10 @@ pub(super) fn pred_pool_floor_met() -> bool {
 fn pool_floor_denial_detail() -> String {
     let slots = super::pool_slots::slot_state(".");
     let refill_needed = super::pool_slots::monitor_block(&slots)["shortfall"].clone();
-    let shortfall = pool_concurrency_shortfall();
+    let shortfall = match pool_concurrency_shortfall() {
+        Ok(n) => n.to_string(),
+        Err(e) => format!("unknown (subagent ledger unreadable: {e})"),
+    };
     format!(
         "pool-floor-met denied: floor_gate_denied open_rows={} live={} refill_needed={} free={} action={} shortfall={}; Call pool-observe with body.live set to the ListAgents count, launch the ids it lists in slots.launch (pending row ids only) as gm-worker subagents; when traversal.slot is true, fill that slot with pool-brief role traversal and traversal.brief_row; when no_row_launchable is true no row can launch, so wait for a held row to complete before re-attempting; otherwise re-attempt; on a spawn refusal dispatch pool-observe with its text.",
         slots["open_rows"], slots["live"], refill_needed, slots["free"], slots["action"], shortfall
