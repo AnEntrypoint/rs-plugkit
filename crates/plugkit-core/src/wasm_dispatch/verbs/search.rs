@@ -858,6 +858,7 @@ pub(super) const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "regex",
     "literal",
     "pattern",
+    "ref",
 ];
 
 pub(super) const CODESEARCH_LIMIT_FIELDS: &[&str] = &["k", "max_results", "maxResults", "limit", "head_limit"];
@@ -2638,6 +2639,10 @@ pub(super) fn codesearch_identifier(
 }
 
 pub(super) fn codesearch(body: &Value) -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(reply) = super::ref_read::codesearch_at_ref(body) {
+        return reply;
+    }
     let packed = codesearch_dispatch(body);
     let mut v = unpack_to_value(packed);
     if !v.is_object() {
