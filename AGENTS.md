@@ -166,7 +166,7 @@ Module-scoped rules live beside their source: [crates/plugkit-core/src/AGENTS.md
 
 - `VERB_OWNED_RESERVED_BODY_KEYS`: verbs own `_plan` (the async git replay id `git_async_entry` reads back) and `_lease_sessions`; other `_` keys are transport bookkeeping.
 - `strip_reserved_body_keys` removes `_agentplug_lane_wait_ms`, which gm-mcp stamps on every JSON body, so strict validators refuse only misspelled caller fields.
-- `APPEND_ONLY_PATH_SUFFIXES` and `APPEND_ONLY_PATH_PATTERNS` guard `/.gm/witness-log.md`, `/.gm/lean-walk/new-nodes.jsonl` and `/.gm/pool/ledger-<wave>.txt`: each is a shared append log, and a concurrent whole-file write took the witness log from 4675 lines to 3 (measured 2026-10-10). Every whole-file write to these paths is refused; only `fs_write {append:true}` lands.
+- `APPEND_ONLY_PATH_SUFFIXES` and `APPEND_ONLY_PATH_PATTERNS` guard `/.gm/lean-walk/new-nodes.jsonl` and `/.gm/pool/ledger-<wave>.txt`: each is a shared append log, and a concurrent whole-file write once took the witness log (now an unguarded cache) from 4675 lines to 3 (measured 2026-10-10). Every whole-file write to these paths is refused; only `fs_write {append:true}` lands.
 - `prd.yml`, `mutables.yml` and the row folders are absent from the guard, since their verbs reconcile per row and must rewrite a row; the commit logs need no guard because a single writer appends one line under a CAS.
 - `fs_read_directory` answers a bounded listing (`FS_READ_DIRECTORY_DEFAULT_LIMIT` 100, `FS_READ_DIRECTORY_MAX_LIMIT` 500) because `host_read` returns nothing for a directory.
 - `FS_READ_DIRECTORY_ENTRY_CAP_KEYS` (`max_entries`, `entries_limit`, `entry_limit`): `limit` is a `fs_read` line-range alias.

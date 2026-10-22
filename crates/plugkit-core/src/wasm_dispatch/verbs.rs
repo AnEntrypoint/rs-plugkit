@@ -333,7 +333,7 @@ pub const ERR_CODE_DANGLING_SCAN_UNREADABLE: &str = "dangling_scan_unreadable";
 pub const ERR_CODE_APPEND_ONLY_SHRINK: &str = "append_only_shrink_refused";
 pub const ERR_CODE_APPEND_ONLY_REWRITE: &str = "append_only_rewrite_refused";
 
-const APPEND_ONLY_PATH_SUFFIXES: &[&str] = &["/.gm/witness-log.md", "/.gm/lean-walk/new-nodes.jsonl"];
+const APPEND_ONLY_PATH_SUFFIXES: &[&str] = &["/.gm/lean-walk/new-nodes.jsonl"];
 
 const APPEND_ONLY_PATH_PATTERNS: &[(&str, &str)] = &[("/.gm/pool/ledger-", ".txt")];
 
@@ -1280,7 +1280,7 @@ fn fs_write(body: &Value) -> u64 {
             "fs_write",
             json!({
                 "error": format!(
-                    "{path} is append-only (the witness log is the (id, hash, ts) audit primitive): this write would {} it, {} bytes on disk against {} offered. A whole-file write here is never served, because a concurrent read-modify-write took .gm/witness-log.md from 4675 lines to 3 on 2026-10-10.",
+                    "{path} is append-only (a shared append log that a concurrent read-modify-write would truncate): this write would {} it, {} bytes on disk against {} offered. A whole-file write here is never served, because a concurrent read-modify-write once took a shared append log from 4675 lines to 3 on 2026-10-10.",
                     if shrinks { "shrink" } else { "rewrite" },
                     bytes_on_disk,
                     bytes_offered
