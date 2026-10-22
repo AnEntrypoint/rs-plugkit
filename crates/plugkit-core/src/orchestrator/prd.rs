@@ -600,6 +600,7 @@ const PRD_LIST_DECLARED_BODY_FIELDS: &[&str] = &[
     "brief",
     "compact",
     "query",
+    "group",
 ];
 
 const PRD_LIST_ENVELOPE_FIELDS: &[&str] = &[
@@ -652,6 +653,17 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
     if let Some(refusal) = undeclared_list_key_refusal(&request) {
         return refusal;
     }
+    let group_by_cause = match request.get("group") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(g)) if g == "cause" => true,
+        Some(other) => {
+            return (
+                String::new(),
+                format!("prd-list refused: unknown group {}; accepted value: \"cause\"", other),
+                1,
+            )
+        }
+    };
     let limit = match request_limit(&request) {
         Ok(limit) => limit,
         Err(message) => return (String::new(), message, 1),
@@ -795,6 +807,9 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
             LOOKUP_MISS_EXIT,
         );
     }
+    if group_by_cause {
+        selected = group_rows_by_cause(selected);
+    }
     let matched = selected.len();
     let offset = match request_offset(&request) {
         Ok(offset) => offset.min(matched),
@@ -808,7 +823,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
     let mut items: Vec<serde_json::Value> = Vec::new();
     let mut items_chars = 0usize;
     for row in selected.into_iter().skip(offset).take(requested) {
-        let item = if want_full { row } else { brief_row(&row) };
+        let item = if group_by_cause || want_full { row } else { brief_row(&row) };
         let item_chars = item.to_string().len();
         if !items.is_empty() && items_chars + item_chars > PRD_LIST_ITEMS_BUDGET_CHARS {
             break;
@@ -836,6 +851,9 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
     if truncated {
         reply["hint"] = serde_json::json!("more rows: repeat with offset set to next_offset");
     }
+    if group_by_cause {
+        reply["group"] = serde_json::json!("cause");
+    }
     if !skipped_rows.is_empty() {
         reply["skipped_rows"] = skipped_rows_json(&skipped_rows);
     }
@@ -844,6 +862,37 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         reply["dropped_torn_lines_sidecar"] = serde_json::json!(".gm/prd-log.jsonl.torn");
     }
     (reply.to_string(), String::new(), 0)
+}
+
+fn group_rows_by_cause(rows: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut groups: Vec<(Option<String>, Vec<String>)> = Vec::new();
+    for row in rows {
+        let id = row_text(&row, &["id"]);
+        let cause = row
+            .get("cause")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string);
+        match cause {
+            Some(c) => match groups.iter_mut().find(|(key, _)| key.as_deref() == Some(c.as_str())) {
+                Some(group) => group.1.push(id),
+                None => groups.push((Some(c), vec![id])),
+            },
+            None => groups.push((None, vec![id])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(cause, ids)| {
+            serde_json::json!({
+                "cause": cause,
+                "count": ids.len(),
+                "id": ids[0],
+                "ids": ids,
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -921,6 +970,25 @@ fn near_duplicate_open_row(store: &row_store::Store, id: &str, subject: &str) ->
         let shared = incoming.intersection(&existing).count();
         let union = incoming.len() + existing.len() - shared;
         (shared * 100 >= union * DUPLICATE_MIN_SIMILARITY_PERCENT).then_some(other)
+    })
+}
+
+fn open_row_with_cause(store: &row_store::Store, id: &str, cause: &str) -> Option<String> {
+    let read = row_store::read_blocks(store).ok()?;
+    read.blocks.iter().find_map(|block| {
+        let map = block.as_mapping()?;
+        let other = row_store::block_id(block)?;
+        if other == id {
+            return None;
+        }
+        let status = map
+            .get(&Value::String("status".to_string()))
+            .and_then(Value::as_str)
+            .unwrap_or("pending");
+        if !status_is_open(status) {
+            return None;
+        }
+        (mapping_text(map, "cause").as_deref() == Some(cause)).then_some(other)
     })
 }
 
@@ -1079,6 +1147,23 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         })
         .to_string();
         return (stdout, message, 1);
+    }
+    if let Some(cause) = mapping_text(&item_map, "cause") {
+        if let Some(existing) = open_row_with_cause(&store, &id, &cause) {
+            let message = format!(
+                "prd-add refused: '{}' shares cause '{}' with open row '{}'. Nothing was written. Rows with one cause fold together: reuse '{}', resolve it, or file the new work under a distinct cause.",
+                id, cause, existing, existing
+            );
+            let stdout = serde_json::json!({
+                "ok": false,
+                "error_code": "duplicate_cause_of_open_row",
+                "duplicate_of": existing,
+                "cause": cause,
+                "id": id,
+            })
+            .to_string();
+            return (stdout, message, 1);
+        }
     }
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
     let overwrite = item_map
