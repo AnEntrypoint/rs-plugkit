@@ -1780,6 +1780,12 @@ pub(super) fn git_push(body: &Value) -> u64 {
                     "remote_advanced": false,
                     "already_current": true,
                     "output": "source ref is an ancestor of the remote branch; nothing to publish",
+                    "phases": {
+                        "fetch_ms": fetch_ms,
+                        "gates_ms": unsafe { host_now_ms() }.saturating_sub(push_started).saturating_sub(fetch_ms),
+                        "push_ms": 0,
+                        "total_ms": unsafe { host_now_ms() }.saturating_sub(push_started),
+                    },
                 })
                 .to_string(),
             );
