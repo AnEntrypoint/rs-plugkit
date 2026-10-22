@@ -43,16 +43,16 @@ const _: () = {
     }
 };
 
-pub fn mutables_path() -> std::path::PathBuf {
-    gm_dir().join("mutables.yml")
+pub fn unknowns_path() -> std::path::PathBuf {
+    gm_dir().join("unknowns")
 }
 
-pub fn mutables_dir() -> std::path::PathBuf {
-    gm_dir().join("mutables")
+pub fn unknowns_dir() -> std::path::PathBuf {
+    gm_dir().join("unknowns")
 }
 
-pub fn mutables_log_path() -> std::path::PathBuf {
-    gm_dir().join("mutables-log.jsonl")
+pub fn unknowns_log_path() -> std::path::PathBuf {
+    gm_dir().join("unknowns-log.jsonl")
 }
 
 fn row_id(item: &Value) -> Option<&str> {
@@ -202,14 +202,14 @@ fn owner_collision(
     }
 }
 
-const MUTABLE_ADD_SHAPE: &str = "mutable-add needs {\"id\":\"<kebab-case-slug>\",\"value\":\"<what is unknown>\",\"status\":\"unknown\"} -- `value`/`subject`/`description`/`notes` carry the unknown, `obligation_kind`/`depends_on`/`witness_evidence` type it as an obligation.";
+const UNKNOWN_ADD_SHAPE: &str = "unknown-add needs {\"id\":\"<kebab-case-slug>\",\"value\":\"<what is unknown>\",\"status\":\"unknown\"} -- `value`/`subject`/`description`/`notes` carry the unknown, `obligation_kind`/`depends_on`/`witness_evidence` type it as an obligation.";
 
 pub fn handle_add(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return (
             String::new(),
-            format!("missing body: {}", MUTABLE_ADD_SHAPE),
+            format!("missing body: {}", UNKNOWN_ADD_SHAPE),
             1,
         );
     }
@@ -240,13 +240,13 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                 .filter_map(|k| k.as_str())
                 .all(|k| DISPATCH_ENVELOPE_FIELDS.contains(&k));
             let cause = if only_envelope {
-                "the body carried only dispatch envelope fields, which is what a mutable-add dispatched with no body at all arrives as"
+                "the body carried only dispatch envelope fields, which is what a unknown-add dispatched with no body at all arrives as"
             } else {
                 "the body carried no `id`"
             };
             let err = format!(
-                "mutable-add refused: {} -- nothing was written. `id` is mandatory and is never generated: a `mut-<ms>` placeholder cannot be named by mutable-resolve, mutable-defer or another row's depends_on, so it reads as real pending state and blocks every transition while staying unreachable. {}",
-                cause, MUTABLE_ADD_SHAPE
+                "unknown-add refused: {} -- nothing was written. `id` is mandatory and is never generated: a `mut-<ms>` placeholder cannot be named by unknown-resolve, unknown-defer or another row's depends_on, so it reads as real pending state and blocks every transition while staying unreachable. {}",
+                cause, UNKNOWN_ADD_SHAPE
             );
             return (String::new(), err, 1);
         }
@@ -258,7 +258,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         .collect();
     if payload_keys.is_empty() {
         let err = format!(
-            "mutable-add refused: `id` \"{}\" arrived with no payload field -- nothing was written. Once `id` and the dispatch envelope ({}) are set aside the body is empty, so the row would name no unknown. Pass at least one payload field beside `id`: `value`, `subject`, `description`, `notes`, `obligation_kind`, `depends_on`, `witness_evidence`.",
+            "unknown-add refused: `id` \"{}\" arrived with no payload field -- nothing was written. Once `id` and the dispatch envelope ({}) are set aside the body is empty, so the row would name no unknown. Pass at least one payload field beside `id`: `value`, `subject`, `description`, `notes`, `obligation_kind`, `depends_on`, `witness_evidence`.",
             id,
             DISPATCH_ENVELOPE_FIELDS.join(", ")
         );
@@ -282,13 +282,13 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     }
     let caller_row = owner_field(&map, MUTABLE_OWNER_ROW_FIELDS);
     let new_depends_on = extract_depends_on(&map);
-    let store = row_store::Store::mutables();
+    let store = row_store::Store::unknowns();
     let policy = super::fsm::graph().policy.clone();
 
     let outcome = row_store::cas_retry_write(
         &store,
         policy.cas_max_attempts,
-        "mutable-add",
+        "unknown-add",
         |mut doc: Value| {
             if !new_depends_on.is_empty() {
                 let mut deps: std::collections::HashMap<String, Vec<String>> =
@@ -310,7 +310,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                     return cas::CasOutcome::Abort(
                         String::new(),
                         format!(
-                            "mutable-add rejected: depends_on introduces a cycle: {}",
+                            "unknown-add rejected: depends_on introduces a cycle: {}",
                             cycle.join(" -> ")
                         ),
                         1,
@@ -345,8 +345,8 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                             ) {
                                 return cas::CasOutcome::Abort(
                                     serde_json::json!({
-                                        "error": format!("mutable-add refused: id {} collides with an open unknown owned by {} -- nothing was written", id, collision),
-                                        "deviation_kind": "mutable-add-id-collision",
+                                        "error": format!("unknown-add refused: id {} collides with an open unknown owned by {} -- nothing was written", id, collision),
+                                        "deviation_kind": "unknown-add-id-collision",
                                         "id": id,
                                         "owner": collision,
                                         "suggested_id": caller_row.as_deref().map(|row| format!("{}/{}", row, id)),
@@ -354,7 +354,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                                     })
                                     .to_string(),
                                     format!(
-                                        "mutable-add refused: id {} collides with an open unknown owned by {}; namespace it as <row-id>/{} or pass rescope:true",
+                                        "unknown-add refused: id {} collides with an open unknown owned by {}; namespace it as <row-id>/{} or pass rescope:true",
                                         id, collision, id
                                     ),
                                     1,
@@ -386,7 +386,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         Ok(v) => v,
         Err((out, err, rc)) => return (out, err, rc),
     };
-    invalidate_residual_marker("mutable-add");
+    invalidate_residual_marker("unknown-add");
     #[cfg(target_arch = "wasm32")]
     crate::wasm_dispatch::emit_event(
         "mutable.added",
@@ -409,7 +409,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     )
 }
 
-const MUTABLE_ROW_ID_FIELDS: &[&str] = &["id", "ids", "mutable_id", "slug", "key"];
+const UNKNOWN_ROW_ID_FIELDS: &[&str] = &["id", "ids", "mutable_id", "slug", "key"];
 
 const MUTABLE_ROW_STATUS_FIELDS: &[&str] = &["status", "statuses"];
 
@@ -477,8 +477,8 @@ fn json_brief_row(row: &serde_json::Value, default_status: &str) -> serde_json::
     serde_json::Value::Object(out)
 }
 
-fn load_mutable_rows() -> Result<Vec<serde_json::Value>, (String, i32)> {
-    let store = row_store::Store::mutables();
+fn load_unknown_rows() -> Result<Vec<serde_json::Value>, (String, i32)> {
+    let store = row_store::Store::unknowns();
     let blocks = row_store::read_blocks(&store)?.blocks;
     Ok(blocks
         .iter()
@@ -529,24 +529,24 @@ fn fold_duplicate_ids_keeping_resolved_else_last(
     kept
 }
 
-fn mutable_list_limit(request: &serde_json::Value) -> Result<Option<usize>, String> {
+fn unknown_list_limit(request: &serde_json::Value) -> Result<Option<usize>, String> {
     match request.get("limit") {
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(value) => value
             .as_u64()
             .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
             .map(|n| Some(usize::try_from(n).unwrap_or(usize::MAX)))
-            .ok_or_else(|| "mutable-list limit must be a non-negative integer".to_string()),
+            .ok_or_else(|| "unknown-list limit must be a non-negative integer".to_string()),
     }
 }
 
 pub fn handle_list(content: &str) -> (String, String, i32) {
     let request = super::prd::request_object(content);
-    let limit = match mutable_list_limit(&request) {
+    let limit = match unknown_list_limit(&request) {
         Ok(l) => l,
         Err(message) => return (String::new(), message, 1),
     };
-    let rows = match load_mutable_rows() {
+    let rows = match load_unknown_rows() {
         Ok(rows) => rows,
         Err((message, code)) => return (String::new(), message, code),
     };
@@ -565,7 +565,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
             .entry(json_row_status(row, &default_status))
             .or_insert(0) += 1;
     }
-    let wanted_ids = super::prd::request_strings(&request, MUTABLE_ROW_ID_FIELDS);
+    let wanted_ids = super::prd::request_strings(&request, UNKNOWN_ROW_ID_FIELDS);
     let wanted_statuses = super::prd::request_strings(&request, MUTABLE_ROW_STATUS_FIELDS);
     let mut selected: Vec<serde_json::Value> = folded
         .into_iter()
@@ -581,7 +581,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
             id_ok && status_ok
         })
         .collect();
-    let store = row_store::Store::mutables();
+    let store = row_store::Store::unknowns();
     if !wanted_ids.is_empty() {
         for want in &wanted_ids {
             if selected
@@ -619,7 +619,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         return (
             String::new(),
             format!(
-                "no mutable row with id {} of the {} rows in .gm/mutables/ or the resolved rows in .gm/mutables-log.jsonl -- pass no id for the listing",
+                "no mutable row with id {} of the {} rows in .gm/unknowns/ or the resolved rows in .gm/unknowns-log.jsonl -- pass no id for the listing",
                 wanted_ids.join(", "),
                 store_total
             ),
@@ -652,7 +652,7 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         "truncated": truncated,
         "brief": !want_full,
         "full": want_full,
-        "hint": "pass {\"id\":\"<mutable id>\"} for one full row (repeated rows of an id fold to the last one unless an earlier one is resolved), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), or {\"full\":true} for every full body. .gm/mutables/ holds OPEN work only: a resolved mutable is moved to .gm/mutables-log.jsonl, and an id or a resolved status asked for here is answered from that log.",
+        "hint": "pass {\"id\":\"<mutable id>\"} for one full row (repeated rows of an id fold to the last one unless an earlier one is resolved), {\"status\":\"pending\"} to filter, {\"status\":\"pending\",\"limit\":<n>} to cap the listing (total counts every match), or {\"full\":true} for every full body. .gm/unknowns/ holds OPEN work only: a resolved mutable is moved to .gm/unknowns-log.jsonl, and an id or a resolved status asked for here is answered from that log.",
     });
     (reply.to_string(), String::new(), 0)
 }
@@ -780,7 +780,7 @@ fn mutable_blocked_external(item: &yaml_serde::Value) -> bool {
 }
 
 pub fn pending_detailed() -> Vec<serde_json::Value> {
-    let store = row_store::Store::mutables();
+    let store = row_store::Store::unknowns();
     let seq = match row_store::read_blocks(&store) {
         Ok(read) => read.blocks,
         Err(_) => return Vec::new(),
@@ -848,7 +848,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         };
     let trimmed = id_str.as_str();
 
-    let store = row_store::Store::mutables();
+    let store = row_store::Store::unknowns();
     if !pkfs::exists(&store.dir) && !pkfs::exists(&store.legacy) {
         return (
             String::new(),
@@ -861,7 +861,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let outcome = row_store::cas_retry_write(
         &store,
         policy.cas_max_attempts,
-        "mutable-resolve",
+        "unknown-resolve",
         |mut doc: Value| {
             let mut found_id = false;
             let mut resolved_id: Option<String> = None;
@@ -908,7 +908,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                                 return cas::CasOutcome::Abort(
                                 String::new(),
                                 format!(
-                                    "mutable-resolve refused: {} depends_on unresolved id(s): {} -- resolve those first.",
+                                    "unknown-resolve refused: {} depends_on unresolved id(s): {} -- resolve those first.",
                                     trimmed, names.join(", ")
                                 ),
                                 1,
@@ -926,7 +926,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                                         return cas::CasOutcome::Abort(
                                         String::new(),
                                         format!(
-                                            "mutable-resolve refused: {} is a resource-bound obligation with bound={}, but measured_value={} exceeds it -- the claim does not hold, resolve with a corrected implementation or a corrected bound.",
+                                            "unknown-resolve refused: {} is a resource-bound obligation with bound={}, but measured_value={} exceeds it -- the claim does not hold, resolve with a corrected implementation or a corrected bound.",
                                             trimmed, bound, measured
                                         ),
                                         1,
@@ -952,7 +952,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                                 && evidence.trim().is_empty()
                             {
                                 let msg = format!(
-                                "Refused: mutable {} cannot be witnessed without evidence. Pass {{\"mutable_id\":\"{}\",\"witness_evidence\":\"<concrete proof>\"}} in the body, or add evidence to the .gm/mutables.yml row first.",
+                                "Refused: mutable {} cannot be witnessed without evidence. Pass {{\"mutable_id\":\"{}\",\"witness_evidence\":\"<concrete proof>\"}} in the body, or add evidence to the .gm/unknowns/<id>.yml row first.",
                                 trimmed, trimmed
                             );
                                 return cas::CasOutcome::Abort(String::new(), msg, 1);
@@ -1022,7 +1022,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
             return (
                 String::new(),
                 format!(
-                    "mutable-resolve: {} was set to {} but could not be moved into {}: {}",
+                    "unknown-resolve: {} was set to {} but could not be moved into {}: {}",
                     filed_id, policy.mutables_witness_status, store.log, reason
                 ),
                 1,
@@ -1034,7 +1034,7 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
     crate::wasm_dispatch::emit_event("mutable.resolved", serde_json::json!({ "id": resolved_id }));
     let payload = serde_json::json!({
         "resolved": resolved_id,
-        "filed_to": ".gm/mutables-log.jsonl",
+        "filed_to": ".gm/unknowns-log.jsonl",
         "filed_at": filed.get("ts").cloned().unwrap_or(serde_json::Value::Null),
         "row_file_cleared": true,
     });
@@ -1067,16 +1067,16 @@ pub fn handle_defer(content: &str) -> (String, String, i32) {
     };
     let reason = match v.get("reason").or_else(|| v.get("witness_evidence")).and_then(|s| s.as_str()) {
         Some(s) if !s.trim().is_empty() => s.to_string(),
-        _ => return (String::new(), "missing `reason`: name why this row is genuinely out of reach this session and what would resolve it -- bare deferral language is rejected, same as mutable-add/prd-defer".to_string(), 1),
+        _ => return (String::new(), "missing `reason`: name why this row is genuinely out of reach this session and what would resolve it -- bare deferral language is rejected, same as unknown-add/prd-defer".to_string(), 1),
     };
     if let Some(marker) = super::yaml_util::defer_marker_in_text(&reason) {
         let err = format!(
-            "mutable-defer refused: deferral language detected ('{}'). Same rule as prd-defer's own gate -- name the concrete reason this is genuinely cross-session/out-of-reach (e.g. 'flaky multiplayer repro needs its own dedicated debugging session, unrelated to this session's rendering-pipeline fix'), not bare 'later'/'next session' phrasing with no substance.",
+            "unknown-defer refused: deferral language detected ('{}'). Same rule as prd-defer's own gate -- name the concrete reason this is genuinely cross-session/out-of-reach (e.g. 'flaky multiplayer repro needs its own dedicated debugging session, unrelated to this session's rendering-pipeline fix'), not bare 'later'/'next session' phrasing with no substance.",
             marker
         );
         return (String::new(), err, 1);
     }
-    let store = row_store::Store::mutables();
+    let store = row_store::Store::unknowns();
     if !pkfs::exists(&store.dir) && !pkfs::exists(&store.legacy) {
         return (
             String::new(),
@@ -1088,7 +1088,7 @@ pub fn handle_defer(content: &str) -> (String, String, i32) {
     let outcome = row_store::cas_retry_write(
         &store,
         policy.cas_max_attempts,
-        "mutable-defer",
+        "unknown-defer",
         |mut doc: Value| {
             let mut found = false;
             if let Some(seq) = doc.as_sequence_mut() {
@@ -1115,7 +1115,7 @@ pub fn handle_defer(content: &str) -> (String, String, i32) {
             if !found {
                 let body = serde_json::json!({
                     "error": format!("mutable id not found: {}", id_target),
-                    "deviation_kind": "mutable-defer-unknown-id",
+                    "deviation_kind": "unknown-defer-unknown-id",
                     "deviation_severity": "deny",
                     "mutable_id": id_target,
                 })
@@ -1131,7 +1131,7 @@ pub fn handle_defer(content: &str) -> (String, String, i32) {
     );
     match outcome {
         Ok(()) => {
-            invalidate_residual_marker("mutable-defer");
+            invalidate_residual_marker("unknown-defer");
             #[cfg(target_arch = "wasm32")]
             crate::wasm_dispatch::emit_event(
                 "mutable.deferred",

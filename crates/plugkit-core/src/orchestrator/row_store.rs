@@ -27,7 +27,7 @@ impl Kind {
     pub fn dir_name(&self) -> &'static str {
         match self {
             Kind::Prd => "prd",
-            Kind::Mutables => "mutables",
+            Kind::Mutables => "unknowns",
         }
     }
     fn legacy_name(&self) -> &'static str {
@@ -36,22 +36,34 @@ impl Kind {
             Kind::Mutables => "mutables.yml",
         }
     }
+    fn legacy_dir_name(&self) -> Option<&'static str> {
+        match self {
+            Kind::Prd => None,
+            Kind::Mutables => Some("mutables"),
+        }
+    }
+    fn legacy_log_name(&self) -> Option<&'static str> {
+        match self {
+            Kind::Prd => None,
+            Kind::Mutables => Some("mutables-log.jsonl"),
+        }
+    }
     fn log_name(&self) -> &'static str {
         match self {
             Kind::Prd => "prd-log.jsonl",
-            Kind::Mutables => "mutables-log.jsonl",
+            Kind::Mutables => "unknowns-log.jsonl",
         }
     }
     fn marker_name(&self) -> &'static str {
         match self {
             Kind::Prd => "prd.absorbed.json",
-            Kind::Mutables => "mutables.absorbed.json",
+            Kind::Mutables => "unknowns.absorbed.json",
         }
     }
     pub fn label(&self) -> &'static str {
         match self {
             Kind::Prd => "prd",
-            Kind::Mutables => "mutables",
+            Kind::Mutables => "unknowns",
         }
     }
     pub fn legacy_rel(&self) -> String {
@@ -67,38 +79,54 @@ pub struct Store {
     pub kind: Kind,
     pub dir: String,
     pub legacy: String,
+    pub legacy_dir: Option<String>,
+    pub legacy_log: Option<String>,
     pub log: String,
     marker: String,
+    dir_migration_marker: Option<String>,
+}
+
+fn legacy_dir_path(gm: &str, kind: &Kind) -> Option<String> {
+    kind.legacy_dir_name()
+        .map(|name| format!("{}/{}", gm, name))
+}
+
+fn legacy_log_path(gm: &str, kind: &Kind) -> Option<String> {
+    kind.legacy_log_name()
+        .map(|name| format!("{}/{}", gm, name))
 }
 
 impl Store {
-    pub fn new(kind: Kind) -> Self {
-        let gm = super::gm_dir().to_string_lossy().replace('\\', "/");
+    fn build(kind: Kind, gm: String) -> Self {
+        let dir_migration_marker = kind
+            .legacy_dir_name()
+            .map(|_| format!("{}/{}.dir-migrated.json", gm, kind.dir_name()));
         Self {
             dir: format!("{}/{}", gm, kind.dir_name()),
             legacy: format!("{}/{}", gm, kind.legacy_name()),
+            legacy_dir: legacy_dir_path(&gm, &kind),
+            legacy_log: legacy_log_path(&gm, &kind),
             log: format!("{}/{}", gm, kind.log_name()),
             marker: format!("{}/{}", gm, kind.marker_name()),
+            dir_migration_marker,
             kind,
         }
+    }
+    pub fn new(kind: Kind) -> Self {
+        let gm = super::gm_dir().to_string_lossy().replace('\\', "/");
+        Self::build(kind, gm)
     }
     pub fn prd() -> Self {
         Self::new(Kind::Prd)
     }
-    pub fn mutables() -> Self {
+    pub fn unknowns() -> Self {
         Self::new(Kind::Mutables)
     }
     pub fn for_cwd(kind: Kind, cwd: Option<&str>) -> Self {
         match cwd {
             Some(c) if !c.trim().is_empty() => {
                 let root = c.trim().trim_end_matches(['/', '\\']).replace('\\', "/");
-                Self {
-                    dir: format!("{}/.gm/{}", root, kind.dir_name()),
-                    legacy: format!("{}/.gm/{}", root, kind.legacy_name()),
-                    log: format!("{}/.gm/{}", root, kind.log_name()),
-                    marker: format!("{}/.gm/{}", root, kind.marker_name()),
-                    kind,
-                }
+                Self::build(kind, format!("{}/.gm", root))
             }
             _ => Self::new(kind),
         }
@@ -309,7 +337,51 @@ fn merge_blocks(existing: Vec<Value>, incoming: Vec<Value>) -> Vec<Value> {
     out
 }
 
+fn migrate_legacy_dir(store: &Store) {
+    let Some(marker) = store.dir_migration_marker.as_deref() else {
+        return;
+    };
+    if pkfs::exists(marker) {
+        return;
+    }
+    let mut landed = true;
+    if let Some(legacy_dir) = store.legacy_dir.as_deref() {
+        if let Some(serde_json::Value::Array(entries)) = pkfs::readdir(legacy_dir) {
+            for entry in entries {
+                let Some(name) = entry.as_str() else { continue };
+                if !name.ends_with(ITEM_SUFFIX) {
+                    continue;
+                }
+                let to = format!("{}/{}", store.dir, name);
+                if pkfs::exists(&to) {
+                    continue;
+                }
+                let Some(raw) = pkfs::read_to_string(&format!("{}/{}", legacy_dir, name)) else {
+                    continue;
+                };
+                if !pkfs::write(&to, &raw) {
+                    landed = false;
+                }
+            }
+        }
+    }
+    if let Some(legacy_log) = store.legacy_log.as_deref() {
+        let current = pkfs::read_to_string(&store.log).unwrap_or_default();
+        if current.trim().is_empty() {
+            if let Some(raw) = pkfs::read_to_string(legacy_log) {
+                if !raw.trim().is_empty() && !pkfs::write(&store.log, &raw) {
+                    landed = false;
+                }
+            }
+        }
+    }
+    if landed {
+        let _ = pkfs::write(marker, "{\"legacy_dir_migrated\":true}");
+    }
+}
+
 pub fn maybe_absorb(store: &Store) -> Result<(), String> {
+    migrate_legacy_dir(store);
     if marker_matches(store) {
         return Ok(());
     }

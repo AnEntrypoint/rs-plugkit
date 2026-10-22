@@ -1807,11 +1807,14 @@ pub fn is_prd_state_pathspec(path: &str) -> bool {
         || p == ".gm/mutables.yml"
         || p == ".gm/prd-log.jsonl"
         || p == ".gm/mutables-log.jsonl"
+        || p == ".gm/unknowns-log.jsonl"
     {
         return true;
     }
     let anchored = format!("/{p}");
-    anchored.contains("/.gm/prd/") || anchored.contains("/.gm/mutables/")
+    anchored.contains("/.gm/prd/")
+        || anchored.contains("/.gm/mutables/")
+        || anchored.contains("/.gm/unknowns/")
 }
 
 fn prd_row_blocks(text: &str) -> Vec<&str> {
@@ -4015,7 +4018,7 @@ pub fn handle_expansion_audit(content: &str) -> (String, String, i32) {
             .count(),
         Err((message, code)) => return (String::new(), message, code),
     };
-    let unknowns_open = super::mutables::pending_detailed().len();
+    let unknowns_open = super::unknowns::pending_detailed().len();
     let end_state = derived == "fixed_point" && prd_open == 0 && unknowns_open == 0;
     let entry = serde_json::json!({
         "id": format!("expansion-audit:{}", super::state::now_ms()),
