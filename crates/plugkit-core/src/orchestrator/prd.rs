@@ -1289,6 +1289,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                 return (
                     serde_json::json!({
                         "ok": false,
+                        "error_code": "prd_add_refused",
                         "added": false,
                         "id": id,
                         "reason": err,

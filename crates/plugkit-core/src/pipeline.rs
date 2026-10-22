@@ -276,11 +276,11 @@ pub fn handle_continue(body: &Value) -> Value {
     };
     let step_id = match body.get("step_id").and_then(|v| v.as_str()) {
         Some(s) => s,
-        None => return json!({ "ok": false, "error": "missing step_id" }),
+        None => return json!({ "ok": false, "error_code": "missing_step_id", "error": "missing step_id" }),
     };
     let result = match body.get("result") {
         Some(r) => r,
-        None => return json!({ "ok": false, "error": "missing result" }),
+        None => return json!({ "ok": false, "error_code": "missing_result", "error": "missing result" }),
     };
 
     let state = match load_state(step_id) {
@@ -290,6 +290,7 @@ pub fn handle_continue(body: &Value) -> Value {
             let flow_id = body.get("flow_id").and_then(|v| v.as_str()).unwrap_or("");
             return json!({
                 "ok": false,
+                "error_code": "flow_expired",
                 "error": "expired",
                 "flow_id": flow_id,
                 "hint": "redispatch original verb"
@@ -312,7 +313,7 @@ pub fn handle_continue(body: &Value) -> Value {
     if now > deadline_ms {
         delete_state(step_id);
         clear_turn_pending();
-        return json!({ "ok": false, "error": "expired", "hint": "redispatch original verb" });
+        return json!({ "ok": false, "error_code": "flow_expired", "error": "expired", "hint": "redispatch original verb" });
     }
 
     let schema = state.get("result_schema").cloned().unwrap_or(json!({}));
@@ -333,6 +334,7 @@ pub fn handle_continue(body: &Value) -> Value {
             clear_turn_pending();
             return json!({
                 "ok": false,
+                "error_code": "step_unresolvable",
                 "error": "step_unresolvable",
                 "kind": state.get("kind").cloned().unwrap_or(Value::Null),
                 "step_id": step_id,
@@ -346,6 +348,7 @@ pub fn handle_continue(body: &Value) -> Value {
         let _ = persist_state(step_id, &new_state, deadline_ms, now);
         return json!({
             "ok": false,
+            "error_code": "result_schema_violation",
             "error": "result_schema_violation",
             "detail": e,
             "pending_step": {

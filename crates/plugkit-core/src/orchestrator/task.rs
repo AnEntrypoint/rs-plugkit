@@ -45,7 +45,7 @@ fn host_task(action: &str, params: &Value) -> Value {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn host_task(_action: &str, _params: &Value) -> Value {
-    json!({ "ok": false, "error": "task exec unavailable on native target" })
+    json!({ "ok": false, "error_code": "task_exec_unavailable_on_native", "error": "task exec unavailable on native target" })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -214,7 +214,7 @@ pub fn handle_output(content: &str) -> (String, String, i32) {
             .and_then(Value::as_str)
             .unwrap_or("task output unavailable")
             .to_string();
-        let mut envelope = json!({ "ok": false, "error": message });
+        let mut envelope = json!({ "ok": false, "error_code": "task_exec_failed", "error": message });
         if let Some(code) = result.get("error_code") {
             envelope["error_code"] = code.clone();
         }

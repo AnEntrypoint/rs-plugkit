@@ -25,6 +25,7 @@ pub fn validate_timeout_ms(body: &Value, fallback_opts: bool) -> Result<u64, Val
         Some(n) if n >= MIN_TIMEOUT_MS => Ok(n),
         Some(n) if n > 0 => Err(json!({
             "ok": false,
+            "error_code": "timeout_below_floor",
             "error": "timeoutMs below floor",
             "min": MIN_TIMEOUT_MS,
             "received": n,

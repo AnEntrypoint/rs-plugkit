@@ -69,6 +69,7 @@ impl AbiError {
     pub fn to_response(&self) -> Value {
         json!({
             "ok": false,
+            "error_code": "plugin_call_failed",
             "abi": ABI_VERSION,
             "error": self.message,
             "kind": self.kind.as_str(),

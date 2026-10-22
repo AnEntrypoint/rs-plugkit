@@ -1101,6 +1101,7 @@ pub(super) fn pack_transient_remote_push_failure(
     pack(
         json!({
             "ok": false,
+            "error_code": "push_transient_remote_rejection",
             "verb": "git_push",
             "gate_denied": true,
             "repo": repo,
@@ -1328,6 +1329,34 @@ fn bin_drift_tracks_gate(repo: Option<&str>, rev: &str) -> bool {
         == 0
 }
 
+fn bin_drift_missing_dependency(output: &str, error: &str) -> Option<String> {
+    let haystack = format!("{output}\n{error}");
+    for line in haystack.lines() {
+        let text = line.trim();
+        if let Some(rest) = text.strip_prefix("Cannot find module '") {
+            let name = rest.split('\'').next().unwrap_or("").trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+        if text.starts_with("Error [ERR_MODULE_NOT_FOUND]:") {
+            if let Some(rest) = text.split("Cannot find package '").nth(1) {
+                let name = rest.split('\'').next().unwrap_or("").trim();
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+            if let Some(rest) = text.split("Cannot find module ").nth(1) {
+                let name = rest.split_whitespace().next().unwrap_or("").trim().trim_matches('\'');
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn bin_drift_run(repo: Option<&str>, rev: &str, include: &[String], from_index: bool) -> Result<(), String> {
     let checkout = repo.unwrap_or("the checkout");
     let base = super::host_abi::host_cwd_string().unwrap_or_default();
@@ -1374,6 +1403,11 @@ fn bin_drift_run(repo: Option<&str>, rev: &str, include: &[String], from_index: 
         format!(" spawn error: {error}")
     };
     let mut message = format!("check-bin-drift exit {exit}. {output}{spawn_error}");
+    if let Some(dep) = bin_drift_missing_dependency(&output, error) {
+        message.push_str(&format!(
+            "\nMissing dependency: {dep} is not installed in {checkout}. Run: npm install in {checkout}, then retry."
+        ));
+    }
     if !output.contains("npm run build") {
         message.push_str(&format!(
             "\nRun: node scripts/check-bin-drift.mjs in {checkout} to see the failure. If it reports STALE, run: npm run build, commit bin/gm-mcp-server.js with the src/ change, then retry."
@@ -1398,15 +1432,31 @@ fn bin_drift_pathspec_covers(pathspecs: &[String], path: &str) -> bool {
     })
 }
 
-fn bin_drift_commit_refusal(
+struct BinDriftCommitGate {
+    refusal: Option<String>,
+    exempt_gate_inputs: Vec<String>,
+}
+
+fn bin_drift_commit_gate(
     repo: Option<&str>,
     paths: &[String],
     add_all: bool,
     session: &str,
-) -> Option<String> {
-    let head_sha = resolve_ref(repo, "HEAD")?;
+) -> BinDriftCommitGate {
+    let head_sha = match resolve_ref(repo, "HEAD") {
+        Some(s) => s,
+        None => {
+            return BinDriftCommitGate {
+                refusal: None,
+                exempt_gate_inputs: Vec::new(),
+            }
+        }
+    };
     if !bin_drift_tracks_gate(repo, &head_sha) {
-        return None;
+        return BinDriftCommitGate {
+            refusal: None,
+            exempt_gate_inputs: Vec::new(),
+        };
     }
     let index_only = !add_all && paths.is_empty();
     let session_staged = if index_only {
@@ -1417,6 +1467,7 @@ fn bin_drift_commit_refusal(
     let porcelain = git_push_porcelain_in(repo);
     let mut touches_gate = false;
     let mut committed_inputs: Vec<String> = Vec::new();
+    let mut exempt_gate_inputs: Vec<String> = Vec::new();
     for line in porcelain.lines() {
         let path = line.get(3..).unwrap_or("").trim().trim_matches('"');
         if !bin_drift_gate_input(path) {
@@ -1434,14 +1485,23 @@ fn bin_drift_commit_refusal(
         if in_commit {
             touches_gate = true;
             committed_inputs.push(path.to_string());
+        } else {
+            exempt_gate_inputs.push(path.to_string());
         }
     }
     if !touches_gate {
-        return None;
+        return BinDriftCommitGate {
+            refusal: None,
+            exempt_gate_inputs,
+        };
     }
-    bin_drift_run(repo, "HEAD", &committed_inputs, index_only)
+    let refusal = bin_drift_run(repo, "HEAD", &committed_inputs, index_only)
         .err()
-        .map(|detail| format!("bin drift gate refused the commit: {detail}"))
+        .map(|detail| format!("bin drift gate refused the commit: {detail}"));
+    BinDriftCommitGate {
+        refusal,
+        exempt_gate_inputs,
+    }
 }
 
 pub(super) fn push_url_is_no_push_sentinel(url: &str) -> bool {
@@ -1852,6 +1912,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
     if !push_succeeded && push_output_is_host_timeout(&push_out) {
         return pack(json!({
             "ok": false,
+            "error_code": "push_transport_hang",
             "verb": "git_push",
             "gate_denied": true,
             "remote_moved": false,
@@ -1875,6 +1936,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
         if push_output_is_host_timeout(&push_out) {
             return pack(json!({
                 "ok": false,
+                "error_code": "push_transport_hang",
                 "verb": "git_push",
                 "gate_denied": true,
                 "remote_moved": false,
@@ -1895,6 +1957,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
         if push_output_is_github_auth_failure(&push_out) {
             return pack(json!({
                 "ok": false,
+                "error_code": "push_auth_failure",
                 "verb": "git_push",
                 "gate_denied": true,
                 "repo": repo,
@@ -1959,6 +2022,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
         };
         let mut refusal = json!({
             "ok": false,
+            "error_code": "push_remote_moved",
             "verb": "git_push",
             "gate_denied": true,
             "remote_moved": true,
@@ -2005,6 +2069,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
             log_deviation_push("push-rebase-conflict", &branch);
             return pack(json!({
                 "ok": false,
+                "error_code": "push_rebase_conflict",
                 "verb": "git_push",
                 "gate_denied": true,
                 "repo": repo,
@@ -2043,6 +2108,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
         log_deviation_push("push-remote-outpaces", &branch);
         return pack(json!({
             "ok": false,
+            "error_code": "push_remote_outpaces",
             "verb": "git_push",
             "gate_denied": true,
             "repo": repo,
@@ -2078,6 +2144,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
             pack(
                 json!({
                     "ok": false,
+                    "error_code": "push_verification_failed",
                     "verb": "git_push",
                     "verification_failed": true,
                     "repo": repo,
@@ -3807,7 +3874,9 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 with_exclusion_report(json!({ "nothing_to_commit": true, "requested_paths": paths }), cwd, &paths),
             ));
         }
-        if let Some(reason) = bin_drift_commit_refusal(cwd, &paths, add_all, &lane_session) {
+        let drift_gate = bin_drift_commit_gate(cwd, &paths, add_all, &lane_session);
+        let drift_exempt_gate_inputs = drift_gate.exempt_gate_inputs;
+        if let Some(reason) = drift_gate.refusal {
             return Ok(err_json(
                 "git_commit",
                 json!({
@@ -4069,6 +4138,14 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         }
         if !left_staged.is_empty() {
             payload["staged_left_uncommitted"] = json!(left_staged);
+        }
+        if !drift_exempt_gate_inputs.is_empty() {
+            payload["bin_drift_exempt_gate_inputs"] = json!(drift_exempt_gate_inputs);
+            payload["bin_drift_note"] = json!(format!(
+                "the bin drift gate checked only the gate inputs these pathspecs cover: {}. These gate inputs are changed but outside the commit and were not checked: {}. Drift they introduce is refused by the push gate instead, never by this commit.",
+                paths.join(", "),
+                drift_exempt_gate_inputs.join(", ")
+            ));
         }
         if !allow_whole_index && !add_all && paths.is_empty() && !staged_before.is_empty() {
             payload["whole_index_commit"] = json!(true);
@@ -5182,6 +5259,7 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
         if !pushed {
             let mut refusal = json!({
                 "ok": false,
+                "error_code": "finalize_push_refused",
                 "verb": "git_finalize",
                 "committed": false,
                 "pushed": false,
@@ -5792,6 +5870,7 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
     if !pushed {
         let mut refusal = json!({
             "ok": false,
+            "error_code": "finalize_push_refused",
             "verb": "git_finalize",
             "committed": committed,
             "pushed": false,
@@ -7732,7 +7811,7 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
     }
     Err(ci_status_annotate_sha_resolution(
         json!({
-            "ok": false, "verb": "ci-status",
+            "ok": false, "error_code": "ci_status_unreadable", "verb": "ci-status",
             "error": format!(
                 "GitHub Actions state unreadable through every transport: {}",
                 failures

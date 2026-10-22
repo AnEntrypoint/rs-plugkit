@@ -1492,7 +1492,7 @@ fn fs_edit(body: &Value) -> u64 {
 
 fn ensure_parent_dirs(path: &str) -> Value {
     let Ok(target) = serde_json::to_string(&crate::pkfs::anchor(path)) else {
-        return json!({ "ok": false, "error": "the path is not encodable" });
+        return json!({ "ok": false, "error_code": "path_not_encodable", "error": "the path is not encodable" });
     };
     let code = r#"const fs=require('fs');const P=require('path');const d=P.dirname(__TARGET__);
 const out=o=>process.stdout.write(JSON.stringify(o));
@@ -1514,7 +1514,7 @@ out({ok:false,code:String((e&&e.code)||'EIO'),blocking,error:blocking?('a file s
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .and_then(|envelope| envelope.get("stdout").and_then(Value::as_str).map(str::to_string))
         .and_then(|stdout| serde_json::from_str::<Value>(&stdout).ok())
-        .unwrap_or_else(|| json!({ "ok": false, "error": "host_exec_js returned no stdout" }))
+        .unwrap_or_else(|| json!({ "ok": false, "error_code": "exec_js_no_stdout", "error": "host_exec_js returned no stdout" }))
 }
 
 fn is_append_only_path(path: &str) -> bool {

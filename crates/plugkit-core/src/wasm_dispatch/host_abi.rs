@@ -102,6 +102,7 @@ pub fn git_call(args: &str, cwd: Option<&str>) -> Value {
         None => v,
         Some(token) => serde_json::json!({
             "ok": false,
+            "error_code": "async_git_parked",
             "async_parked": true,
             "stdout": "",
             "stderr": format!("async git host parked this op as pending token {token}; this git call path is synchronous and cannot resume it -- the op still executes host-side, re-check repo state via git_status/git_poll"),
