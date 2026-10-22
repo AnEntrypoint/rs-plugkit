@@ -37,21 +37,28 @@ fn head_sha() -> String {
         .to_string()
 }
 
+fn ledger_hash_hex(raw: &str) -> String {
+    format!("{:016x}", crate::hash::fnv1a64(raw.as_bytes()))
+}
+
 pub fn write() -> Value {
-    let ledger_raw = host_read(LEDGER_PATH).unwrap_or_default();
-    let ledger_hash = format!("{:016x}", crate::hash::fnv1a64(ledger_raw.as_bytes()));
-    let (dispatch_count, last_dispatch_id, ledger_error) =
-        match crate::dispatch_ledger::read_entries("") {
-            Ok(list) => (
-                json!(list.len()),
-                list.last()
-                    .and_then(|e| e.get("dispatch_id").and_then(|v| v.as_str()))
-                    .unwrap_or_default()
-                    .to_string(),
-                Value::Null,
-            ),
-            Err(e) => (Value::Null, String::new(), json!(e)),
-        };
+    let entries = crate::dispatch_ledger::read_entries("");
+    let ledger_hash = match (&entries, host_read(LEDGER_PATH)) {
+        (Err(_), _) => Value::Null,
+        (Ok(_), Some(raw)) => json!(ledger_hash_hex(&raw)),
+        (Ok(_), None) => json!(ledger_hash_hex("")),
+    };
+    let (dispatch_count, last_dispatch_id, ledger_error) = match entries {
+        Ok(list) => (
+            json!(list.len()),
+            list.last()
+                .and_then(|e| e.get("dispatch_id").and_then(|v| v.as_str()))
+                .unwrap_or_default()
+                .to_string(),
+            Value::Null,
+        ),
+        Err(e) => (Value::Null, String::new(), json!(e)),
+    };
     let receipt = json!({
         "completed_prd_ids": completed_prd_ids(),
         "dispatch_count": dispatch_count,
