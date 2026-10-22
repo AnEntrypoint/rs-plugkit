@@ -667,6 +667,10 @@ pub struct LogRead {
 // reads the directory plus the page it names. The log stays the chained record of record.
 pub const LOG_COMPACT_BYTES: usize = 4 * 1024 * 1024;
 
+// What a compaction keeps. It is well under LOG_COMPACT_BYTES so the next compaction is far away:
+// compacting down to the trigger point would make every following resolve pay for a full rewrite.
+const LOG_RETAIN_BYTES: usize = 2 * 1024 * 1024;
+
 fn torn_count_path(store: &Store) -> String {
     format!("{}.torn-count.json", store.log)
 }
@@ -759,18 +763,22 @@ pub fn compact_log(store: &Store) -> Result<bool, String> {
         return Ok(false);
     }
     let entries = log_entries(store)?;
-    let mut newest: std::collections::BTreeMap<String, serde_json::Value> =
-        std::collections::BTreeMap::new();
-    for entry in &entries {
+    // Newest entry per id, kept at its chronological position.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut keep: Vec<usize> = Vec::new();
+    for (index, entry) in entries.iter().enumerate().rev() {
         let Some(id) = entry.get("id").and_then(|v| v.as_str()) else {
             continue;
         };
-        newest.insert(id.to_string(), entry.clone());
+        if seen.insert(id.to_string()) {
+            keep.push(index);
+        }
     }
-    let mut out = String::new();
+    keep.reverse();
+    let mut lines: Vec<String> = Vec::new();
     let mut prev = "0".repeat(64);
-    for (id, entry) in &newest {
-        let mut entry = entry.clone();
+    for index in &keep {
+        let mut entry = entries[*index].clone();
         entry["prev"] = serde_json::json!(prev);
         if let Some(map) = entry.as_object_mut() {
             map.remove("sha256");
@@ -778,11 +786,44 @@ pub fn compact_log(store: &Store) -> Result<bool, String> {
         let body = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
         let hash = sha256_hex(&body);
         entry["sha256"] = serde_json::json!(hash);
-        let line = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
-        out.push_str(&line);
-        out.push('\n');
+        lines.push(serde_json::to_string(&entry).map_err(|e| e.to_string())?);
         prev = hash;
-        let _ = write_log_sidecar(store, id, &entry);
+    }
+    // The most recent suffix that still fits stays in the active log; the older part moves to a
+    // segment file. Every resolved id keeps its sidecar, so nothing becomes uncitable.
+    let mut retained_bytes = 0usize;
+    let mut split = lines.len();
+    for (at, line) in lines.iter().enumerate().rev() {
+        if retained_bytes + line.len() + 1 > LOG_RETAIN_BYTES {
+            split = at + 1;
+            break;
+        }
+        retained_bytes += line.len() + 1;
+        split = at;
+    }
+    if split > 0 {
+        let mut rotated = String::new();
+        for line in &lines[..split] {
+            rotated.push_str(line);
+            rotated.push('\n');
+        }
+        let segment = format!("{}.seg-{}.jsonl", store.log, super::state::now_ms());
+        if !pkfs::write(&segment, &rotated) {
+            return Ok(false);
+        }
+    }
+    let mut out = String::new();
+    for line in &lines[split..] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    for (slot, index) in keep.iter().enumerate() {
+        let Some(id) = entries[*index].get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&lines[slot]) {
+            let _ = write_log_sidecar(store, id, &entry);
+        }
     }
     if !matches!(
         pkfs::cas_write(&store.log, &raw, &out),
