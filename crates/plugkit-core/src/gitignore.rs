@@ -35,6 +35,7 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/prd.paused.yml",
     ".gm/prd.absorbed.json",
     ".gm/mutables.absorbed.json",
+    ".gm/unknowns.absorbed.json",
     ".gm/rs-learn.db",
     ".gm/rs-learn.db-shm",
     ".gm/rs-learn.db-wal",
@@ -63,8 +64,10 @@ pub const MUST_STAY_TRACKED: &[&str] = &[
     ".gm/mutables.yml",
     ".gm/prd/",
     ".gm/mutables/",
+    ".gm/unknowns/",
     ".gm/prd-log.jsonl",
     ".gm/mutables-log.jsonl",
+    ".gm/unknowns-log.jsonl",
     ".gm/expansion-audit.jsonl",
     ".gm/gm.config.json",
     ".gm/config.source.json",
@@ -87,11 +90,11 @@ const DURABLE_CLASS_COMMENT: &[&str] = &[
     "# derived-stores-are-transient-never-tracked policy.\n",
     "#\n",
     "# The successors of those two files: PRD rows and mutables now live one file\n",
-    "# per row under .gm/prd/ and .gm/mutables/, so two lanes can never lose each\n",
+    "# per row under .gm/prd/ and .gm/unknowns/, so two lanes can never lose each\n",
     "# other's row to one whole-file rewrite, and a resolved row's material moves\n",
-    "# into .gm/prd-log.jsonl / .gm/mutables-log.jsonl, append-only and hash-chained.\n",
+    "# into .gm/prd-log.jsonl / .gm/unknowns-log.jsonl, append-only and hash-chained.\n",
     "# The row folders are the same transient class as the files they replace. The chained\n",
-    "# logs (.gm/prd-log.jsonl, .gm/mutables-log.jsonl, .gm/expansion-audit.jsonl) are authored\n",
+    "# logs (.gm/prd-log.jsonl, .gm/unknowns-log.jsonl, .gm/expansion-audit.jsonl) are authored\n",
     "# project state and are never ignored (MUST_STAY_TRACKED in rs-plugkit crates/plugkit-core/src/gitignore.rs).\n",
 ];
 
@@ -221,7 +224,7 @@ pub fn ensure_managed_gitignore(cwd: &str) -> Result<bool, String> {
     let mut block = String::new();
     block.push_str(START_MARKER);
     block.push('\n');
-    block.push_str("# .gm/prd-log.jsonl, .gm/mutables-log.jsonl and .gm/expansion-audit.jsonl are append-only state that stays tracked, so no rule here ignores them\n");
+    block.push_str("# .gm/prd-log.jsonl, .gm/unknowns-log.jsonl and .gm/expansion-audit.jsonl are append-only state that stays tracked, so no rule here ignores them\n");
     for line in DURABLE_CLASS_COMMENT {
         block.push_str(line);
     }

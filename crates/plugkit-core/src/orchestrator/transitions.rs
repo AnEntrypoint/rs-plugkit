@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use super::fsm::{self, GateDef, HookMode};
-use super::mutables;
+use super::unknowns;
 use super::prd;
 use super::predicate_registry::{PredicateFn, PREDICATE_REGISTRY};
 use super::state::Phase;
@@ -49,22 +49,22 @@ pub(super) fn pred_prd_all_closed() -> bool {
     !prd_has_open_items()
 }
 pub(super) fn pred_mutables_all_resolved() -> bool {
-    mutables::pending_detailed().is_empty()
+    unknowns::pending_detailed().is_empty()
 }
 pub(super) fn pred_mutables_all_typed() -> bool {
-    mutables::all_typed()
+    unknowns::all_typed()
 }
 pub(super) fn pred_state_obligations_ready() -> bool {
-    mutables::state_obligations_ready()
+    unknowns::state_obligations_ready()
 }
 pub(super) fn pred_conc_obligations_ready() -> bool {
-    mutables::conc_obligations_ready()
+    unknowns::conc_obligations_ready()
 }
 pub(super) fn pred_sec_obligations_ready() -> bool {
-    mutables::sec_obligations_ready()
+    unknowns::sec_obligations_ready()
 }
 pub(super) fn pred_res_obligations_ready() -> bool {
-    mutables::res_obligations_ready()
+    unknowns::res_obligations_ready()
 }
 pub(super) fn pred_worktree_clean() -> bool {
     !worktree_dirty()
@@ -1113,11 +1113,11 @@ fn gate_rejection(graph: &fsm::Graph, from: &str, to: &str) -> Option<(String, S
 
 fn obligation_dag_gate_kinds(predicate_name: &str) -> Option<&'static [&'static str]> {
     match predicate_name {
-        "mutables-all-typed" => Some(mutables::PROVE_OBLIGATION_KINDS),
-        "state-obligations-ready" => Some(mutables::STATE_OBLIGATION_KINDS),
-        "conc-obligations-ready" => Some(mutables::CONC_OBLIGATION_KINDS),
-        "sec-obligations-ready" => Some(mutables::SEC_OBLIGATION_KINDS),
-        "res-obligations-ready" => Some(mutables::RES_OBLIGATION_KINDS),
+        "mutables-all-typed" => Some(unknowns::PROVE_OBLIGATION_KINDS),
+        "state-obligations-ready" => Some(unknowns::STATE_OBLIGATION_KINDS),
+        "conc-obligations-ready" => Some(unknowns::CONC_OBLIGATION_KINDS),
+        "sec-obligations-ready" => Some(unknowns::SEC_OBLIGATION_KINDS),
+        "res-obligations-ready" => Some(unknowns::RES_OBLIGATION_KINDS),
         _ => None,
     }
 }
@@ -1126,7 +1126,7 @@ fn hook_denial_detail_or_none_if_predicate_caused_it(g: &GateDef) -> Option<Stri
     if matches!(g.hook_mode, HookMode::PredicateOnly) {
         if let Some(predicate_name) = g.predicate.as_deref() {
             if let Some(kinds) = obligation_dag_gate_kinds(predicate_name) {
-                let msg = mutables::obligations_blocker_message(kinds);
+                let msg = unknowns::obligations_blocker_message(kinds);
                 return if msg.is_empty() { None } else { Some(msg) };
             }
         }

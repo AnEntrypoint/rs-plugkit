@@ -3,7 +3,7 @@ pub mod entry_extended;
 pub mod lean_prose;
 
 #[cfg(target_arch = "wasm32")]
-use super::mutables;
+use super::unknowns;
 #[cfg(target_arch = "wasm32")]
 use super::prd;
 #[cfg(target_arch = "wasm32")]
@@ -338,7 +338,7 @@ pub(super) fn open_row_counts() -> (Option<u64>, u64) {
     let prd_open = prd_items_read().map(|items| {
         dedup_rows_by_id_keeping_last(items.into_iter().filter(|it| item_is_open(it)).collect()).len() as u64
     });
-    let mutables_open = dedup_rows_by_id_keeping_last(mutables::pending_detailed());
+    let mutables_open = dedup_rows_by_id_keeping_last(unknowns::pending_detailed());
     (prd_open, mutables_open.len() as u64)
 }
 
@@ -1004,7 +1004,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
         let _ = pkfs::write(&early_next_step_path_s, &next_step);
     }
 
-    let mutables_pending = dedup_rows_by_id_keeping_last(mutables::pending_detailed());
+    let mutables_pending = dedup_rows_by_id_keeping_last(unknowns::pending_detailed());
     let prd_read = prd_items_read();
     let prd_known = prd_read.is_some();
     let prd_items = prd_read.unwrap_or_default();
@@ -1056,7 +1056,7 @@ pub fn handle_instruction(content: &str) -> (String, String, i32) {
             mutables_rows_inlined,
             mutables_pending_count,
             "the most recently added pending rows",
-            &mutables::mutables_path(),
+            &unknowns::unknowns_path(),
             "mutable-list",
         )
     } else {

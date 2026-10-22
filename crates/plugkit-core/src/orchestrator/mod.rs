@@ -18,7 +18,7 @@ pub mod fsm;
 pub mod fsm_propose;
 pub mod fsm_vendor;
 pub mod instructions;
-pub mod mutables;
+pub mod unknowns;
 pub mod prd;
 pub mod prd_repair;
 pub mod predicate_registry;
@@ -403,14 +403,14 @@ orchestrator_dispatch_table! {
     content,
     "transition" => transitions::handle(content),
     "transition-revert" => transitions::handle_revert(content),
-    "mutable-resolve" => mutables::handle_resolve(content),
-    "mutable-add" => mutables::handle_add(content),
-    "mutable-list" => mutables::handle_list(content),
-    "mutable-defer" => mutables::handle_defer(content),
-    "unknown-resolve" => mutables::handle_resolve(content),
-    "unknown-add" => mutables::handle_add(content),
-    "unknown-list" => mutables::handle_list(content),
-    "unknown-defer" => mutables::handle_defer(content),
+    "mutable-resolve" => unknowns::handle_resolve(content),
+    "mutable-add" => unknowns::handle_add(content),
+    "mutable-list" => unknowns::handle_list(content),
+    "mutable-defer" => unknowns::handle_defer(content),
+    "unknown-resolve" => unknowns::handle_resolve(content),
+    "unknown-add" => unknowns::handle_add(content),
+    "unknown-list" => unknowns::handle_list(content),
+    "unknown-defer" => unknowns::handle_defer(content),
     "dream-replay-cycle" => dream_cycle::handle(content),
     "dream-status" => dream_status::handle(content),
     "discipline-note" => discipline_note::handle(content),
