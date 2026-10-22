@@ -2,8 +2,6 @@
 
 use std::sync::OnceLock;
 
-use tokenizers::Tokenizer;
-
 #[cfg(not(feature = "wit-env"))]
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -139,7 +137,6 @@ unsafe extern "Rust" fn __getrandom_v03_custom(dest: *mut u8, len: usize) -> Res
 }
 
 struct EmbedCtx {
-    tokenizer: Option<Tokenizer>,
     host_delegated: bool,
 }
 
@@ -170,7 +167,6 @@ fn init_ctx() -> Result<EmbedCtx, String> {
         );
         elog("embed::init_ctx host-delegated (probe ok); skipping safetensors+tokenizer load");
         return Ok(EmbedCtx {
-            tokenizer: None,
             host_delegated: true,
         });
     }
