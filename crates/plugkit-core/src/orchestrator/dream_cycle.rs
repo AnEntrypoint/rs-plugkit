@@ -101,6 +101,11 @@ fn evaluate(content: &str) -> Result<Value, String> {
         super::dream_rsi::ReplaySource("dream-replay-cycle"),
         fields.as_object().cloned().unwrap_or_default(),
     );
+    let promotion = if body.get("promote").and_then(Value::as_bool) == Some(true) && persisted.is_ok() {
+        super::dream_rsi::promote_strategy(owner, &fields)
+    } else {
+        json!({ "promoted": false, "reason": "promotion not requested" })
+    };
     if persisted.is_ok() {
         super::dream_rsi::update_probe(owner, &fields, probe_scores.as_ref());
     }
@@ -116,12 +121,14 @@ fn evaluate(content: &str) -> Result<Value, String> {
                 "replayed_observations": replayed_observations
             },
             "replay_result_path": replay_result_path,
+            "promotion": promotion,
             "dropped_observations": super::dream_rsi::observation_drops(owner)
         })),
         Err(error) => Ok(json!({
             "ok": false, "error_code": "persist_failed", "kind": "observations",
             "status": "persist_failed", "owner_session_id": owner, "cycle_id": cycle_id,
             "last_dispatch_id": latest, "error": error,
+            "promotion": promotion,
             "dropped_observations": super::dream_rsi::observation_drops(owner)
         })),
     }

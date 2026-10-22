@@ -1499,6 +1499,49 @@ pub(super) fn persisted_cycle_result(session_id: Option<&str>) -> Value {
 }
 
 #[cfg(target_arch = "wasm32")]
+pub(super) fn promote_strategy(owner: &str, fields: &Value) -> Value {
+    let improved = fields.get("improved").and_then(Value::as_bool).unwrap_or(false);
+    let never_worse = fields.get("never_worse").and_then(Value::as_bool).unwrap_or(false);
+    let observations = fields
+        .get("history")
+        .and_then(|history| history.get("observations"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let policy_id = fields.get("selected_policy_id").and_then(Value::as_str).map(str::to_owned);
+    let path = session_store_path(PROJECT_WIDE_SESSION, &format!("{ACTIVE_STRATEGY_FILE}.json"));
+    let refusal = if !(improved && never_worse) {
+        Some("replay is not a strict win that is never worse; active strategy unchanged")
+    } else if observations < INSUFFICIENT_RECORD_THRESHOLD {
+        Some("fewer observations than the promotion threshold; active strategy unchanged")
+    } else if policy_id.is_none() {
+        Some("replay selected no policy; active strategy unchanged")
+    } else {
+        None
+    };
+    if let Some(reason) = refusal {
+        return json!({ "promoted": false, "reason": reason, "path": path });
+    }
+    let policy_id = policy_id.unwrap_or_default();
+    let record = json!({
+        "kind": "project-strategy",
+        "scope": "project",
+        "owner_session_id": owner,
+        "policy_id": policy_id,
+        "selected_score": fields.get("selected_score").cloned().unwrap_or(Value::Null),
+        "baseline_score": fields.get("baseline_score").cloned().unwrap_or(Value::Null),
+        "n_observations": observations,
+        "ts": super::state::now_ms() as i64,
+    });
+    let written = crate::pkfs::write(&path, &record.to_string());
+    json!({
+        "promoted": written,
+        "reason": if written { "strict win that is never worse; selected policy written" } else { "write failed" },
+        "policy_id": policy_id,
+        "path": path,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
 pub(super) fn persisted_probe(session_id: &str) -> Value {
     crate::pkfs::read_to_string(&session_store_path(session_id, PROBE_STRATEGY_FILE))
         .and_then(|raw| serde_json::from_str(&raw).ok())
