@@ -368,11 +368,6 @@ fn session_store_path(session: &str, file: &str) -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn current_session_store_path(name: &str) -> Result<String, String> {
-    Ok(session_store_path(&session_id()?, &format!("{name}.json")))
-}
-
-#[cfg(target_arch = "wasm32")]
 fn is_gate_drift_code(code: &str) -> bool {
     matches!(
         code,
@@ -1639,13 +1634,13 @@ pub struct ReplaySource(pub &'static str);
 
 #[cfg(target_arch = "wasm32")]
 pub(super) fn persist_replay_result(
+    owner: &str,
     file: ReplayFile,
     source: ReplaySource,
     fields: serde_json::Map<String, Value>,
 ) -> Result<String, String> {
-    let owner = session_id()?;
     let name = file.name();
-    let path = current_session_store_path(name)?;
+    let path = session_store_path(owner, &format!("{name}.json"));
     let kind = match file {
         ReplayFile::Cycle => "cycle-result",
     };

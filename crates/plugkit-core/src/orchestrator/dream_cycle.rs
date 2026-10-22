@@ -121,6 +121,7 @@ fn run(owner: &str, body: &Value) -> Result<Value, String> {
     let replayed_worlds = fields["history"]["worlds"].clone();
     let replayed_observations = fields["history"]["observations"].clone();
     let persisted = super::dream_rsi::persist_replay_result(
+        owner,
         super::dream_rsi::ReplayFile::Cycle,
         super::dream_rsi::ReplaySource("dream-replay-cycle"),
         fields.as_object().cloned().unwrap_or_default(),
