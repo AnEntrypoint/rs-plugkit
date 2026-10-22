@@ -591,6 +591,31 @@ fn host_stat_via_exec(path: &str) -> Option<Value> {
     result.get("stat").cloned()
 }
 
+/// Queues one `codesearch` request with `index_only` into this project's spool, so the daemon runs the cold
+/// index pass in its own worker instead of inside the caller's dispatch. The per-5-minute `wx` marker makes
+/// concurrent cold dispatches queue one request; the request is written tmp-then-rename so the spool never
+/// reads a partial body.
+pub fn queue_background_index(root: &str) -> bool {
+    let body = json!({ "query": "cold-index", "k": 1, "index_only": true, "session_id": "cold-index" }).to_string();
+    let code = format!(
+        "const fs=require('fs'),path=require('path');\
+         const root={root},body={body};\
+         const dir=path.join(root,'.gm','exec-spool','in','codesearch');\
+         fs.mkdirSync(dir,{{recursive:true}});\
+         const marker=path.join(root,'.gm','cold-index.'+Math.floor(Date.now()/300000)+'.queued');\
+         let claimed=false;\
+         try{{fs.closeSync(fs.openSync(marker,'wx'));claimed=true;}}catch(e){{if(e.code!=='EEXIST')throw e;}}\
+         if(claimed){{const id='cold-index-'+process.pid+'-'+Date.now();const tmp=path.join(dir,'.'+id+'.tmp');\
+         fs.writeFileSync(tmp,body,{{mode:0o600}});fs.renameSync(tmp,path.join(dir,id+'.txt'));}}\
+         console.log(JSON.stringify({{ok:true,queued:claimed}}));",
+        root = serde_json::to_string(root).unwrap_or_else(|_| "\"\"".to_string()),
+        body = serde_json::to_string(&body).unwrap_or_else(|_| "\"\"".to_string()),
+    );
+    exec_json_result(&code)
+        .and_then(|r| r.get("queued").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
 fn exec_json_result(code: &str) -> Option<Value> {
     let options = json!({ "timeoutMs": 15_000 }).to_string();
     let packed = unsafe {
