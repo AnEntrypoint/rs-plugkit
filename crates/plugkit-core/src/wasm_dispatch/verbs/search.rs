@@ -400,6 +400,20 @@ pub(super) fn unindexed_channel(root: &str) -> Value {
     json!({ "independent": true, "indexed_root": root, "ran": false })
 }
 
+fn cold_pending_reply_queued(root: &str, body: &Value) -> Value {
+    let queued = crate::wasm_dispatch::host_abi::queue_background_index(root);
+    emit_event("codesearch_index_queued", json!({ "root": root, "queued": queued }));
+    let mut pending = body.clone();
+    if let Some(obj) = pending.as_object_mut() {
+        obj.insert("index_progress".to_string(), json!({
+            "state": "queued",
+            "background": true,
+            "queued": queued,
+        }));
+    }
+    cold_index_pending_reply(root, &pending)
+}
+
 pub(super) fn cold_index_pending_reply(root: &str, retry: &Value) -> Value {
     json!({
         "mode": "dual",
@@ -657,6 +671,10 @@ pub(super) fn codesearch_at_root(
             } else {
                 "digest-mismatch"
             };
+            let index_only = body.get("index_only").and_then(|v| v.as_bool()).unwrap_or(false);
+            if cold_start && !index_only {
+                return ok("codesearch", cold_pending_reply_queued(root, body));
+            }
             let index_started = unsafe { crate::wasm_dispatch::host_now_ms() };
             let cold_budget_ms = match caller_remaining_ms() {
                 Some(remaining) => COLD_INDEX_PASS_BUDGET_MS.min(remaining.saturating_sub(DUAL_SEARCH_RESERVE_MS)),
@@ -2978,6 +2996,10 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             } else {
                 "digest-mismatch"
             };
+            if cold_start && !body.get("index_only").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let root = crate::wasm_dispatch::host_abi::host_cwd_string().unwrap_or_else(|| ".".to_string());
+                return ok("codesearch", cold_pending_reply_queued(&root, body));
+            }
             let topup_started = unsafe { host_now_ms() };
             let pass = if cold_start {
                 crate::code_index::index_topup(
