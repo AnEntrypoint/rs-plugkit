@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ${{ inputs.source_repository || github.repository }}
-          fetch-depth: 1
+          fetch-depth: 50
           ref: main
 
       - name: Skip when neither this source nor its dependencies moved since the last release
@@ -67,9 +67,31 @@ jobs:
           GH_TOKEN: ${{ secrets.publisher_token }}
           DEPENDENCY_REPOS: ${{ inputs.dependency_repos }}
           RELEASE_REPO: ${{ inputs.release_repo }}
+          MANIFEST: ${{ inputs.version_manifest }}
         run: |
           set -euo pipefail
-          head=$(git rev-parse HEAD)
+          # Source rule, fail closed. The source of HEAD is HEAD itself, or, when HEAD is a pure version-bump commit
+          # (subject "chore: auto-bump version to ", a one-line change to $MANIFEST), its parent, recursively.
+          # Skip only when that source equals source-head in the latest release body and the dependency pins match.
+          # The release job records the source it built, never the bump commit it pushes after building, so a
+          # recorded value is never a bump commit. An unresolvable source fails the job; nothing is skipped on a guess.
+          source_of() {
+            local sha=$1 steps=0 subject parent
+            while :; do
+              steps=$((steps + 1))
+              [ "$steps" -le 50 ] || { echo "::error::no source commit within 50 commits of $1"; return 1; }
+              subject=$(git log -1 --format=%s "$sha") || return 1
+              case "$subject" in
+                "chore: auto-bump version to "*) ;;
+                *) SRC=$sha; return 0 ;;
+              esac
+              parent=$(git rev-parse --verify -q "$sha^") || { echo "::error::version bump $sha has no parent in the fetched history"; return 1; }
+              [ "$(git diff --numstat "$parent" "$sha")" = "$(printf '1\t1\t%s' "$MANIFEST")" ] || { echo "::error::$sha is titled as a version bump but is not a one-line change to $MANIFEST"; return 1; }
+              sha=$parent
+            done
+          }
+          source_of "$(git rev-parse HEAD)" || { echo "::error::cannot resolve the source commit of HEAD"; exit 1; }
+          src=$SRC
           deps=""
           for repo in $DEPENDENCY_REPOS; do
             sha=$(git ls-remote "https://github.com/$repo.git" refs/heads/main | cut -f1)
@@ -88,9 +110,9 @@ jobs:
           recorded_head=$(printf '%s\n' "$body" | sed -n 's/^source-head: //p')
           recorded_deps=$(printf '%s\n' "$body" | sed -n 's/^source-deps: //p')
           skip=false
-          if [ -n "$recorded_head" ] && [ "$head" = "$recorded_head" ] && [ "$deps" = "$recorded_deps" ]; then
+          if [ -n "$recorded_head" ] && [ "$src" = "$recorded_head" ] && [ "$deps" = "$recorded_deps" ]; then
             skip=true
-            echo "sources and dependencies unchanged since ${recorded_head:0:9}; no release"
+            echo "source ${src:0:9} and dependencies unchanged since the last release; no release"
           fi
           echo "skip=$skip" >> "$GITHUB_OUTPUT"
           echo "deps=$deps" >> "$GITHUB_OUTPUT"
@@ -108,7 +130,35 @@ jobs:
         with:
           repository: ${{ inputs.source_repository || github.repository }}
           token: ${{ secrets.publisher_token }}
+          fetch-depth: 50
           ref: main
+
+      - name: Resolve the source commit this build compiles (fail closed)
+        id: built
+        shell: bash
+        env:
+          MANIFEST: ${{ inputs.version_manifest }}
+        run: |
+          set -euo pipefail
+          # Same source rule as the plan job: HEAD, or the parent of a pure version-bump commit, recursively.
+          # The result is recorded as source-head; it is never the bump commit pushed after the build.
+          source_of() {
+            local sha=$1 steps=0 subject parent
+            while :; do
+              steps=$((steps + 1))
+              [ "$steps" -le 50 ] || { echo "::error::no source commit within 50 commits of $1"; return 1; }
+              subject=$(git log -1 --format=%s "$sha") || return 1
+              case "$subject" in
+                "chore: auto-bump version to "*) ;;
+                *) SRC=$sha; return 0 ;;
+              esac
+              parent=$(git rev-parse --verify -q "$sha^") || { echo "::error::version bump $sha has no parent in the fetched history"; return 1; }
+              [ "$(git diff --numstat "$parent" "$sha")" = "$(printf '1\t1\t%s' "$MANIFEST")" ] || { echo "::error::$sha is titled as a version bump but is not a one-line change to $MANIFEST"; return 1; }
+              sha=$parent
+            done
+          }
+          source_of "$(git rev-parse HEAD)" || { echo "::error::cannot resolve the source commit this build compiles"; exit 1; }
+          echo "source=$SRC" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
         with:
@@ -169,7 +219,6 @@ jobs:
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               echo "version=$VER" >> "$GITHUB_OUTPUT"
-              echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             [ "$attempt" -lt 3 ] || break
@@ -200,7 +249,7 @@ jobs:
           VER: ${{ steps.push.outputs.version }}
           REPO: ${{ inputs.release_repo }}
           TITLE_PREFIX: ${{ inputs.release_title_prefix }}
-          SOURCE_HEAD: ${{ steps.push.outputs.commit }}
+          SOURCE_HEAD: ${{ steps.built.outputs.source }}
           SOURCE_DEPS: ${{ needs.plan.outputs.deps }}
           SHA: ${{ github.sha }}
         working-directory: ${{ inputs.crate_dir }}
