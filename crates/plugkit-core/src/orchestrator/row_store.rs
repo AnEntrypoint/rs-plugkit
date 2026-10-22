@@ -442,6 +442,7 @@ fn read_blocks_mode(
     store: &Store,
     skip_unreadable: bool,
 ) -> Result<(ReadSet, Vec<SkippedRow>), (String, i32)> {
+    migrate_legacy_dir(store);
     let mut raw: BTreeMap<String, String> = BTreeMap::new();
     let mut blocks: Vec<Value> = Vec::new();
     let mut skipped: Vec<SkippedRow> = Vec::new();
