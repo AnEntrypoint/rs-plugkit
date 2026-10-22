@@ -5083,6 +5083,10 @@ pub(super) fn pull_and_repush_remote_moved(
             refusal["next_action_hint"] = json!(
                 "Dispatch git_status {\"paths\":[...]} over clashing_paths, resolve them in the lane named by live_lane_markers, then re-dispatch git_pull and git_push with the head_after that pull reports as rev."
             );
+            if let Some(reason) = scope_failure.as_deref() {
+                refusal["auto_recovery"]["via"] = json!("pull");
+                refusal["auto_recovery"]["scope_recommit_reason"] = json!(reason);
+            }
             refusal
         }
         RemoteMovedPull::Landed {
