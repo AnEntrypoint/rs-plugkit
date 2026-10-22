@@ -67,6 +67,13 @@ pub fn handle_reconcile(content: &str) -> (String, String, i32) {
                     1,
                 );
             }
+            pkfs::CasWriteOutcome::NoSpace => {
+                return (
+                    serde_json::json!({"ok": false, "error_code": "storage_full", "error": "component-loader-reconcile: no space left on the volume holding loader-state.json"}).to_string(),
+                    String::new(),
+                    1,
+                );
+            }
             pkfs::CasWriteOutcome::IoError => {
                 return (
                     serde_json::json!({"ok": false, "error_code": "loader_state_write_failed", "error": "component-loader-reconcile: could not write loader-state.json"}).to_string(),

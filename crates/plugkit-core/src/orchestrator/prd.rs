@@ -3741,11 +3741,19 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
                     }
                     Err(reason) => {
                         return (
+                            serde_json::json!({
+                                "ok": false,
+                                "error_code": if row_store::is_no_space(&reason) { "storage_full" } else { "failed" },
+                                "error": format!(
+                                    "prd-resolve: {} was set to {} but could not be moved into {}: {}",
+                                    id_target, resolved_status, store.log, reason
+                                ),
+                                "id": id_target,
+                                "log": store.log,
+                                "next_dispatch": "prd-list",
+                            })
+                            .to_string(),
                             String::new(),
-                            format!(
-                                "prd-resolve: {} was set to {} but could not be moved into {}: {}",
-                                id_target, resolved_status, store.log, reason
-                            ),
                             1,
                         )
                     }
@@ -3891,8 +3899,15 @@ pub fn handle_retire(content: &str) -> (String, String, i32) {
             )
         }
         Err(reason) => (
+            serde_json::json!({
+                "ok": false,
+                "error_code": if row_store::is_no_space(&reason) { "storage_full" } else { "failed" },
+                "error": format!("prd-retire: {} could not be moved into {}: {}", id, store.log, reason),
+                "id": id,
+                "log": store.log,
+            })
+            .to_string(),
             String::new(),
-            format!("prd-retire: {} could not be moved into {}: {}", id, store.log, reason),
             1,
         ),
     }

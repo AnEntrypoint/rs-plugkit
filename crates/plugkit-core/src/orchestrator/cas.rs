@@ -133,6 +133,20 @@ pub fn cas_retry_write_verified<T>(
                 }
                 continue;
             }
+            pkfs::CasWriteOutcome::NoSpace => {
+                return Err((
+                    serde_json::json!({
+                        "ok": false,
+                        "error_code": "storage_full",
+                        "error": format!("{}: no space left on the volume holding {}", verb_label, path_s),
+                        "path": path_s,
+                        "retried": false,
+                    })
+                    .to_string(),
+                    String::new(),
+                    1,
+                ));
+            }
             pkfs::CasWriteOutcome::IoError => {
                 if attempt >= max_attempts {
                     return Err((

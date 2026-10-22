@@ -501,6 +501,13 @@ fn read_blocks_mode(
 pub enum WriteErr {
     Conflict,
     Fatal(String),
+    NoSpace(String),
+}
+
+const NO_SPACE_MARKER: &str = "no-space:";
+
+pub fn is_no_space(err: &str) -> bool {
+    err.contains(NO_SPACE_MARKER)
 }
 
 pub fn write_blocks(store: &Store, read: &ReadSet, new_blocks: &[Value]) -> Result<(), WriteErr> {
@@ -527,6 +534,7 @@ pub fn write_blocks(store: &Store, read: &ReadSet, new_blocks: &[Value]) -> Resu
         match pkfs::cas_write(&path, &old_raw, &new_raw) {
             pkfs::CasWriteOutcome::Swapped => {}
             pkfs::CasWriteOutcome::Mismatch => return Err(WriteErr::Conflict),
+            pkfs::CasWriteOutcome::NoSpace => return Err(WriteErr::NoSpace(path)),
             pkfs::CasWriteOutcome::IoError => {
                 return Err(WriteErr::Fatal(format!("write failed for {}", path)))
             }
@@ -616,6 +624,20 @@ pub fn cas_retry_write_verified<T>(
                     ));
                 }
                 continue;
+            }
+            Err(WriteErr::NoSpace(path)) => {
+                return Err((
+                    serde_json::json!({
+                        "ok": false,
+                        "error_code": "storage_full",
+                        "error": format!("{}: no space left on the volume holding {}", verb, path),
+                        "path": path,
+                        "retried": false,
+                    })
+                    .to_string(),
+                    String::new(),
+                    1,
+                ));
             }
             Err(WriteErr::Fatal(message)) => {
                 if attempt >= max_attempts {
@@ -1184,6 +1206,12 @@ pub fn append_chained(
         match pkfs::cas_write(log_path, &before, &after) {
             pkfs::CasWriteOutcome::Swapped => return Ok(entry),
             pkfs::CasWriteOutcome::Mismatch => continue,
+            pkfs::CasWriteOutcome::NoSpace => {
+                return Err(format!(
+                    "{}append to {} failed: no space left on the volume holding it",
+                    NO_SPACE_MARKER, log_path
+                ))
+            }
             pkfs::CasWriteOutcome::IoError => {
                 if attempt + 1 >= super::fsm::graph().policy.cas_max_attempts.max(1) {
                     return Err(format!("append to {} failed", log_path));
