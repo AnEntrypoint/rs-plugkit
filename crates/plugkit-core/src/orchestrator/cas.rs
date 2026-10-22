@@ -1,5 +1,5 @@
 use crate::pkfs;
-use serde_yaml::Value;
+use yaml_serde::Value;
 use super::yaml_util;
 
 pub enum CasOutcome<T> {
@@ -10,7 +10,7 @@ pub enum CasOutcome<T> {
 fn reparse_document_at(path_s: &str) -> Option<Value> {
     let raw = pkfs::read_to_string(path_s)?;
     let source = raw.strip_prefix('\u{feff}').unwrap_or(raw.as_str());
-    serde_yaml::from_str::<Value>(source).ok()
+    yaml_serde::from_str::<Value>(source).ok()
 }
 
 const LOST_UPDATE_MARKER: &str = "lost-update:";
@@ -61,7 +61,7 @@ pub fn cas_retry_write_verified<T>(
         let doc: Value = if parse_source.trim().is_empty() {
             Value::Sequence(vec![])
         } else {
-            match serde_yaml::from_str(parse_source) {
+            match yaml_serde::from_str(parse_source) {
                 Ok(v) => v,
                 Err(e) => {
                     let fault = yaml_util::parse_fault(parse_source, &e);

@@ -1,5 +1,5 @@
 use crate::pkfs;
-use serde_yaml::Value;
+use yaml_serde::Value;
 use super::prd::prd_path;
 use super::yaml_util::{repair_text, serialize_checked, YamlFault};
 
@@ -87,7 +87,7 @@ pub fn handle_repair(content: &str) -> (String, String, i32) {
     if before.trim().is_empty() {
         return (serde_json::json!({"ok": true, "path": path_s, "already_parses": true, "rows": 0, "faults": []}).to_string(), String::new(), 0);
     }
-    if let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&before) {
+    if let Ok(doc) = yaml_serde::from_str::<yaml_serde::Value>(&before) {
         let rows = doc.as_sequence().map(|s| s.len()).unwrap_or(0);
         return (
             serde_json::json!({"ok": true, "path": path_s, "already_parses": true, "rows": rows, "faults": []}).to_string(),
@@ -107,7 +107,7 @@ pub fn handle_repair(content: &str) -> (String, String, i32) {
                 );
             }
         };
-        let guarded_len = serde_yaml::from_str::<serde_yaml::Value>(&plan.repaired)
+        let guarded_len = yaml_serde::from_str::<yaml_serde::Value>(&plan.repaired)
             .ok()
             .and_then(|d| serialize_checked(&d).ok())
             .map(|s| s.len())
@@ -148,7 +148,7 @@ pub fn repair_prd_store(
     if before.trim().is_empty() {
         return Ok(serde_json::json!({"ok": true, "path": path_s, "already_parses": true, "rows": 0, "faults": []}));
     }
-    if let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&before) {
+    if let Ok(doc) = yaml_serde::from_str::<yaml_serde::Value>(&before) {
         let rows = doc.as_sequence().map(|s| s.len()).unwrap_or(0);
         return Ok(serde_json::json!({"ok": true, "path": path_s, "already_parses": true, "rows": rows, "faults": []}));
     }
@@ -162,7 +162,7 @@ pub fn repair_prd_store(
             ));
         }
     };
-    let repaired_doc: serde_yaml::Value = serde_yaml::from_str(&plan.repaired).map_err(|e| {
+    let repaired_doc: yaml_serde::Value = yaml_serde::from_str(&plan.repaired).map_err(|e| {
         (
             String::new(),
             format!("prd-repair refused: the repaired text still does not parse ({e}); file left untouched: {path_s}"),

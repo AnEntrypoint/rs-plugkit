@@ -16,12 +16,11 @@ wit-env = ["dep:wit-bindgen"]
 
 [dependencies]
 serde_json = "1"
-serde_yaml = "0.9"
+yaml_serde = "0.10"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-gemm = { version = "0.17", default-features = false }
 tokenizers = { version = "0.23", default-features = false, features = ["unstable_wasm"] }
 getrandom = { version = "0.2", features = ["custom"] }
 rs-search = { git = "https://github.com/AnEntrypoint/rs-search.git", rev = "1bbeaf68c953e665979c2f8c9b69550599c0827e", package = "rs-search", default-features = false }

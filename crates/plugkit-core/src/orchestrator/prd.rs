@@ -5,7 +5,7 @@ use super::yaml_util::{
     defer_marker_in_text, invalidate_residual_marker, levenshtein, yaml_to_json,
 };
 use crate::pkfs;
-use serde_yaml::Value;
+use yaml_serde::Value;
 
 pub fn prd_path() -> std::path::PathBuf {
     gm_dir().join("prd.yml")
@@ -98,7 +98,7 @@ pub fn pending_commit_comments_for_paths(cwd: Option<&str>, touched: &[String]) 
     out
 }
 
-fn row_referenced_paths(map: &serde_yaml::Mapping) -> Vec<String> {
+fn row_referenced_paths(map: &yaml_serde::Mapping) -> Vec<String> {
     let mut out = Vec::new();
     for key in ["witness_evidence", "witness", "resolution", "commit_comment"] {
         let text = match map.get(&Value::String(key.to_string())) {
@@ -199,7 +199,7 @@ fn rule_bindings_value(texts: &[String]) -> Value {
             .into_iter()
             .map(|(path, anchor)| {
                 let fingerprint = rule_section_fingerprint(&path, &anchor);
-                let mut map = serde_yaml::Mapping::new();
+                let mut map = yaml_serde::Mapping::new();
                 map.insert(Value::String("path".to_string()), Value::String(path));
                 map.insert(Value::String("anchor".to_string()), Value::String(anchor));
                 map.insert(Value::String("sha256".to_string()), Value::String(fingerprint));
@@ -318,7 +318,7 @@ fn status_matches_filter(want: &str, status: &str) -> bool {
     want == status
 }
 
-fn subject_from_fields(item_map: &serde_yaml::Mapping) -> &str {
+fn subject_from_fields(item_map: &yaml_serde::Mapping) -> &str {
     [
         "subject",
         "title",
@@ -452,7 +452,7 @@ pub(super) fn request_object(content: &str) -> serde_json::Value {
         return serde_json::Value::Object(serde_json::Map::new());
     }
     let parsed = serde_json::from_str::<serde_json::Value>(trimmed).ok().or_else(|| {
-        serde_yaml::from_str::<Value>(trimmed)
+        yaml_serde::from_str::<Value>(trimmed)
             .ok()
             .and_then(|v| serde_json::to_value(v).ok())
     });
@@ -913,7 +913,7 @@ impl AddOutcome {
 
 const DISPOSITIONS: [&str; 4] = ["open", "accepted", "rejected", "deferred"];
 
-fn mapping_text(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
+fn mapping_text(map: &yaml_serde::Mapping, key: &str) -> Option<String> {
     map.get(&Value::String(key.to_string()))
         .and_then(Value::as_str)
         .map(|s| s.trim().to_string())
@@ -1013,11 +1013,11 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
             return (String::new(), err, rc);
         }
     }
-    let new_item: Value = match serde_yaml::from_str::<Value>(trimmed) {
+    let new_item: Value = match yaml_serde::from_str::<Value>(trimmed) {
         Ok(v) => v,
         Err(_) => match serde_json::from_str::<serde_json::Value>(trimmed)
             .ok()
-            .and_then(|j| serde_yaml::to_value(j).ok())
+            .and_then(|j| yaml_serde::to_value(j).ok())
         {
             Some(v) => v,
             None => return (String::new(), "parse failed".to_string(), 1),
@@ -1205,7 +1205,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         if let Some(seq) = doc.as_sequence_mut() {
             let mut new_with_id = item_map.clone();
             new_with_id.remove(&Value::String("overwrite".to_string()));
-            let mut id_first = serde_yaml::Mapping::new();
+            let mut id_first = yaml_serde::Mapping::new();
             id_first.insert(Value::String("id".to_string()), Value::String(id.clone()));
             for (key, value) in new_with_id.into_iter() {
                 if key.as_str() == Some("id") {
@@ -2174,7 +2174,7 @@ fn canonical_persisted_witness_path(path: &str) -> Option<String> {
     (named && safe).then_some(canonical)
 }
 
-fn bound_witness_script(map: &serde_yaml::Mapping) -> Option<String> {
+fn bound_witness_script(map: &yaml_serde::Mapping) -> Option<String> {
     let text = match map.get(&Value::String("witness".to_string())) {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Sequence(items)) => items
@@ -2202,7 +2202,7 @@ fn witness_source_is_node_only(source: &str) -> bool {
         .any(|marker| lowered.contains(*marker))
 }
 
-fn last_row_with_id<'a>(doc: &'a Value, id: &str) -> Option<&'a serde_yaml::Mapping> {
+fn last_row_with_id<'a>(doc: &'a Value, id: &str) -> Option<&'a yaml_serde::Mapping> {
     doc.as_sequence()?
         .iter()
         .filter_map(|item| item.as_mapping())
@@ -2469,10 +2469,10 @@ impl VerifiedWitness {
     }
 
     fn to_yaml(&self) -> Value {
-        let mut map = serde_yaml::Mapping::new();
+        let mut map = yaml_serde::Mapping::new();
         map.insert(
             Value::String("exit_code".to_string()),
-            serde_yaml::to_value(self.exit_code).unwrap_or(Value::Null),
+            yaml_serde::to_value(self.exit_code).unwrap_or(Value::Null),
         );
         map.insert(
             Value::String("output_sha256".to_string()),
@@ -3897,7 +3897,7 @@ pub fn handle_witness_request(content: &str) -> (String, String, i32) {
             .get(&Value::String("session_id".to_string()))
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let mut request = serde_yaml::Mapping::new();
+        let mut request = yaml_serde::Mapping::new();
         request.insert(Value::String("ts_ms".to_string()), Value::Number(ts.into()));
         if let Some(r) = requester.as_deref() {
             request.insert(Value::String("requested_by".to_string()), Value::String(r.to_string()));
