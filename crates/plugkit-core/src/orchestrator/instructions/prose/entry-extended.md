@@ -49,9 +49,7 @@ Route KV writes to `<cwd>/.gm/disciplines/<ns>/`. `@<name>` prefix sets namespac
 
 Prune bad memory on sight, since a stale or wrong recall hit poisons every future recall.
 
-By default the memory store writes markdown files at `.gm/memories/<key>.md` (the durable store) with a lean cache index at `.gm/gm.db`'s `rssearch_vectors` table. The `memory.tencentdb_backend` option of `gm.config.json` is not wired in this build (see below).
-
-**`memory.tencentdb_backend` is not read by this build.** No code under `rs-plugkit/crates/plugkit-core/src` reads that block of `gm.config.json`, and no file-pointer-only backend or TencentDB module exists in the crate, so setting the block changes nothing: every namespace stays on the default backend, which writes `.gm/memories/<key>.md` and indexes it in the `rssearch_vectors` table of `.gm/gm.db`. Reaching a deployed TencentDB-Agent-Memory stack is a separate decision that needs its own services and credentials; this build has no path to one.
+By default the memory store writes markdown files at `.gm/memories/<key>.md` (the durable store) with a lean cache index at `.gm/gm.db`'s `rssearch_vectors` table.
 
 ## Liqology memory-firewall plugin
 
@@ -59,7 +57,7 @@ By default the memory store writes markdown files at `.gm/memories/<key>.md` (th
 
 **This is a memory-relevance tool, not a memory store.** It does not replace the gm recall index, which remains the only write/read surface for gm's own memory (see Memorize above). `agentplug-liqology` consumes recall activity (via `emit_recall`'s `hit_keys` field, now logged per-entry alongside the existing `n_hits`/`top_score`) and git-commit activity (via `git_commit`/`git_finalize`'s `git_commit`/`git.commit` events, both now carrying a full `sha_full` -- every `emit_event` call already auto-tags its own session's `sess`, so a commit and the recall hits that informed it join on matching `sess` values in `.watcher.log`, no new database table) to infer which memory entries were surfaced-but-never-reflected-in-a-diff (candidates for pruning) versus surfaced-and-reused (candidates for reinforcement).
 
-**When to actually reach for it:** a real, reachable signal, same bar as `tencentdb_backend` above -- the project's own recall corpus has grown large enough that its top-k results visibly include stale/irrelevant entries, or the user names the need directly (a request to prune, tune retention, or inspect what memory is/isn't earning its keep). Absent one of those, the default store is sufficient; dispatching a `host_plugin_call("liqology", ...)` speculatively on every turn is the same over-fragmentation `tencentdb_backend`'s own guidance warns against.
+**When to actually reach for it:** a real, reachable signal -- the project's own recall corpus has grown large enough that its top-k results visibly include stale/irrelevant entries, or the user names the need directly (a request to prune, tune retention, or inspect what memory is/isn't earning its keep). Absent one of those, the default store is sufficient; dispatching a `host_plugin_call("liqology", ...)` speculatively on every turn is over-fragmentation.
 
 
 **When to dispatch the three on-demand verbs** (`record`/`prune_report` already fire automatically, above -- these three are agent-initiated):
