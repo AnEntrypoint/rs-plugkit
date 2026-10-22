@@ -1945,6 +1945,18 @@ pub(super) fn git_push(body: &Value) -> u64 {
             }).to_string());
         }
         log_deviation_push("push-explicit-ref-remote-moved", &branch);
+        let clashing = pull_clashing_paths(repo.as_deref(), &branch);
+        let reason = if clashing.is_empty() {
+            format!(
+                "push of explicit source ref '{}' to {} failed because the remote moved (e.g. a CI autobump commit landed after this ref was created); git_push will not rebase or otherwise mutate a dirty checkout for an isolated-ref publication. Recover with exactly: git_pull {{branch:\"{}\"}} to fast-forward past the remote's new commit, then git_push {{rev:\"<head_after of that pull>\"}} (or git_finalize {{rev:\"<head_after of that pull>\"}}) to publish this ref on top of it; the symbolic HEAD is refused. Output:\n{}",
+                source_ref, branch, branch, push_out
+            )
+        } else {
+            format!(
+                "push of explicit source ref '{}' to {} failed because the remote moved, and these dirty paths also change in the incoming range: {}. git_pull refuses to merge over them and git_push will not rebase a dirty checkout, so git_pull alone does not recover this push: commit or revert each path in the lane that owns it (git_status {{\"paths\":[...]}} reads them), then re-dispatch git_push with the committed rev, never rev HEAD. Output:\n{}",
+                source_ref, branch, clashing.join(", "), push_out
+            )
+        };
         let mut refusal = json!({
             "ok": false,
             "verb": "git_push",
@@ -1955,10 +1967,7 @@ pub(super) fn git_push(body: &Value) -> u64 {
             "source_ref": source_ref,
             "source_sha": local_source_before,
             "preserved_dirty_worktree": preserved_dirty_worktree,
-            "reason": format!(
-                "push of explicit source ref '{}' to {} failed because the remote moved (e.g. a CI autobump commit landed after this ref was created); git_push will not rebase or otherwise mutate a dirty checkout for an isolated-ref publication. Recover with exactly: git_pull {{branch:\"{}\"}} to fast-forward past the remote's new commit, then git_push {{rev:\"<head_after of that pull>\"}} (or git_finalize {{rev:\"<head_after of that pull>\"}}) to publish this ref on top of it; the symbolic HEAD is refused. Output:\n{}",
-                source_ref, branch, branch, push_out
-            ),
+            "reason": reason,
             "next_dispatch": "instruction",
             "next_action_hint": "git_pull {branch} then git_push {rev:\"<head_after of that pull>\"}",
         });
