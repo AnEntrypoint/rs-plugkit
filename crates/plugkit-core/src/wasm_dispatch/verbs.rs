@@ -1213,6 +1213,44 @@ fn content_value_to_text(value: &Value) -> Option<String> {
     Some(joined)
 }
 
+// One writer per checkout: `.gm/locks/<repo>.writer` (scripts/triage/writer-lock.sh take) names the session
+// allowed to write that repository, and fs_write from any other session is refused. A path whose first
+// component has no lock file of its own falls to the root lock `gm`. Paths under a `.gm` or `.agentplug*`
+// component are gm state and never locked.
+fn writer_lock_refusal(path: &str) -> Option<Value> {
+    let normalized = path.trim().replace('\\', "/");
+    let normalized = normalized.trim_start_matches("./");
+    let state_path = normalized.split('/').any(|c| c == ".gm" || c.starts_with(".agentplug"));
+    if state_path {
+        return None;
+    }
+    let repo = match normalized.split_once('/') {
+        Some((first, _)) if crate::pkfs::exists(&format!(".gm/locks/{first}.writer")) => first,
+        _ => "gm",
+    };
+    let holder = crate::pkfs::read_to_string(&format!(".gm/locks/{repo}.writer"))?
+        .trim()
+        .to_string();
+    if holder.is_empty() {
+        return None;
+    }
+    let caller = crate::wasm_dispatch::current_dispatch_session_id().unwrap_or_default();
+    if holder == caller {
+        return None;
+    }
+    let caller_label = if caller.is_empty() { "<none>".to_string() } else { caller };
+    Some(json!({
+        "error": format!(
+            "{normalized} is under the writer lock of {repo}, held by session {holder}; this session ({caller_label}) is not the holder. Wait for its release, or take the lock with scripts/triage/writer-lock.sh take {repo} <session>."
+        ),
+        "error_code": "writer_lock_held",
+        "path": normalized,
+        "repo": repo,
+        "holder": holder,
+        "next_dispatch": "fs_write",
+    }))
+}
+
 fn fs_write(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let content = ["content", "data", "text"]
@@ -1234,6 +1272,9 @@ fn fs_write(body: &Value) -> u64 {
             );
         }
         return err("fs_write", &message);
+    }
+    if let Some(detail) = writer_lock_refusal(path) {
+        return err_json("fs_write", detail);
     }
     let received_keys: Vec<String> = body
         .as_object()
