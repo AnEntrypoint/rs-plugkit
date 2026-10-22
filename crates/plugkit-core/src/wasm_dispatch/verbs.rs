@@ -6,7 +6,7 @@ use super::host_abi::{
     unpack_to_value,
 };
 use crate::commit_scope::{
-    blanket_stage_refusal, pathspec_covers_path, unrequested_stage_refusal,
+    blanket_stage_refusal, pathspec_covers_path, unrequested_stage_refusal, unrequested_stage_refusal_owned,
 };
 use crate::git_index_lock::resolved_note;
 use crate::orchestrator::yaml_util::base64_decode;
