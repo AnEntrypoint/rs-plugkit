@@ -3393,15 +3393,35 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
                             map.insert("witness_path".to_string(), json!(path));
                         }
                     }
-                    Some((dispatch_id, outcome))
+                    Some((dispatch_id, outcome, cwd.to_string()))
                 }
                 Err(reason) => {
+                    let host_root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+                    let fallback = if host_root.is_empty() || host_root == cwd {
+                        None
+                    } else {
+                        crate::dispatch_ledger::record(
+                            &host_root,
+                            &verb,
+                            &body_s,
+                            &fingerprint,
+                            outcome.exit_code,
+                            dispatch_session_id.as_deref(),
+                            Some(outcome.output_bytes),
+                        )
+                        .ok()
+                    };
                     result_value = super::host_abi::unpack_to_value(err_coded(
                         &verb,
                         "dispatch_ledger_unavailable",
                         &reason,
                     ));
-                    None
+                    if fallback.is_some() {
+                        if let Some(map) = result_value.as_object_mut() {
+                            map.insert("recorded_in".to_string(), json!(host_root));
+                        }
+                    }
+                    fallback.map(|dispatch_id| (dispatch_id, outcome, host_root))
                 }
             }
         }
@@ -3413,16 +3433,15 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
         result_value,
         &fingerprint,
         body_parse_failed,
-        recorded.as_ref().map(|(dispatch_id, _)| dispatch_id.as_str()),
+        recorded.as_ref().map(|(dispatch_id, ..)| dispatch_id.as_str()),
     );
     #[cfg(target_arch = "wasm32")]
-    if let (Some((dispatch_id, outcome)), Some(session_id)) = (recorded, dispatch_session_id.as_deref()) {
-        let cwd = body.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+    if let (Some((dispatch_id, outcome, record_root)), Some(session_id)) = (recorded, dispatch_session_id.as_deref()) {
         let reply_sha = {
             use sha2::Digest;
             format!("{:x}", sha2::Sha256::digest(reply.as_bytes()))
         };
-        if let Err(reason) = crate::dispatch_ledger::attach_reply_sha256(cwd, &dispatch_id, &reply_sha) {
+        if let Err(reason) = crate::dispatch_ledger::attach_reply_sha256(&record_root, &dispatch_id, &reply_sha) {
             if let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(&reply) {
                 map.insert("reply_attach_failed".to_string(), serde_json::Value::String(reason));
                 reply = serde_json::Value::Object(map).to_string();
