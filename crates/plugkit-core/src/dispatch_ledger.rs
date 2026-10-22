@@ -444,27 +444,31 @@ pub fn read_entries(cwd: &str) -> Result<Vec<Value>, String> {
     if let Ok(Value::Array(list)) = serde_json::from_str::<Value>(&raw) {
         return Ok(list);
     }
-    Ok(parse_ledger(&raw))
+    parse_ledger(&raw, &path)
 }
 
-// Parses a JSONL ledger: entry lines in order, supplement lines merged into the entry they name.
-fn parse_ledger(raw: &str) -> Vec<Value> {
+// Parses a JSONL ledger: entry lines in order, supplement lines merged into the entry they name. A
+// torn last line is an interrupted append and is dropped; any other unparseable line is corruption
+// and is reported, so a caller never counts a broken ledger as zero entries.
+fn parse_ledger(raw: &str, path: &str) -> Result<Vec<Value>, String> {
     let mut entries: Vec<Value> = Vec::new();
     let mut supplements: Vec<Value> = Vec::new();
     let mut lines: Vec<&str> = raw.lines().collect();
-    // A torn last line is an interrupted append, not corruption: drop it and keep the rest.
     if let Some(last) = lines.last() {
         if !last.trim().is_empty() && serde_json::from_str::<Value>(last.trim()).is_err() {
             lines.pop();
         }
     }
-    for line in lines {
-        let line = line.trim();
+    for (index, raw_line) in lines.iter().enumerate() {
+        let line = raw_line.trim();
         if line.is_empty() {
             continue;
         }
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
-            continue;
+            return Err(format!(
+                "dispatch ledger {path} line {} is not valid JSON; repair or remove that line before reading the ledger",
+                index + 1
+            ));
         };
         if is_supplement(&entry) {
             supplements.push(entry);
@@ -491,7 +495,7 @@ fn parse_ledger(raw: &str) -> Vec<Value> {
             }
         }
     }
-    entries
+    Ok(entries)
 }
 
 fn new_dispatch_id(verb: &str, fingerprint: &str, ts: u64, seq: u64) -> String {
@@ -574,7 +578,7 @@ pub fn lookup_outside_root(cwd: &str, dispatch_id: &str) -> Result<Option<Value>
     } else if let Ok(Value::Array(list)) = serde_json::from_str::<Value>(&raw) {
         list
     } else {
-        parse_ledger(&raw)
+        parse_ledger(&raw, &path)?
     };
     Ok(entries
         .into_iter()
