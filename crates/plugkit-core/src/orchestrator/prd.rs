@@ -3580,6 +3580,94 @@ fn body_str(body: &serde_json::Value, fields: &[&str]) -> Option<String> {
     })
 }
 
+pub fn handle_retire(content: &str) -> (String, String, i32) {
+    let request = request_object(content);
+    let id = request_strings(&request, PRD_ROW_ID_FIELDS).into_iter().next();
+    let successor = request
+        .get("superseded_by")
+        .and_then(serde_json::Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let (id, successor) = match (id, successor) {
+        (Some(id), Some(successor)) => (id, successor),
+        _ => {
+            return (
+                String::new(),
+                "prd-retire refused: body must name the open row and the row that carries its work: {\"id\":\"<open row id>\",\"superseded_by\":\"<row id>\"}. A retired row closes without a witness, so the successor must hold the evidence.".to_string(),
+                1,
+            )
+        }
+    };
+    if successor == id {
+        return (
+            String::new(),
+            format!("prd-retire refused: '{}' cannot be superseded by itself", id),
+            1,
+        );
+    }
+    let store = row_store::Store::prd();
+    let open_ids: Vec<String> = match row_store::read_blocks(&store) {
+        Ok(read) => read.blocks.iter().filter_map(row_store::block_id).collect(),
+        Err((message, code)) => return (String::new(), message, code),
+    };
+    if !open_ids.iter().any(|open| *open == id) {
+        return (
+            serde_json::json!({ "ok": false, "error_code": "prd_retire_unknown_id", "id": id }).to_string(),
+            format!(
+                "prd-retire refused: no open row '{}' in .gm/prd/; only open rows retire (resolved rows are already in .gm/prd-log.jsonl). Nothing was written.",
+                id
+            ),
+            1,
+        );
+    }
+    let successor_known = open_ids.iter().any(|open| *open == successor)
+        || matches!(row_store::log_row(&store, &successor), Ok(Some(_)));
+    if !successor_known {
+        return (
+            serde_json::json!({
+                "ok": false,
+                "error_code": "prd_retire_unknown_successor",
+                "id": id,
+                "superseded_by": successor,
+            })
+            .to_string(),
+            format!(
+                "prd-retire refused: superseded_by '{}' names no row in .gm/prd/ or .gm/prd-log.jsonl. Nothing was written.",
+                successor
+            ),
+            1,
+        );
+    }
+    let note = format!("superseded by {}", successor);
+    match row_store::retire_to_log(&store, &id, "superseded", Some(note.as_str())) {
+        Ok(_) => {
+            prune_receipts(&id);
+            invalidate_residual_marker("prd-retire");
+            #[cfg(target_arch = "wasm32")]
+            crate::wasm_dispatch::emit_event(
+                "prd.retired",
+                serde_json::json!({ "id": id, "superseded_by": successor }),
+            );
+            (
+                serde_json::json!({
+                    "retired": id,
+                    "status": "superseded",
+                    "superseded_by": successor,
+                    "witness_required": false,
+                })
+                .to_string(),
+                String::new(),
+                0,
+            )
+        }
+        Err(reason) => (
+            String::new(),
+            format!("prd-retire: {} could not be moved into {}: {}", id, store.log, reason),
+            1,
+        ),
+    }
+}
+
 pub fn handle_witness_request(content: &str) -> (String, String, i32) {
     let body = json_body(content);
     let Some(id) = body_str(&body, &["id", "prd_id", "row"]) else {

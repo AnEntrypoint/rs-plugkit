@@ -332,7 +332,7 @@ that appears only inside `witness_evidence` is named in a refusal as
 when passed as `witness_dispatch_id`. A verified reply names the bound id in `witness_dispatch_id_in_evidence` (null when a binding closed the row); `witness_dispatch_id_in_ledger` is true when the bound id is in this project's dispatch record: its `.gm/exec-spool/.dispatch-ledger.json`, or, once the ledger aged it out, the dispatch's own JSON in `.gm/exec-spool/out` that carries its id; `witness_dispatch_id_verified_via` names which of the two found it: `ledger` or `spool_out`. Spool reply file names carry the verb, session slug, pid, epoch milliseconds and a counter (`<verb>-<session>-<pid>-<ms>-<n>.json`), never the dispatch_id: locate a reply by searching the contents of `.gm/exec-spool/out` for the id. An optional `commit_comment` attaches a
 one-line resolution note to the next GM commit. `prd-list` takes `limit` and `offset` (paging; `status:"all"` lists every status), `group:"cause"` (one item per cause with `count` and `ids`), folds
 repeated blocks of an id to the last block, and replies with `total` (matches) and
-`store_total` (stored blocks). A witness refusal names the failing field in
+`store_total` (stored blocks). `prd-retire {id, superseded_by}` closes an open row as `superseded` with no witness: the row leaves `.gm/prd/` for `.gm/prd-log.jsonl`. A witness refusal names the failing field in
 `field` or `missing_fields`; a self-witness refusal names `prd-witness-request`,
 which records a request on the row and answers a verifier brief for another
 session. `expansion-audit` appends a hash-chained sweep record (rows and unknowns
