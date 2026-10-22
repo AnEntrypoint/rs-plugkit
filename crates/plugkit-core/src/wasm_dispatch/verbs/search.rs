@@ -1642,7 +1642,7 @@ fs_write writes a file inside the project. A write replaces the whole file unles
   {\"append\":true}                 open for append, write, close: the line lands at the end of the file
                                    and nothing already there is read or rewritten
   {\"allow_empty\":true}            permit writing \"\" on purpose (truncating the file)
-Append-only paths (.gm/witness-log.md, .gm/lean-walk/new-nodes.jsonl, .gm/pool/ledger-<wave>.txt): a whole-file write is REFUSED, never served -- with
+Append-only paths (.gm/lean-walk/new-nodes.jsonl, .gm/pool/ledger-<wave>.txt): a whole-file write is REFUSED, never served -- with
 error_code append_only_shrink_refused when it would shrink the file and append_only_rewrite_refused
 otherwise, both naming bytes_on_disk and bytes_offered. Write that path with append:true only, one
 line per run, because a concurrent read-modify-write took it from 4675 lines to 3 on 2026-10-10.
