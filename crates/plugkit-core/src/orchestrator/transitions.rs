@@ -317,7 +317,7 @@ fn residual_scan_denial_detail() -> String {
             )
         }
         ResidualMarker::Invalidated { reason } => format!(
-            "a `residual-scan` DID fire in this session, and then `{}` invalidated its marker afterwards -- `.gm/residual-check-fired` is deliberately invalidated by every PRD/mutable write, so the scan is stale rather than missing. Re-dispatch `residual-scan` as the LAST verb before `transition`, with no prd-add / mutable-add / prd-defer / mutable-defer in between.",
+            "a `residual-scan` DID fire in this session, and then `{}` invalidated its marker afterwards -- `.gm/residual-check-fired` is deliberately invalidated by every PRD/mutable write, so the scan is stale rather than missing. Re-dispatch `residual-scan` as the LAST verb before `transition`, with no prd-add / unknown-add / prd-defer / mutable-defer in between.",
             reason
         ),
         ResidualMarker::Malformed { raw } => format!(
@@ -1167,12 +1167,12 @@ pub fn gate_residuals(from: &str, to: &str) -> (Vec<String>, Option<String>) {
                         _ => match gate_name.as_str() {
                             "residual-scan-fired" => "residual-scan",
                             "prd-all-closed" => "prd-resolve",
-                            "mutables-all-resolved" => "mutable-resolve",
-                            "mutables-all-typed" => "mutable-add",
-                            "state-obligations-ready" => "mutable-add",
-                            "conc-obligations-ready" => "mutable-add",
-                            "sec-obligations-ready" => "mutable-add",
-                            "res-obligations-ready" => "mutable-add",
+                            "mutables-all-resolved" => "unknown-resolve",
+                            "mutables-all-typed" => "unknown-add",
+                            "state-obligations-ready" => "unknown-add",
+                            "conc-obligations-ready" => "unknown-add",
+                            "sec-obligations-ready" => "unknown-add",
+                            "res-obligations-ready" => "unknown-add",
                             "worktree-clean" => "git_finalize",
                             "ci-validated-fresh" => "ci-status",
                             "claim-audit-clean" => "claim-audit",
