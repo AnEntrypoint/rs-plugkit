@@ -1,7 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use crate::wasm_dispatch::{
-    host_cas_write, host_fs_readdir, host_now_ms, host_read, host_remove_file_never_directory,
+    host_fs_readdir, host_now_ms, host_read, host_remove_file_never_directory,
     host_stat, unpack_to_value_pub,
 };
 use crate::wasm_dispatch::host_abi::host_read_via_exec;
@@ -13,6 +13,179 @@ const SPOOL_TMP_MARKER: &str = ".tmp-";
 const SPOOL_TMP_STALE_MS: u64 = 30 * 1000;
 
 pub const RETAINED_ENTRIES: usize = MAX_ENTRIES;
+
+// How many entries the ledger may hold before one append pays for a whole-file compaction. Appending
+// is O(new bytes) and compaction is O(file), so this is the amortized cost of the rewrite. It sits at
+// the host mint's own ceiling (agentplug trims the whole file at DISPATCH_LEDGER_MAX_ENTRIES + 500),
+// so the ledger stays below the window where the host would pay for a rewrite too.
+const LEDGER_COMPACT_ENTRIES: usize = 5000;
+
+// A ledger line that carries reply metadata for an entry already on disk. Entries are immutable once
+// appended, so attaching a reply hash appends one of these instead of rewriting the file.
+fn is_supplement(entry: &Value) -> bool {
+    entry.get("verb").is_none()
+        && entry.get("dispatch_id").is_some()
+        && (entry.get("reply_sha256").is_some() || entry.get("spill_file").is_some())
+}
+
+// The head holds the counts an append needs, so appending does not read the ledger. It is a cache of
+// the ledger, never a source of truth: read_entries rebuilds whatever the file actually holds.
+fn ledger_head_path(cwd: &str) -> String {
+    format!("{}.head", ledger_path(cwd))
+}
+
+struct Head {
+    raw: String,
+    entries: u64,
+    seq: u64,
+}
+
+fn parse_head(raw: &str) -> Head {
+    let parsed = serde_json::from_str::<Value>(raw).ok();
+    let entries = parsed
+        .as_ref()
+        .and_then(|v| v.get("entries"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let seq = parsed
+        .as_ref()
+        .and_then(|v| v.get("seq"))
+        .and_then(Value::as_u64)
+        .unwrap_or(entries);
+    Head {
+        raw: raw.to_string(),
+        entries,
+        seq,
+    }
+}
+
+fn write_head(cwd: &str, entries: u64, seq: u64) -> bool {
+    let path = ledger_head_path(cwd);
+    let next = json!({ "entries": entries, "seq": seq }).to_string();
+    let current = crate::pkfs::read_to_string(&path).unwrap_or_default();
+    if current.trim().is_empty() {
+        return crate::pkfs::write(&path, &next);
+    }
+    if parse_head(&current).raw == next {
+        return true;
+    }
+    matches!(
+        crate::pkfs::cas_write(&path, &current, &next),
+        crate::pkfs::CasWriteOutcome::Swapped
+    )
+}
+
+fn count_lines(raw: &str) -> u64 {
+    raw.lines().filter(|line| !line.trim().is_empty()).count() as u64
+}
+
+// One-time conversion of the historical single-array ledger into JSONL. Returns the entry count.
+fn ensure_jsonl(cwd: &str) -> Result<u64, String> {
+    let path = ledger_path(cwd);
+    if let Some(raw) = crate::pkfs::read_to_string(&ledger_head_path(cwd)) {
+        if !raw.trim().is_empty() {
+            return Ok(parse_head(&raw).entries);
+        }
+    }
+    let existing = match host_read(&path) {
+        Some(text) => text,
+        None if host_stat(&path).is_none() => String::new(),
+        None => return Err(ledger_unavailable(&path)),
+    };
+    if existing.trim().is_empty() {
+        if !crate::pkfs::write(&path, "") {
+            return Err(ledger_unavailable(&path));
+        }
+        let _ = write_head(cwd, 0, 0);
+        return Ok(0);
+    }
+    if let Ok(Value::Array(list)) = serde_json::from_str::<Value>(&existing) {
+        let mut out = String::new();
+        for entry in &list {
+            out.push_str(&entry.to_string());
+            out.push('\n');
+        }
+        if !matches!(
+            crate::pkfs::cas_write(&path, &existing, &out),
+            crate::pkfs::CasWriteOutcome::Swapped
+        ) {
+            return Err(ledger_unavailable(&path));
+        }
+        let count = list.len() as u64;
+        let _ = write_head(cwd, count, count);
+        return Ok(count);
+    }
+    let count = count_lines(&existing);
+    let _ = write_head(cwd, count, count);
+    Ok(count)
+}
+
+fn compact_ledger(cwd: &str, ts: u64) -> Result<(), String> {
+    let path = ledger_path(cwd);
+    let Some(existing) = host_read(&path) else {
+        return Err(ledger_unavailable(&path));
+    };
+    let mut entries: Vec<Value> = Vec::new();
+    let mut supplements: Vec<Value> = Vec::new();
+    for line in existing.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if is_supplement(&entry) {
+            supplements.push(entry);
+        } else {
+            entries.push(entry);
+        }
+    }
+    let cited = crate::orchestrator::prd::open_row_witness_dispatch_ids();
+    entries.retain(|e| {
+        e.get("ts")
+            .and_then(|v| v.as_u64())
+            .is_some_and(|t| t.saturating_add(RETAIN_MS) >= ts)
+    });
+    if entries.len() > MAX_ENTRIES {
+        let mut excess = entries.len() - MAX_ENTRIES;
+        entries.retain(|e| {
+            let is_cited = e
+                .get("dispatch_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| cited.contains(id));
+            if excess > 0 && !is_cited {
+                excess -= 1;
+                return false;
+            }
+            true
+        });
+    }
+    let mut out = String::new();
+    for entry in &entries {
+        out.push_str(&entry.to_string());
+        out.push('\n');
+    }
+    for supplement in &supplements {
+        let keep = supplement
+            .get("dispatch_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| entries.iter().any(|e| e.get("dispatch_id").and_then(Value::as_str) == Some(id)));
+        if keep {
+            out.push_str(&supplement.to_string());
+            out.push('\n');
+        }
+    }
+    if !matches!(
+        crate::pkfs::cas_write(&path, &existing, &out),
+        crate::pkfs::CasWriteOutcome::Swapped
+    ) {
+        return Ok(());
+    }
+    let count = entries.len() as u64;
+    let _ = write_head(cwd, count, count);
+    Ok(())
+}
 
 pub fn ledger_path(cwd: &str) -> String {
     if cwd.is_empty() {
@@ -219,70 +392,37 @@ pub fn record(
     let path = ledger_path(cwd);
     sweep_stale_spool_tmp(cwd, now_ms());
     let (body_text, body_truncated) = bounded_request_body(&ledger_request_body(verb, request_body));
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let existing = match host_read(&path) {
-            Some(text) => text,
-            None if host_stat(&path).is_none() => String::new(),
-            None => return Err(ledger_unavailable(&path)),
-        };
-        let parsed: Option<Vec<Value>> = if existing.trim().is_empty() {
-            Some(vec![])
-        } else {
-            match serde_json::from_str::<Value>(&existing) {
-                Ok(Value::Array(a)) => Some(a),
-                _ => None,
-            }
-        };
-        let ts = now_ms();
-        let Some(mut list) = parsed else {
-            return Err(ledger_unavailable(&path));
-        };
-        let seq = list.len() as u64;
-        let dispatch_id = new_dispatch_id(verb, fingerprint, ts, seq);
-        list.push(json!({
-            "dispatch_id": dispatch_id,
-            "verb": verb,
-            "fingerprint": fingerprint,
-            "ts": ts,
-            "exit_code": exit_code,
-            "output_bytes": output_bytes,
-            "session_id": session_id,
-            "cwd": cwd,
-            "request_body": body_text,
-            "request_body_truncated": body_truncated,
-        }));
-        list.retain(|e| {
-            e.get("ts")
-                .and_then(|v| v.as_u64())
-                .is_some_and(|t| t.saturating_add(RETAIN_MS) >= ts)
+    let entries_before = ensure_jsonl(cwd)?;
+    let ts = now_ms();
+    let head = crate::pkfs::read_to_string(&ledger_head_path(cwd))
+        .map(|raw| parse_head(&raw))
+        .unwrap_or(Head {
+            raw: String::new(),
+            entries: entries_before,
+            seq: entries_before,
         });
-        if list.len() > MAX_ENTRIES {
-            let cited = crate::orchestrator::prd::open_row_witness_dispatch_ids();
-            let mut excess = list.len() - MAX_ENTRIES;
-            list = list
-                .into_iter()
-                .filter(|e| {
-                    let is_cited = e
-                        .get("dispatch_id")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|id| cited.contains(id));
-                    if excess > 0 && !is_cited {
-                        excess -= 1;
-                        return false;
-                    }
-                    true
-                })
-                .collect();
-        }
-        let serialized = Value::Array(list).to_string();
-        match host_cas_write(&path, &existing, &serialized) {
-            CAS_SWAPPED => return Ok(dispatch_id),
-            CAS_MISMATCH if attempt < CAS_MAX_ATTEMPTS => continue,
-            _ => return Err(ledger_unavailable(&path)),
-        }
+    let dispatch_id = new_dispatch_id(verb, fingerprint, ts, head.seq);
+    let line = json!({
+        "dispatch_id": dispatch_id,
+        "verb": verb,
+        "fingerprint": fingerprint,
+        "ts": ts,
+        "exit_code": exit_code,
+        "output_bytes": output_bytes,
+        "session_id": session_id,
+        "cwd": cwd,
+        "request_body": body_text,
+        "request_body_truncated": body_truncated,
+    })
+    .to_string();
+    if !crate::pkfs::append(&path, &format!("{}\n", line)) {
+        return Err(ledger_unavailable(&path));
     }
+    let _ = write_head(cwd, head.entries + 1, head.seq + 1);
+    if head.entries as usize >= LEDGER_COMPACT_ENTRIES {
+        let _ = compact_ledger(cwd, ts);
+    }
+    Ok(dispatch_id)
 }
 
 fn ledger_unavailable(path: &str) -> String {
@@ -301,10 +441,57 @@ pub fn read_entries(cwd: &str) -> Result<Vec<Value>, String> {
     if raw.trim().is_empty() {
         return Ok(vec![]);
     }
-    match serde_json::from_str::<Value>(&raw) {
-        Ok(Value::Array(a)) => Ok(a),
-        _ => Err(ledger_unavailable(&path)),
+    if let Ok(Value::Array(list)) = serde_json::from_str::<Value>(&raw) {
+        return Ok(list);
     }
+    Ok(parse_ledger(&raw))
+}
+
+// Parses a JSONL ledger: entry lines in order, supplement lines merged into the entry they name.
+fn parse_ledger(raw: &str) -> Vec<Value> {
+    let mut entries: Vec<Value> = Vec::new();
+    let mut supplements: Vec<Value> = Vec::new();
+    let mut lines: Vec<&str> = raw.lines().collect();
+    // A torn last line is an interrupted append, not corruption: drop it and keep the rest.
+    if let Some(last) = lines.last() {
+        if !last.trim().is_empty() && serde_json::from_str::<Value>(last.trim()).is_err() {
+            lines.pop();
+        }
+    }
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if is_supplement(&entry) {
+            supplements.push(entry);
+        } else {
+            entries.push(entry);
+        }
+    }
+    for supplement in supplements {
+        let Some(id) = supplement.get("dispatch_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(target) = entries
+            .iter_mut()
+            .find(|e| e.get("dispatch_id").and_then(Value::as_str) == Some(id))
+        else {
+            continue;
+        };
+        let Some(map) = target.as_object_mut() else {
+            continue;
+        };
+        for key in ["reply_sha256", "spill_file"] {
+            if let Some(value) = supplement.get(key) {
+                map.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    entries
 }
 
 fn new_dispatch_id(verb: &str, fingerprint: &str, ts: u64, seq: u64) -> String {
@@ -316,10 +503,6 @@ fn new_dispatch_id(verb: &str, fingerprint: &str, ts: u64, seq: u64) -> String {
     format!("{}-{}-{:x}", ts, seq, h.finish())
 }
 
-const CAS_SWAPPED: u32 = 1;
-const CAS_MISMATCH: u32 = 2;
-const CAS_MAX_ATTEMPTS: u32 = 16;
-
 pub fn attach_reply_sha256(
     cwd: &str,
     dispatch_id: &str,
@@ -327,26 +510,18 @@ pub fn attach_reply_sha256(
     spill_file: Option<&str>,
 ) -> Result<(), String> {
     let path = ledger_path(cwd);
-    for _ in 0..CAS_MAX_ATTEMPTS {
-        let existing = host_read(&path).ok_or_else(|| ledger_unavailable(&path))?;
-        let Ok(Value::Array(mut list)) = serde_json::from_str::<Value>(&existing) else {
-            return Err(ledger_unavailable(&path));
-        };
-        let Some(entry) = list
-            .iter_mut()
-            .find(|e| e.get("dispatch_id").and_then(|v| v.as_str()) == Some(dispatch_id))
-        else {
-            return Err(format!("dispatch {dispatch_id} has no ledger row to attach its reply hash to"));
-        };
-        entry["reply_sha256"] = json!(reply_sha256);
-        if let Some(spill) = spill_file {
-            entry["spill_file"] = json!(spill);
-        }
-        if host_cas_write(&path, &existing, &Value::Array(list).to_string()) == CAS_SWAPPED {
-            return Ok(());
-        }
+    let mut supplement = json!({
+        "dispatch_id": dispatch_id,
+        "reply_sha256": reply_sha256,
+    });
+    if let Some(spill) = spill_file {
+        supplement["spill_file"] = json!(spill);
     }
-    Err(format!("reply hash for {dispatch_id} lost {CAS_MAX_ATTEMPTS} compare-and-swap races"))
+    if crate::pkfs::append(&path, &format!("{}\n", supplement)) {
+        Ok(())
+    } else {
+        Err(ledger_unavailable(&path))
+    }
 }
 
 pub fn subagent_running_count(
@@ -396,11 +571,10 @@ pub fn lookup_outside_root(cwd: &str, dispatch_id: &str) -> Result<Option<Value>
     let raw = host_read_via_exec(&path).ok_or_else(|| ledger_unavailable(&path))?;
     let entries = if raw.trim().is_empty() {
         Vec::new()
+    } else if let Ok(Value::Array(list)) = serde_json::from_str::<Value>(&raw) {
+        list
     } else {
-        match serde_json::from_str::<Value>(&raw) {
-            Ok(Value::Array(a)) => a,
-            _ => return Err(ledger_unavailable(&path)),
-        }
+        parse_ledger(&raw)
     };
     Ok(entries
         .into_iter()
