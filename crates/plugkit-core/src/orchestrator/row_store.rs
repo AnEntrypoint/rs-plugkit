@@ -1001,7 +1001,7 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0], stale_entry("row-x"));
         let latest = super::latest_in(&entries, "row-x").unwrap();
-        assert_eq!(latest["witness"].as_str(), Some("replay run output"));
+        assert_eq!(latest["row"]["witness"].as_str(), Some("replay run output"));
         assert_eq!(latest["corrects"]["sha256"].as_str(), Some(STALE_SHA));
         assert!(!super::is_stale_entry(&latest));
     }
