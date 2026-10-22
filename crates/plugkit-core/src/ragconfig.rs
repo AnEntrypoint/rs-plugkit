@@ -48,6 +48,7 @@ pub struct ScoringConfig {
     pub fusion_rrf_k: f64,
     pub fusion_identifier_boost: f64,
     pub fusion_vector_list_weight: f64,
+    pub promotion_margin: f64,
 }
 
 impl Default for ScoringConfig {
@@ -62,6 +63,7 @@ impl Default for ScoringConfig {
             fusion_rrf_k: rs_search::fusion::RRF_K,
             fusion_identifier_boost: rs_search::fusion::IDENTIFIER_BOOST,
             fusion_vector_list_weight: 1.0,
+            promotion_margin: 0.02,
         }
     }
 }
@@ -972,6 +974,12 @@ impl RagConfig {
         );
         overwrite_present_f64_or_record_problem(
             "scoring",
+            "promotion_margin",
+            &mut cfg.scoring.promotion_margin,
+            &mut problems,
+        );
+        overwrite_present_f64_or_record_problem(
+            "scoring",
             "recency_floor",
             &mut cfg.scoring.recency_floor,
             &mut problems,
@@ -1339,6 +1347,12 @@ impl RagConfig {
             return Err(format!(
                 "ragconfig: scoring.fusion_vector_list_weight {} must be non-negative; it multiplies the vector-search list's RRF contribution and a negative value would penalize vector matches instead of weighting them",
                 self.scoring.fusion_vector_list_weight
+            ));
+        }
+        if !(self.scoring.promotion_margin >= 0.0) {
+            return Err(format!(
+                "ragconfig: scoring.promotion_margin {} must be non-negative; a challenger is promoted only when its mean replay score exceeds the incumbent's by this margin, and a negative margin would promote a challenger that scores below the incumbent",
+                self.scoring.promotion_margin
             ));
         }
         if !(0.0..=1.0).contains(&self.scoring.bm25_b_document_length_normalization) {
