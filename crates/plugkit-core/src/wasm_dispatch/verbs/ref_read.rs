@@ -118,6 +118,42 @@ fn pathspec_of(body: &Value, keys: &[&str]) -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
+fn repo_of(path: &str) -> (Option<String>, String) {
+    let root = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    if let Some((head, rest)) = path.split_once('/') {
+        if !head.is_empty() && !rest.is_empty() && !root.is_empty() && crate::pkfs::exists(&format!("{root}/{head}/.git")) {
+            return (Some(head.to_string()), rest.to_string());
+        }
+    }
+    (None, path.to_string())
+}
+
+fn scoped_paths(paths: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+    let mut repo: Option<String> = None;
+    let mut inner = Vec::with_capacity(paths.len());
+    for (index, path) in paths.iter().enumerate() {
+        let (dir, rest) = repo_of(path);
+        if index > 0 && dir != repo {
+            return Err(format!(
+                "path {path} lies in another repository than the earlier paths; run one ref search per repository"
+            ));
+        }
+        repo = dir;
+        inner.push(rest);
+    }
+    Ok((repo, inner))
+}
+
+fn scope_cwd(repo: &Option<String>) -> Option<String> {
+    repo.as_ref().map(|dir| {
+        format!(
+            "{}/{}",
+            crate::wasm_dispatch::host_cwd_string().unwrap_or_default(),
+            dir
+        )
+    })
+}
+
 fn cap_of(body: &Value) -> usize {
     ["max_matches", "max_results", "maxResults", "limit", "head_limit", "k"]
         .iter()
@@ -126,10 +162,10 @@ fn cap_of(body: &Value) -> usize {
         .unwrap_or(DEFAULT_CAP)
 }
 
-fn resolve(rev: &str) -> Result<String, String> {
+fn resolve(rev: &str, cwd: Option<&str>) -> Result<String, String> {
     let spec = format!("{rev}^{{commit}}");
     let argv = ["rev-parse", "--verify", "--quiet", spec.as_str()];
-    let result = crate::wasm_dispatch::git_call_argv(&argv, None);
+    let result = crate::wasm_dispatch::git_call_argv(&argv, cwd);
     let exit = result.get("exit_code").and_then(Value::as_i64).unwrap_or(-1);
     let sha = result
         .get("stdout")
@@ -141,7 +177,7 @@ fn resolve(rev: &str) -> Result<String, String> {
         Ok(sha)
     } else {
         Err(format!(
-            "ref {rev} does not resolve to a commit in this repository (git rev-parse exit {exit}); a revision that exists only on origin needs git_fetch first"
+            "ref {rev} does not resolve to a commit in the repository holding the path (git rev-parse exit {exit}); a revision that exists only on origin needs git_fetch in that repository first"
         ))
     }
 }
@@ -152,12 +188,19 @@ struct Hit {
     text: String,
 }
 
-fn grep_at(sha: &str, mode_flag: &str, flags: &[&str], pattern: &str, pathspec: &[String]) -> Result<Vec<Hit>, String> {
+fn grep_at(
+    sha: &str,
+    mode_flag: &str,
+    flags: &[&str],
+    pattern: &str,
+    pathspec: &[String],
+    cwd: Option<&str>,
+) -> Result<Vec<Hit>, String> {
     let mut argv: Vec<&str> = vec!["grep", "-n", "--no-color", "-I", mode_flag];
     argv.extend_from_slice(flags);
     argv.extend_from_slice(&["-e", pattern, sha, "--"]);
     argv.extend(pathspec.iter().map(String::as_str));
-    let result = crate::wasm_dispatch::git_call_argv(&argv, None);
+    let result = crate::wasm_dispatch::git_call_argv(&argv, cwd);
     let exit = result.get("exit_code").and_then(Value::as_i64).unwrap_or(-1);
     if exit == 1 {
         return Ok(Vec::new());
@@ -233,20 +276,22 @@ fn codesearch_at_ref_data(body: &Value, requested: Result<String, String>) -> Re
     if body.get("whole_word").and_then(Value::as_bool).unwrap_or(false) {
         flags.push("-w");
     }
-    let pathspec = pathspec_of(body, &["path"])?;
-    let sha = resolve(&rev)?;
+    let (repo, pathspec) = scoped_paths(&pathspec_of(body, &["path"])?)?;
+    let cwd = scope_cwd(&repo);
+    let sha = resolve(&rev, cwd.as_deref())?;
     let cap = cap_of(body);
-    let hits = grep_at(&sha, mode_flag, &flags, query, &pathspec)?;
+    let hits = grep_at(&sha, mode_flag, &flags, query, &pathspec, cwd.as_deref())?;
     let total = hits.len();
     let (matches, truncated) = hit_values(&hits, cap);
     Ok(json!({
         "ref": rev,
         "ref_sha": sha,
+        "repo": repo.clone().unwrap_or_else(|| ".".to_string()),
         "mode": mode,
         "query": query,
         "pathspec": pathspec,
         "file_source": "git_ref",
-        "file_source_detail": "git grep at ref_sha; the worktree and index are not read",
+        "file_source_detail": "git grep at ref_sha in repo; the worktree and index are not read",
         "match_count": total,
         "returned": matches.len(),
         "matches": matches,
@@ -279,26 +324,28 @@ fn find_at(rev: &str, body: &Value) -> Result<Value, String> {
     if text_arg(body, &["kind"]).is_some() {
         return Err("codeinsight find with ref does not take kind: the definition match is keyword based, so kind is refused rather than ignored".to_string());
     }
-    let pathspec = pathspec_of(body, &["path", "path_prefix"])?;
-    let sha = resolve(rev)?;
+    let (repo, pathspec) = scoped_paths(&pathspec_of(body, &["path", "path_prefix"])?)?;
+    let cwd = scope_cwd(&repo);
+    let sha = resolve(rev, cwd.as_deref())?;
     let pattern = format!(
         "(^|[^[:alnum:]_])({}) +{}([^[:alnum:]_]|$)",
         DEFINITION_KEYWORDS_ERE, symbol
     );
     let cap = cap_of(body);
-    let hits = grep_at(&sha, "-E", &[], &pattern, &pathspec)?;
+    let hits = grep_at(&sha, "-E", &[], &pattern, &pathspec, cwd.as_deref())?;
     let total = hits.len();
     let (matches, truncated) = hit_values(&hits, cap);
     Ok(json!({
         "ref": rev,
         "ref_sha": sha,
+        "repo": repo.clone().unwrap_or_else(|| ".".to_string()),
         "action": "find",
         "symbol": symbol,
         "method": "heuristic: a definition keyword followed by the symbol, matched by git grep -E at ref_sha; not a parser",
         "approximate": true,
         "pathspec": pathspec,
         "file_source": "git_ref",
-        "file_source_detail": "git grep at ref_sha; the worktree and index are not read",
+        "file_source_detail": "git grep at ref_sha in repo; the worktree and index are not read",
         "match_count": total,
         "returned": matches.len(),
         "matches": matches,
@@ -333,10 +380,13 @@ fn outline_at(rev: &str, body: &Value) -> Result<Value, String> {
     if !safe_path(path) {
         return Err(format!("path {path} is not a safe repository-relative path"));
     }
-    let sha = resolve(rev)?;
-    let spec = format!("{sha}:{path}");
+    let (repo, inner) = scoped_paths(&[path.to_string()])?;
+    let inner_path = inner.into_iter().next().unwrap_or_default();
+    let cwd = scope_cwd(&repo);
+    let sha = resolve(rev, cwd.as_deref())?;
+    let spec = format!("{sha}:{inner_path}");
     let argv = ["show", spec.as_str()];
-    let result = crate::wasm_dispatch::git_call_argv(&argv, None);
+    let result = crate::wasm_dispatch::git_call_argv(&argv, cwd.as_deref());
     let exit = result.get("exit_code").and_then(Value::as_i64).unwrap_or(-1);
     if exit != 0 {
         let stderr = result.get("stderr").and_then(Value::as_str).unwrap_or("").trim();
@@ -359,6 +409,7 @@ fn outline_at(rev: &str, body: &Value) -> Result<Value, String> {
     Ok(json!({
         "ref": rev,
         "ref_sha": sha,
+        "repo": repo.unwrap_or_else(|| ".".to_string()),
         "action": "outline",
         "path": path,
         "line_count": line_count,
@@ -369,6 +420,6 @@ fn outline_at(rev: &str, body: &Value) -> Result<Value, String> {
         "approximate": true,
         "method": "heuristic: a line whose first token after modifiers is a definition keyword; not a parser",
         "file_source": "git_ref",
-        "file_source_detail": "git show at ref_sha; the worktree is not read",
+        "file_source_detail": "git show at ref_sha in repo; the worktree is not read",
     }))
 }
