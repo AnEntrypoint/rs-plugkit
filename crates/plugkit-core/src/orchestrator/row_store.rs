@@ -799,6 +799,125 @@ pub fn append_chained(
     Err(format!("append to {} failed: concurrent writer", log_path))
 }
 
+pub fn latest_in(entries: &[serde_json::Value], id: &str) -> Option<serde_json::Value> {
+    entries
+        .iter()
+        .rev()
+        .find(|entry| entry.get("id").and_then(|v| v.as_str()) == Some(id))
+        .cloned()
+}
+
+pub fn latest_entry(store: &Store, id: &str) -> Result<Option<serde_json::Value>, String> {
+    Ok(latest_in(&log_entries(store)?, id))
+}
+
+pub fn is_stale_entry(entry: &serde_json::Value) -> bool {
+    let stale_text = |text: Option<&str>| {
+        text.is_some_and(|t| t.trim().to_ascii_uppercase().starts_with("STALE"))
+    };
+    entry
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("stale"))
+        || stale_text(entry.get("note").and_then(|v| v.as_str()))
+        || stale_text(
+            entry
+                .get("row")
+                .and_then(|row| row.get("resolution"))
+                .and_then(|v| v.as_str()),
+        )
+}
+
+pub struct Authorized {
+    by: &'static str,
+}
+
+impl Authorized {
+    pub fn by(&self) -> &'static str {
+        self.by
+    }
+}
+
+pub fn authorize_correction(
+    prior: &serde_json::Value,
+    dispatch: Option<&serde_json::Value>,
+    resolver_session: Option<&str>,
+    binding_verified: bool,
+    has_evidence: bool,
+) -> Result<Authorized, String> {
+    if !is_stale_entry(prior) {
+        return Err("the latest resolution is not stale, so the row takes no correction".to_string());
+    }
+    if !has_evidence {
+        return Err("no witness_evidence text was supplied".to_string());
+    }
+    let row_session = prior
+        .get("row")
+        .and_then(|row| row.get("session_id"))
+        .and_then(|v| v.as_str());
+    let dispatch_session = dispatch
+        .and_then(|entry| entry.get("session_id"))
+        .and_then(|v| v.as_str());
+    if dispatch_session.is_some()
+        && dispatch_session != resolver_session
+        && dispatch_session != row_session
+    {
+        return Ok(Authorized { by: "ledger" });
+    }
+    if binding_verified {
+        return Ok(Authorized { by: "binding" });
+    }
+    Err(match dispatch {
+        Some(_) => "the witness_dispatch_id is in the ledger but has no session_id, or ran under the resolver's or the executor's session, and no verified witness_output_path matched its witness_output_sha256".to_string(),
+        None => "no witness_dispatch_id in the ledger under a session other than the resolver's, and no verified witness_output_path matched its witness_output_sha256".to_string(),
+    })
+}
+
+pub fn correction_entry(
+    prior: &serde_json::Value,
+    id: &str,
+    status: &str,
+    mut row: serde_json::Value,
+    authorized: &Authorized,
+) -> Result<serde_json::Value, String> {
+    if !is_stale_entry(prior) {
+        return Err(format!("{} is already resolved and its latest resolution is not stale", id));
+    }
+    let corrects = serde_json::json!({
+        "sha256": prior.get("sha256").cloned(),
+        "ts": prior.get("ts").cloned(),
+        "status": prior.get("status").cloned(),
+        "note": prior.get("note").cloned(),
+    });
+    let note = row.get("resolution").cloned();
+    if let Some(map) = row.as_object_mut() {
+        map.insert("corrects".to_string(), corrects.clone());
+        map.insert("witnessed_by".to_string(), serde_json::json!(authorized.by));
+    }
+    Ok(serde_json::json!({
+        "id": id,
+        "status": status,
+        "note": note,
+        "blocks": 0,
+        "row": row,
+        "material": [],
+        "corrects": corrects,
+    }))
+}
+
+pub fn append_correction(
+    store: &Store,
+    id: &str,
+    status: &str,
+    row: serde_json::Value,
+    authorized: &Authorized,
+) -> Result<serde_json::Value, String> {
+    let prior = latest_entry(store, id)?
+        .ok_or_else(|| format!("{} has no logged resolution to correct", id))?;
+    let entry = correction_entry(&prior, id, status, row, authorized)?;
+    append_log(store, entry)
+}
+
 pub fn retire_to_log(
     store: &Store,
     id: &str,
@@ -844,6 +963,80 @@ mod tests {
     fn item_stem_separates_ids_that_fold_to_one_name() {
         assert_ne!(item_stem("a/b"), item_stem("a-b"));
         assert!(item_stem("a/b").starts_with("a-b-"));
+    }
+
+    const STALE_SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn stale_entry(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "status": "completed",
+            "sha256": STALE_SHA,
+            "ts": "2026-10-20T21:08:33.370Z",
+            "note": "STALE: premise refuted by the source envelope",
+            "blocks": 1,
+            "row": {
+                "id": id,
+                "session_id": "drain-row",
+                "witness": "STALE (refuted premise)",
+                "resolution": "STALE: premise refuted by the source envelope"
+            }
+        })
+    }
+
+    fn ledger_entry(session: &str) -> serde_json::Value {
+        serde_json::json!({"dispatch_id": "1792609004526-950-d13b1980a322d0c", "session_id": session})
+    }
+
+    #[test]
+    fn stale_row_accepts_witnessed_correction_and_keeps_stale_entry() {
+        let mut entries = vec![stale_entry("row-x")];
+        let prior = super::latest_in(&entries, "row-x").unwrap();
+        let dispatch = ledger_entry("verify-row-x");
+        let authorized = super::authorize_correction(&prior, Some(&dispatch), Some("resolve-row-x"), false, true).unwrap();
+        assert_eq!(authorized.by(), "ledger");
+        let row = serde_json::json!({"id": "row-x", "witness": "replay run output", "resolution": "CORRECTION: live witness"});
+        let entry = super::correction_entry(&prior, "row-x", "completed", row, &authorized).unwrap();
+        entries.push(entry);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], stale_entry("row-x"));
+        let latest = super::latest_in(&entries, "row-x").unwrap();
+        assert_eq!(latest["witness"].as_str(), Some("replay run output"));
+        assert_eq!(latest["corrects"]["sha256"].as_str(), Some(STALE_SHA));
+        assert!(!super::is_stale_entry(&latest));
+    }
+
+    #[test]
+    fn stale_row_refuses_correction_without_witness() {
+        let entries = vec![stale_entry("row-y")];
+        let prior = super::latest_in(&entries, "row-y").unwrap();
+        assert!(super::authorize_correction(&prior, None, Some("resolve-row-y"), false, true).is_err());
+        assert!(super::authorize_correction(&prior, None, Some("resolve-row-y"), false, false).is_err());
+        let witnessed = ledger_entry("verify-row-y");
+        assert!(super::authorize_correction(&prior, Some(&witnessed), Some("resolve-row-y"), false, false).is_err());
+        let same_session = ledger_entry("resolve-row-y");
+        assert!(super::authorize_correction(&prior, Some(&same_session), Some("resolve-row-y"), false, true).is_err());
+        let executor = ledger_entry("drain-row");
+        assert!(super::authorize_correction(&prior, Some(&executor), Some("resolve-row-y"), false, true).is_err());
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn resolved_row_refuses_re_resolve_and_correction() {
+        let entries = vec![serde_json::json!({
+            "id": "row-z",
+            "status": "completed",
+            "sha256": STALE_SHA,
+            "ts": "2026-10-20T21:08:33.370Z",
+            "note": "fixed by commit abc1234",
+            "blocks": 1,
+            "row": {"id": "row-z", "session_id": "drain-row", "witness": "exec output", "resolution": "fixed by commit abc1234"}
+        })];
+        let prior = super::latest_in(&entries, "row-z").unwrap();
+        assert!(!super::is_stale_entry(&prior));
+        let witnessed = ledger_entry("verify-row-z");
+        assert!(super::authorize_correction(&prior, Some(&witnessed), Some("resolve-row-z"), true, true).is_err());
+        assert_eq!(entries.len(), 1);
     }
 
     #[test]
