@@ -629,16 +629,21 @@ fn exec_json_result(code: &str) -> Option<Value> {
         .filter(|result| result.get("ok").and_then(Value::as_bool) == Some(true))
 }
 
-pub fn host_write(path: &str, data: &str) -> bool {
-    let rc = unsafe {
+// Host write codes: 0 is a failure, 1 is success, 3 is StorageFull. host_write collapses them to a
+// bool for callers that only need success; host_write_code keeps the code for error reporting.
+pub fn host_write_code(path: &str, data: &str) -> u32 {
+    unsafe {
         host_fs_write(
             path.as_ptr(),
             path.len() as u32,
             data.as_ptr(),
             data.len() as u32,
         )
-    };
-    rc != 0
+    }
+}
+
+pub fn host_write(path: &str, data: &str) -> bool {
+    host_write_code(path, data) != 0
 }
 
 pub fn host_cas_write(path: &str, expected: &str, data: &str) -> u32 {

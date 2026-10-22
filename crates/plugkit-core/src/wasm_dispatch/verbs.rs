@@ -332,6 +332,10 @@ pub const ERR_CODE_DANGLING_REFERENCE: &str = "dangling_reference";
 pub const ERR_CODE_DANGLING_SCAN_UNREADABLE: &str = "dangling_scan_unreadable";
 pub const ERR_CODE_APPEND_ONLY_SHRINK: &str = "append_only_shrink_refused";
 pub const ERR_CODE_APPEND_ONLY_REWRITE: &str = "append_only_rewrite_refused";
+// Host write code 3 is StorageFull. A full disk is a different recovery from a refused write, so it
+// gets its own error_code instead of the generic "failed".
+pub const ERR_CODE_STORAGE_FULL: &str = "storage_full";
+pub const HOST_WRITE_STORAGE_FULL: u32 = 3;
 
 const APPEND_ONLY_PATH_SUFFIXES: &[&str] = &["/.gm/lean-walk/new-nodes.jsonl"];
 
@@ -1373,18 +1377,29 @@ fn fs_write(body: &Value) -> u64 {
             }),
         );
     }
-    if super::host_abi::host_write(path, &content) {
+    let write_code = super::host_abi::host_write_code(path, &content);
+    if write_code != 0 {
         return ok("fs_write", json!({ "bytes": content.len(), "path": path }));
     }
     let parents = ensure_parent_dirs(path);
-    if parents.get("ok").and_then(Value::as_bool) == Some(true)
-        && super::host_abi::host_write(path, &content)
-    {
+    let retried = if parents.get("ok").and_then(Value::as_bool) == Some(true) {
+        super::host_abi::host_write_code(path, &content)
+    } else {
+        0
+    };
+    if retried != 0 {
         return ok(
             "fs_write",
             json!({ "bytes": content.len(), "path": path, "parents_created": true }),
         );
     }
+    let failed_code = if retried != 0 {
+        0
+    } else if write_code == HOST_WRITE_STORAGE_FULL {
+        write_code
+    } else {
+        0
+    };
     let cause = parents
         .get("error")
         .and_then(Value::as_str)
@@ -1393,7 +1408,12 @@ fn fs_write(body: &Value) -> u64 {
         "fs_write",
         json!({
             "error": format!("write failed for {path}: {cause}"),
-            "error_code": parents.get("code").and_then(Value::as_str).unwrap_or(ERR_CODE_FAILED),
+            "error_code": if failed_code == HOST_WRITE_STORAGE_FULL {
+                ERR_CODE_STORAGE_FULL
+            } else {
+                parents.get("code").and_then(Value::as_str).unwrap_or(ERR_CODE_FAILED)
+            },
+            "host_write_code": write_code,
             "path": path,
             "blocking_path": parents.get("blocking").cloned().unwrap_or(Value::Null),
             "next_dispatch": "fs_stat",
@@ -1582,7 +1602,15 @@ catch(e){process.stdout.write(JSON.stringify({ok:false,error:String((e&&e.code)|
                     path,
                     result.get("error").and_then(Value::as_str).unwrap_or("unknown")
                 ),
-                "error_code": ERR_CODE_FAILED,
+                "error_code": if result
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.eq_ignore_ascii_case("ENOSPC"))
+                {
+                    ERR_CODE_STORAGE_FULL
+                } else {
+                    ERR_CODE_FAILED
+                },
                 "path": path,
                 "next_dispatch": "fs_write",
             }),
