@@ -2783,6 +2783,7 @@ fn correct_stale_row(trimmed: &str, id_target: &str) -> (String, String, i32) {
     } else {
         None
     };
+    #[cfg(target_arch = "wasm32")]
     let dispatch_entry = match witness_dispatch_id.as_deref() {
         None => None,
         Some(dispatch_id) => match crate::dispatch_ledger::lookup("", dispatch_id) {
@@ -2790,6 +2791,8 @@ fn correct_stale_row(trimmed: &str, id_target: &str) -> (String, String, i32) {
             Err(detail) => return ledger_unreadable_refusal("", &detail),
         },
     };
+    #[cfg(not(target_arch = "wasm32"))]
+    let dispatch_entry: Option<serde_json::Value> = None;
     let authorized = match row_store::authorize_correction(
         &latest,
         dispatch_entry.as_ref(),
