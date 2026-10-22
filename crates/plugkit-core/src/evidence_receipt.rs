@@ -45,7 +45,12 @@ pub fn write() -> Value {
     let entries = crate::dispatch_ledger::read_entries("");
     let ledger_present = host_stat(LEDGER_PATH).is_some();
     let (ledger_hash, ledger_unreadable) = match (&entries, host_read(LEDGER_PATH), ledger_present) {
-        (Err(_), _, _) => (Value::Null, None),
+        (Err(_), _, _) => (
+            Value::Null,
+            Some(format!(
+                "dispatch ledger {LEDGER_PATH} could not be read as a ledger; its hash is unknown, not zero"
+            )),
+        ),
         (Ok(_), Some(raw), _) => (json!(ledger_hash_hex(&raw)), None),
         (Ok(_), None, true) => (
             Value::Null,
