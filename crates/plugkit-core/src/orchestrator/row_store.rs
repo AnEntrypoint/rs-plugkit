@@ -836,12 +836,28 @@ pub fn compact_log_inner(store: &Store, force: bool) -> Result<bool, String> {
             return Ok(false);
         }
     }
+    // The retained suffix is rechained from the origin, so the active log is a standalone chain and
+    // does not point into what moved out.
     let mut out = String::new();
-    for line in &lines[split..] {
-        out.push_str(line);
+    let mut retained_prev = "0".repeat(64);
+    for (_slot, index) in keep.iter().enumerate().skip(split) {
+        let mut entry = entries[*index].clone();
+        entry["prev"] = serde_json::json!(retained_prev);
+        if let Some(map) = entry.as_object_mut() {
+            map.remove("sha256");
+        }
+        let body = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
+        let hash = sha256_hex(&body);
+        entry["sha256"] = serde_json::json!(hash);
+        let line = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
+        retained_prev = sha256_hex(&line);
+        out.push_str(&line);
         out.push('\n');
+        if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
+            let _ = write_log_sidecar(store, id, &entry);
+        }
     }
-    for (slot, index) in keep.iter().enumerate() {
+    for (slot, index) in keep.iter().enumerate().take(split) {
         let Some(id) = entries[*index].get("id").and_then(|v| v.as_str()) else {
             continue;
         };
