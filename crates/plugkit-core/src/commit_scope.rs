@@ -74,3 +74,34 @@ pub fn unrequested_stage_refusal(verb: &str, requested: &[String], extra: &[Stri
         "next_dispatch": verb,
     })
 }
+
+pub fn unrequested_stage_refusal_owned(
+    verb: &str,
+    requested: &[String],
+    extra: &[String],
+    owners: &[(String, Option<String>)],
+) -> Value {
+    let mut refusal = unrequested_stage_refusal(verb, requested, extra);
+    if owners.is_empty() {
+        return refusal;
+    }
+    let named: Vec<String> = owners
+        .iter()
+        .map(|(path, owner)| match owner {
+            Some(session) => format!("{path} (staged by session {session})"),
+            None => format!("{path} (owner not recorded)"),
+        })
+        .collect();
+    refusal["error"] = json!(format!(
+        "{} staged {} path(s) outside the requested pathspec(s) {}: {}. Nothing was committed. Add them to paths if they are yours, or commit them separately.",
+        verb,
+        extra.len(),
+        requested.join(", "),
+        named.join(", ")
+    ));
+    refusal["staged_outside_requested_owners"] = json!(owners
+        .iter()
+        .map(|(path, owner)| json!({ "path": path, "session": owner }))
+        .collect::<Vec<Value>>());
+    refusal
+}

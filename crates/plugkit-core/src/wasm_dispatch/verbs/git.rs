@@ -2219,6 +2219,7 @@ pub(super) fn git_add(body: &Value) -> u64 {
             owned.sort();
             owned.dedup();
             git_add_staged_record(cwd, &session, &owned);
+            git_add_owner_record(cwd, &session, &staged);
         }
         let unmatched = pathspecs_matching_nothing(cwd, &paths);
         if !paths.is_empty()
@@ -3415,6 +3416,29 @@ pub(super) fn git_add_staged_record(cwd: Option<&str>, session: &str, staged: &[
     git_async_kv_put(GIT_ADD_STAGED_NS, &git_add_staged_key(cwd, session), &record);
 }
 
+pub(super) const GIT_ADD_OWNER_NS: &str = "git_add_owner";
+
+pub(super) fn git_add_owner_key(cwd: Option<&str>, path: &str) -> String {
+    format!("{}\u{1f}{}", cwd.unwrap_or(""), path)
+}
+
+pub(super) fn git_add_owner_record(cwd: Option<&str>, session: &str, staged: &[String]) {
+    for path in staged {
+        git_async_kv_put(GIT_ADD_OWNER_NS, &git_add_owner_key(cwd, path), session);
+    }
+}
+
+pub(super) fn git_add_owners_of(cwd: Option<&str>, paths: &[String]) -> Vec<(String, Option<String>)> {
+    paths
+        .iter()
+        .map(|path| {
+            let owner = super::host_abi::host_kv_read(GIT_ADD_OWNER_NS, &git_add_owner_key(cwd, path))
+                .filter(|s| !s.is_empty());
+            (path.clone(), owner)
+        })
+        .collect()
+}
+
 pub(super) fn git_add_staged_recorded(cwd: Option<&str>, session: &str) -> Vec<String> {
     let Some(record) = super::host_abi::host_kv_read(GIT_ADD_STAGED_NS, &git_add_staged_key(cwd, session))
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
@@ -3687,7 +3711,8 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 .collect()
         };
         if !left_staged.is_empty() && !allow_whole_index {
-            return Ok(err_json("git_commit", unrequested_stage_refusal("git_commit", &paths, &left_staged)));
+            let owners = git_add_owners_of(cwd, &left_staged);
+            return Ok(err_json("git_commit", unrequested_stage_refusal_owned("git_commit", &paths, &left_staged, &owners)));
         }
         if merge_pending && !add_all && paths.is_empty() && !allow_whole_index {
             let incoming: Vec<String> = git_step_replayed_by_call_order(
