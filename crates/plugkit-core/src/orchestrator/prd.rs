@@ -2740,6 +2740,196 @@ fn scratch_witness_root(root: &str) -> Option<String> {
     (inside_tmp && !escapes).then(|| root.to_string())
 }
 
+fn correct_stale_row(trimmed: &str, id_target: &str) -> (String, String, i32) {
+    let store = row_store::Store::prd();
+    let latest = match row_store::latest_entry(&store, id_target) {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return (String::new(), format!("prd id not found: {}", id_target), 1),
+        Err(message) => return (String::new(), message, 1),
+    };
+    let parsed = parse_resolve_target(trimmed);
+    let witness = parsed.1.map(|w| w.trim().to_string()).filter(|w| !w.is_empty());
+    let commit_comment = parsed.2.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+    let witness_dispatch_id = parsed.3.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+    let resolution = parsed.5.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+    let status = parsed
+        .7
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "completed".to_string());
+    let request = request_object(trimmed);
+    let resolver = body_session_id(&request).or_else(crate::orchestrator::state::dispatch_session_id);
+    let binding = if WITNESS_BINDING_FIELDS
+        .iter()
+        .any(|field| request.get(*field).is_some_and(|v| !v.is_null()))
+    {
+        match verify_correction_binding(&request) {
+            Ok(binding) => Some(binding),
+            Err((field, reason)) => {
+                let message = format!("prd-resolve refused: {} is invalid for {}: {}", field, id_target, reason);
+                let body = serde_json::json!({
+                    "error": message.clone(),
+                    "deviation_kind": "prd-resolve-witness-binding-invalid",
+                    "deviation_severity": "deny",
+                    "prd_id": id_target,
+                    "field": field,
+                    "reason": reason,
+                    "hint": WITNESS_BINDING_HINT,
+                })
+                .to_string();
+                return (body, message, 1);
+            }
+        }
+    } else {
+        None
+    };
+    let dispatch_entry = match witness_dispatch_id.as_deref() {
+        None => None,
+        Some(dispatch_id) => match crate::dispatch_ledger::lookup("", dispatch_id) {
+            Ok(entry) => entry,
+            Err(detail) => return ledger_unreadable_refusal("", &detail),
+        },
+    };
+    let authorized = match row_store::authorize_correction(
+        &latest,
+        dispatch_entry.as_ref(),
+        resolver.as_deref(),
+        binding.is_some(),
+        witness.is_some(),
+    ) {
+        Ok(authorized) => authorized,
+        Err(reason) => {
+            let message = format!(
+                "prd-resolve refused: {} is already resolved and its latest resolution is stale; a correction needs witness_evidence and either a witness_dispatch_id of a live run in the ledger under a session other than the resolver's, or a witness_output_path whose sha256 matches witness_output_sha256 under the project root ({})",
+                id_target, reason
+            );
+            let body = serde_json::json!({
+                "error": message.clone(),
+                "deviation_kind": "prd-resolve-already-resolved",
+                "deviation_severity": "deny",
+                "prd_id": id_target,
+                "status": latest.get("status").cloned(),
+                "correction_refused": reason,
+                "witness_dispatch_id": witness_dispatch_id,
+            })
+            .to_string();
+            return (body, message, 1);
+        }
+    };
+    let resolution = resolution.unwrap_or_else(|| {
+        format!(
+            "CORRECTION: witnessed by {}; the stale resolution stays in the log and this entry supersedes it.",
+            authorized.by()
+        )
+    });
+    let row = serde_json::json!({
+        "id": id_target,
+        "corrective": true,
+        "witness": witness,
+        "witness_dispatch_id": witness_dispatch_id,
+        "witness_dispatch_session": dispatch_entry
+            .as_ref()
+            .and_then(|entry| entry.get("session_id"))
+            .cloned(),
+        "witness_binding": binding,
+        "commit_comment": commit_comment,
+        "resolution": resolution,
+    });
+    match row_store::append_correction(&store, id_target, &status, row, &authorized) {
+        Ok(entry) => {
+            let reply = serde_json::json!({
+                "corrected": id_target,
+                "status": status,
+                "witnessed_by": authorized.by(),
+                "stale_entry_kept": true,
+                "corrects_sha256": latest.get("sha256").cloned(),
+                "filed_to": ".gm/prd-log.jsonl",
+                "filed_at": entry.get("ts").cloned(),
+            });
+            (reply.to_string(), String::new(), 0)
+        }
+        Err(reason) => (
+            String::new(),
+            format!("prd-resolve refused: correction for {} was not filed: {}", id_target, reason),
+            1,
+        ),
+    }
+}
+
+fn verify_correction_binding(
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, (&'static str, String)> {
+    use sha2::{Digest, Sha256};
+    if let Some(code) = request.get("witness_exit_code").filter(|v| !v.is_null()) {
+        if code.as_i64() != Some(0) {
+            return Err((
+                "witness_exit_code",
+                format!("exit code {} is not 0 -- a witness closes a row only with exit code 0", code),
+            ));
+        }
+    }
+    let output_sha256 = request
+        .get("witness_output_sha256")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !is_sha256_hex(&output_sha256) {
+        return Err((
+            "witness_output_sha256",
+            "must be 64 lowercase hex characters, the sha256 of the witness output file".to_string(),
+        ));
+    }
+    let output_path = request
+        .get("witness_output_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !is_relative_project_path(&output_path) {
+        return Err((
+            "witness_output_path",
+            format!("must be a relative path inside the project root with no .. segments (received {:?})", output_path),
+        ));
+    }
+    let ts = request
+        .get("witness_ts")
+        .and_then(|v| v.as_str())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    if ts.as_deref().is_some_and(|t| !is_rfc3339_timestamp(t)) {
+        return Err((
+            "witness_ts",
+            "must be an RFC 3339 timestamp such as 2026-10-09T13:44:57Z".to_string(),
+        ));
+    }
+    let content = pkfs::read_to_string(&output_path).ok_or_else(|| {
+        (
+            "witness_output_path",
+            format!("output file {} is not readable under the project root", output_path),
+        )
+    })?;
+    if content.len() > WITNESS_OUTPUT_MAX_BYTES {
+        return Err((
+            "witness_output_path",
+            format!("output file {} is larger than {} bytes", output_path, WITNESS_OUTPUT_MAX_BYTES),
+        ));
+    }
+    let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+    if digest != output_sha256 {
+        return Err((
+            "witness_output_sha256",
+            format!("sha256 of {} is {}, not the claimed {}", output_path, digest, output_sha256),
+        ));
+    }
+    Ok(serde_json::json!({
+        "exit_code": 0,
+        "output_sha256": output_sha256,
+        "output_path": output_path,
+        "ts": ts,
+    }))
+}
+
 pub fn handle_resolve(content: &str) -> (String, String, i32) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -2809,6 +2999,9 @@ pub fn handle_resolve(content: &str) -> (String, String, i32) {
         };
         if !open_here {
             if let Ok(Some(logged)) = row_store::log_row(&closed_store, &id_target) {
+                if row_store::latest_entry(&closed_store, &id_target).ok().flatten().is_some_and(|raw| row_store::is_stale_entry(&raw)) {
+                    return correct_stale_row(trimmed, &id_target);
+                }
                 let status = logged.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let body = serde_json::json!({
                     "error": format!(
