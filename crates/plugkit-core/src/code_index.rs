@@ -5030,10 +5030,12 @@ fn insert_nested_worktree_fields(out: &mut serde_json::Map<String, Value>, neste
     out.insert("nested_worktrees".to_string(), json!(nested_worktrees));
     if untracked_failed {
         out.insert("nested_worktrees_unlisted".to_string(), json!(true));
-        let named = failed_paths.iter().take(NESTED_UNLISTED_PATHS_REPORT_CAP).map(String::as_str).collect::<Vec<_>>().join(", ");
         out.insert(
             "nested_worktrees_note".to_string(),
-            json!(format!("{}; unlisted nested worktree(s): {}", crate::scan_universe::NESTED_WORKTREE_BLIND_SPOT_NOTE, named)),
+            json!(format!(
+                "{}; the unlisted paths are in nested_worktrees_unlisted_paths",
+                crate::scan_universe::NESTED_WORKTREE_BLIND_SPOT_NOTE
+            )),
         );
         out.insert(
             "nested_worktrees_unlisted_paths".to_string(),
