@@ -88,8 +88,7 @@ fn evaluate(content: &str) -> Result<Value, String> {
         }));
     }
     let lost_cursor = round.lost_cursor;
-    let probe_baseline = round.baseline_score;
-    let probe_ranked = round.ranked_scores;
+    let probe_scores = round.scores;
     let mut fields = round.summary;
     fields["partial_window"] = json!(lost_cursor.is_some());
     fields["lost_cursor"] = json!(lost_cursor);
@@ -103,7 +102,7 @@ fn evaluate(content: &str) -> Result<Value, String> {
         fields.as_object().cloned().unwrap_or_default(),
     );
     if persisted.is_ok() {
-        super::dream_rsi::update_probe(owner, probe_baseline, &probe_ranked);
+        super::dream_rsi::update_probe(owner, &fields, probe_scores.as_ref());
     }
     match persisted {
         Ok(replay_result_path) => Ok(json!({

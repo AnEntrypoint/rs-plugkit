@@ -1082,8 +1082,14 @@ pub struct HistoryRound {
     pub summary: Value,
     pub lost_cursor: Option<String>,
     pub no_replayable_worlds: bool,
-    pub baseline_score: Option<f64>,
-    pub ranked_scores: Vec<(String, f64)>,
+    pub scores: Option<ReplayScores>,
+}
+
+pub struct ReplayScores {
+    pub baseline: Option<f64>,
+    pub selected_policy_id: String,
+    pub selected: Option<f64>,
+    pub ranked: Vec<(String, f64)>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1111,8 +1117,7 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
             summary: json!({ "history": history, "incumbent_policy_id": incumbent.id, "candidates": candidates.len() }),
             lost_cursor: lost_cursor.clone(),
             no_replayable_worlds: true,
-            baseline_score: None,
-            ranked_scores: Vec::new(),
+            scores: None,
         });
     }
     let candidate_count = candidates.len();
@@ -1155,8 +1160,12 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
         latest_dispatch_id,
         lost_cursor,
         no_replayable_worlds: false,
-        baseline_score: Some(baseline_score),
-        ranked_scores: replay.rankings.iter().map(|ranking| (ranking.policy_id.clone(), ranking.score)).collect(),
+        scores: Some(ReplayScores {
+            baseline: Some(baseline_score),
+            selected_policy_id: selected_id.clone(),
+            selected: Some(selected_score),
+            ranked: replay.rankings.iter().map(|ranking| (ranking.policy_id.clone(), ranking.score)).collect(),
+        }),
         summary: json!({
             "selection": if improved { "propose-challenger" } else { "keep-incumbent" },
             "incumbent_policy_id": incumbent.id,
@@ -1393,15 +1402,18 @@ pub const PROJECT_WIDE_SESSION: &str = "_any-session";
 pub const PROBE_STRATEGY_FILE: &str = "probe-strategy.json";
 
 #[cfg(target_arch = "wasm32")]
-pub(super) fn update_probe(owner: &str, baseline: Option<f64>, ranked_scores: &[(String, f64)]) {
+pub(super) fn update_probe(owner: &str, fields: &Value, scores: Option<&ReplayScores>) {
+    let Some(scores) = scores else { return };
     let path = session_store_path(owner, PROBE_STRATEGY_FILE);
+    let baseline = scores.baseline;
     if crate::pkfs::exists(&path) {
         let probe = crate::pkfs::read_to_string(&path).and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
         let probe_score = probe
             .as_ref()
             .and_then(|probe| probe.get("policy_id")?.as_str())
             .and_then(|policy| {
-                ranked_scores
+                scores
+                    .ranked
                     .iter()
                     .find(|(policy_id, _)| policy_id == policy)
                     .and_then(|(_, score)| finite_score(*score))
@@ -1424,9 +1436,9 @@ pub(super) fn update_probe(owner: &str, baseline: Option<f64>, ranked_scores: &[
             "kind": "probe-strategy",
             "scope": "session",
             "owner_session_id": owner,
-            "policy_id": fields.get("selected_policy_id"),
+            "policy_id": scores.selected_policy_id,
             "baseline_score": baseline,
-            "selected_score": fields.get("selected_score"),
+            "selected_score": scores.selected,
             "n_observations": observations,
             "ts": super::state::now_ms() as i64,
         });
