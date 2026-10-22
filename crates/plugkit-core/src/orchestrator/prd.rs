@@ -739,10 +739,9 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
         })
         .collect();
     let store = row_store::Store::prd();
-    let log = match row_store::read_log(&store) {
-        Ok(log) => log,
-        Err(message) => return (String::new(), message, 1),
-    };
+    // The log is read only when a lookup needs it. It used to be parsed here on every listing just to
+    // report dropped_torn_lines, which cost a full read of a file that grows with every resolution.
+    let dropped_torn_lines = row_store::log_torn_count(&store);
     let mut selected = selected;
     if !wanted_ids.is_empty() {
         for want in &wanted_ids {
@@ -762,9 +761,40 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
                 .iter()
                 .any(|want| closed.iter().any(|c| c.eq_ignore_ascii_case(want)))
         {
-            let logged = match row_store::log_rows_with_status(&store, &closed) {
-                Ok(logged) => logged,
+            // A plain "every status" listing with a limit reads only the page it will return: the
+            // resolved rows land after the open ones, so the window they can occupy is known here.
+            // Any later filter (a query, an id prefix, a cause grouping) would move that window, so
+            // those listings still ask for every resolved row.
+            let needle = request
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .map(|text| text.trim().to_lowercase())
+                .filter(|text| !text.is_empty());
+            let list_offset = match request_offset(&request) {
+                Ok(offset) => offset,
                 Err(message) => return (String::new(), message, 1),
+            };
+            let open_len = selected.len();
+            let page = if every_status
+                && id_prefixes.is_empty()
+                && needle.is_none()
+                && !group_by_cause
+            {
+                limit.map(|n| (list_offset.saturating_sub(open_len), n))
+            } else {
+                None
+            };
+            let logged = match page {
+                Some((start, count)) => {
+                    match row_store::log_rows_with_status_paged(&store, &closed, start, Some(count)) {
+                        Ok(logged) => logged,
+                        Err(message) => return (String::new(), message, 1),
+                    }
+                }
+                None => match row_store::log_rows_with_status(&store, &closed) {
+                    Ok(logged) => logged,
+                    Err(message) => return (String::new(), message, 1),
+                },
             };
             for row in logged {
                 if every_status
@@ -857,8 +887,8 @@ pub fn handle_list(content: &str) -> (String, String, i32) {
     if !skipped_rows.is_empty() {
         reply["skipped_rows"] = skipped_rows_json(&skipped_rows);
     }
-    if log.dropped_torn_lines > 0 {
-        reply["dropped_torn_lines"] = serde_json::json!(log.dropped_torn_lines);
+    if dropped_torn_lines > 0 {
+        reply["dropped_torn_lines"] = serde_json::json!(dropped_torn_lines);
         reply["dropped_torn_lines_sidecar"] = serde_json::json!(".gm/prd-log.jsonl.torn");
     }
     (reply.to_string(), String::new(), 0)
