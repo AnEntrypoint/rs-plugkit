@@ -1397,6 +1397,12 @@ pub(super) fn compact_active_strategy(strategy: Value) -> Value {
     ] {
         insert_if_present(&mut out, wire, map.get(raw));
     }
+    insert_if_present(
+        &mut out,
+        "selected_policy_id",
+        map.get("selected_policy_id")
+            .or_else(|| map.get("policy").and_then(|policy| policy.get("id"))),
+    );
     out.insert("evidence_rows".to_string(), json!(evidence_rows));
     Value::Object(out)
 }
