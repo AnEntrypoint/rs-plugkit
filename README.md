@@ -32,7 +32,7 @@ write.
 `after_dispatch_id`. The owner is a nonempty ASCII path component of at most 256
 bytes containing letters, digits, dots, underscores or hyphens, but not `.` or `..`.
 Supplied optional IDs must be nonempty strings, bounded to
-128 and 512 bytes respectively; malformed input fails. It summarizes up to eight
+128 and 512 bytes respectively; malformed input fails. The replay cursor is the owner's `cycle-result.json` `last_dispatch_id`; `after_dispatch_id` is read only while that file is absent. It summarizes up to eight
 recent recorded observations using
 same-owner completed dispatch-ledger evidence; it does not execute tools, evaluate
 sealed worlds, register policies or deploy strategies. A successful new summary

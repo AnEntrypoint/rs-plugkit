@@ -58,9 +58,8 @@ fn evaluate(content: &str) -> Result<Value, String> {
     let after = optional_id(&body, "after_dispatch_id", 512)?;
     let beta1 = optional_beta(&body, "beta1", super::dream_rsi::DEFAULT_CYCLE_BETA1)?;
     let beta2 = optional_beta(&body, "beta2", super::dream_rsi::DEFAULT_CYCLE_BETA2)?;
-    let stored = stored_cursor(owner);
-    let daemon = owner_cursor(owner, ".cycle-state.json");
-    let round = match super::dream_rsi::history_round(owner, after.or(stored.as_deref()), beta1, beta2) {
+    let cursor = stored_cursor(owner).or_else(|| after.map(str::to_owned));
+    let round = match super::dream_rsi::history_round(owner, cursor.as_deref(), beta1, beta2) {
         Ok(round) => round,
         Err(error) if error.starts_with(super::dream_rsi::POSTCONDITION_FAILED) => {
             return Ok(refused(owner, cycle_id, error));
@@ -70,13 +69,7 @@ fn evaluate(content: &str) -> Result<Value, String> {
     let latest = round.latest_dispatch_id.as_deref();
     let reason = match latest {
         None => Some("no-verified-observations"),
-        Some(latest)
-            if Some(latest) == after
-                || Some(latest) == stored.as_deref()
-                || Some(latest) == daemon.as_deref() =>
-        {
-            Some("no-new-verified-observations")
-        }
+        Some(latest) if Some(latest) == cursor.as_deref() => Some("no-new-verified-observations"),
         Some(_) if round.no_replayable_worlds => Some("no-replayable-worlds"),
         Some(_) => None,
     };
