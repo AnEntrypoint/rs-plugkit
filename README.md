@@ -394,6 +394,8 @@ under `.agentplug*` is refused rather than silently widening. A scoped
 `nothing_to_commit`, so a pathspec that no-ops cannot fall through to
 committing the rest of the index.
 
+A `git_pull` that completes without an autostash conflict replies with `phases`: `probe_ms` covers the status and incoming-path probes before the pull, `child_ms` is the `git pull` child, `post_ms` is the HEAD and merge record after it, and `total_ms` is the verb's time in the guest.
+
 `git_commit {patch}` takes a unified diff against HEAD and `git_commit {hunks: {<path>: [<1-based hunk numbers>]}}` takes hunk numbers from `git diff HEAD -- <path>`; exactly one of the two, and neither with `paths`, `files`, `add_all`, `amend` or `allow_empty`. The commit is built in a temporary index, so the work tree is untouched, and the reply reports `index_synced`, `index_left_staged` and `selected_hunks`. `git_log` takes `max_count` (aliases `n`, `limit`, `count`); `git_fetch` takes the refspec as `ref`, `rev` or `refspec`; `git_show` pages with `offset` and reports `total_bytes` and `next_offset`. Commit identity (`author_name`/`author_email` in the body, then `git.author_name`/`git.author_email` in gm config, then the built-in default) is passed as `-c user.*`, `-c author.*` and `-c committer.*` on every invocation that writes a commit: `git_commit`, `git_pull`, `git_merge`, `git_cherry_pick`, `git_revert` and reland.
 
 `git_rewrite_authors` rewrites main's history: dry run by default (lists the
