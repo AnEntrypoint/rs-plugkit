@@ -320,7 +320,12 @@ const CAS_SWAPPED: u32 = 1;
 const CAS_MISMATCH: u32 = 2;
 const CAS_MAX_ATTEMPTS: u32 = 16;
 
-pub fn attach_reply_sha256(cwd: &str, dispatch_id: &str, reply_sha256: &str) -> Result<(), String> {
+pub fn attach_reply_sha256(
+    cwd: &str,
+    dispatch_id: &str,
+    reply_sha256: &str,
+    spill_file: Option<&str>,
+) -> Result<(), String> {
     let path = ledger_path(cwd);
     for _ in 0..CAS_MAX_ATTEMPTS {
         let existing = host_read(&path).ok_or_else(|| ledger_unavailable(&path))?;
@@ -334,6 +339,9 @@ pub fn attach_reply_sha256(cwd: &str, dispatch_id: &str, reply_sha256: &str) -> 
             return Err(format!("dispatch {dispatch_id} has no ledger row to attach its reply hash to"));
         };
         entry["reply_sha256"] = json!(reply_sha256);
+        if let Some(spill) = spill_file {
+            entry["spill_file"] = json!(spill);
+        }
         if host_cas_write(&path, &existing, &Value::Array(list).to_string()) == CAS_SWAPPED {
             return Ok(());
         }

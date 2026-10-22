@@ -3441,7 +3441,14 @@ fn dispatch_verb_inner(verb_ptr: u32, verb_len: u32, body_ptr: u32, body_len: u3
             use sha2::Digest;
             format!("{:x}", sha2::Sha256::digest(reply.as_bytes()))
         };
-        if let Err(reason) = crate::dispatch_ledger::attach_reply_sha256(&record_root, &dispatch_id, &reply_sha) {
+        let spill_file = if reply.contains("\"spill_file\"") {
+            serde_json::from_str::<serde_json::Value>(&reply)
+                .ok()
+                .and_then(|v| v.get("spill_file").and_then(serde_json::Value::as_str).map(str::to_owned))
+        } else {
+            None
+        };
+        if let Err(reason) = crate::dispatch_ledger::attach_reply_sha256(&record_root, &dispatch_id, &reply_sha, spill_file.as_deref()) {
             if let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(&reply) {
                 map.insert("reply_attach_failed".to_string(), serde_json::Value::String(reason));
                 reply = serde_json::Value::Object(map).to_string();
