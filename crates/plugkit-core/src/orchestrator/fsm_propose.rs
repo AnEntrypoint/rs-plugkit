@@ -157,6 +157,7 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
         return (
             json!({
                 "ok": false,
+                "error_code": "override_missing_fields",
                 "error": format!(
                     "fsm-propose-override rejected: {} required field(s) missing or invalid -- every required field and its accepted shape is listed here, so fix all in one pass; this shape is static and never needs two round trips. Missing: {}",
                     missing.len(),
@@ -183,7 +184,7 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
         OverrideKind::Prose => {
             if key.trim().is_empty() {
                 return (
-                    json!({ "ok": false, "error": "kind=prose requires body.key naming the prose key (e.g. \"specify\")" }).to_string(),
+                    json!({ "ok": false, "error_code": "prose_key_required", "error": "kind=prose requires body.key naming the prose key (e.g. \"specify\")" }).to_string(),
                     String::new(),
                     1,
                 );
@@ -192,7 +193,7 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
                 Ok(p) => p,
                 Err(e) => {
                     return (
-                        json!({ "ok": false, "error": e }).to_string(),
+                        json!({ "ok": false, "error_code": "override_refused", "error": e }).to_string(),
                         String::new(),
                         1,
                     )
@@ -232,6 +233,7 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
         return (
             json!({
                 "ok": false,
+                "error_code": "override_validation_failed",
                 "proposed": false,
                 "error": "proposed override fails validation -- fix and re-propose, never trust an unparsed/inconsistent artifact",
                 "validation_problems": validation_problems,
@@ -288,6 +290,7 @@ pub fn handle_propose(content: &str) -> (String, String, i32) {
             return (
                 json!({
                     "ok": false,
+                    "error_code": "confirmation_witness_required",
                     "error": "kind=graph with user_confirmed:true also requires body.confirmation_witness citing the AskUserQuestion dispatch that obtained consent -- execution-authority writes are never applied on a bare confirmed flag with no witnessed consent trail",
                 }).to_string(),
                 String::new(),

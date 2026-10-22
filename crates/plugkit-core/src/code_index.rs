@@ -7810,7 +7810,7 @@ pub fn search_at(
                     json!({ "ok": true, "mode": "vector_top_k_after_recover", "recovered_from": e, "rows": rows })
                 }
                 Err(e2) => {
-                    json!({ "ok": false, "mode": "recovered_but_still_failing", "vec_err": e, "retry_err": e2 })
+                    json!({ "ok": false, "error_code": "vector_recovery_failed", "mode": "recovered_but_still_failing", "vec_err": e, "retry_err": e2 })
                 }
             }
         }
@@ -7830,7 +7830,7 @@ pub fn search_at(
                     json!({ "ok": true, "degraded": true, "degraded_reason": "vector query failed", "mode": "fallback_like_after_vec_err", "vec_err": e, "rows": rows })
                 }
                 Err(e2) => {
-                    json!({ "ok": false, "degraded": true, "vec_err": e, "fallback_err": e2 })
+                    json!({ "ok": false, "error_code": "vector_degraded", "degraded": true, "vec_err": e, "fallback_err": e2 })
                 }
             }
         }

@@ -675,6 +675,7 @@ fn store_busy_lock_bail(lock_dir: &str, reason: &str, info: Value) -> Value {
     mark_store_busy();
     json!({
         "ok": false,
+        "error_code": "store_busy",
         "complete": false,
         "store_busy": true,
         "lock_dir": lock_dir,

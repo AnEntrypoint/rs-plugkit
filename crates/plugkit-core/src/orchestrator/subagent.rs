@@ -26,7 +26,7 @@ const CAS_WRITTEN: u32 = 1;
 const CAS_CONFLICT: u32 = 2;
 
 fn reject(error: &str) -> (String, String, i32) {
-    (json!({ "ok": false, "error": error }).to_string(), error.to_string(), 1)
+    (json!({ "ok": false, "error_code": "subagent_refused", "error": error }).to_string(), error.to_string(), 1)
 }
 
 fn accept(data: Value) -> (String, String, i32) {
@@ -114,6 +114,7 @@ fn failure_response(failure: Failure) -> (String, String, i32) {
         Failure::Contention => {
             let body = json!({
                 "ok": false,
+                "error_code": "ledger_contention",
                 "error": "ledger_contention",
                 "attempts": LEDGER_CAS_MAX_ATTEMPTS,
             });

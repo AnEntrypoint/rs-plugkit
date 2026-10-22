@@ -121,14 +121,14 @@ fn run_host(code: &str) -> Value {
     };
     match crate::wasm_dispatch::unpack_to_string_pub(packed) {
         Some(raw) => serde_json::from_str(&raw).unwrap_or(Value::String(raw)),
-        None => json!({ "ok": false, "error": "process host returned empty" }),
+        None => json!({ "ok": false, "error_code": "process_host_empty", "error": "process host returned empty" }),
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn run_host(code: &str) -> Value {
     let _ = (code, PROC_TIMEOUT_MS);
-    json!({ "ok": false, "error": "process control is unavailable on native target" })
+    json!({ "ok": false, "error_code": "process_control_unavailable_on_native", "error": "process control is unavailable on native target" })
 }
 
 fn finish(host: &Value) -> (String, String, i32) {
