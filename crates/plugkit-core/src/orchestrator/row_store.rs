@@ -755,11 +755,32 @@ fn migrate_log_to_dir(store: &Store) {
 // Keeps the newest entry per id and rewrites the log as one fresh chain, so the file stays under
 // LOG_COMPACT_BYTES while every resolved id stays citable. Entries keep their id, status, ts and
 // material; the chain digests are recomputed because they cover the surviving chain.
+// Which prev rule the log on disk uses. 1 chained each entry to the previous entry's body digest;
+// 2 chains to the sha256 of the previous line, which is what append_chained writes. A log written
+// under 1 is rechained once instead of carrying two conventions.
+const LOG_CHAIN_VERSION: u32 = 2;
+
+fn rechain_marker(store: &Store) -> String {
+    format!("{}.chain-version.json", store.log)
+}
+
+fn chain_is_current(store: &Store) -> bool {
+    let raw = pkfs::read_to_string(&rechain_marker(store)).unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|value| value.get("chain_version").and_then(|v| v.as_u64()))
+        .is_some_and(|version| version >= LOG_CHAIN_VERSION as u64)
+}
+
 pub fn compact_log(store: &Store) -> Result<bool, String> {
+    compact_log_inner(store, false)
+}
+
+pub fn compact_log_inner(store: &Store, force: bool) -> Result<bool, String> {
     let Some(raw) = pkfs::read_to_string(&store.log) else {
         return Ok(false);
     };
-    if raw.len() <= LOG_COMPACT_BYTES {
+    if !force && raw.len() <= LOG_COMPACT_BYTES {
         return Ok(false);
     }
     let entries = log_entries(store)?;
@@ -786,8 +807,11 @@ pub fn compact_log(store: &Store) -> Result<bool, String> {
         let body = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
         let hash = sha256_hex(&body);
         entry["sha256"] = serde_json::json!(hash);
-        lines.push(serde_json::to_string(&entry).map_err(|e| e.to_string())?);
-        prev = hash;
+        let line = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
+        // prev is the sha256 of the previous line, which is what append_chained writes, so a
+        // compacted log and an appended log chain by the same rule.
+        prev = sha256_hex(&line);
+        lines.push(line);
     }
     // The most recent suffix that still fits stays in the active log; the older part moves to a
     // segment file. Every resolved id keeps its sidecar, so nothing becomes uncitable.
@@ -1082,6 +1106,14 @@ pub fn append_log(store: &Store, entry: serde_json::Value) -> Result<serde_json:
     let entry = append_chained(&store.log, store.kind.label(), entry)?;
     if let Some(id) = id {
         let _ = write_log_sidecar(store, &id, &entry);
+    }
+    if !chain_is_current(store) {
+        if compact_log_inner(store, true).unwrap_or(false) {
+            let _ = pkfs::write(
+                &rechain_marker(store),
+                &serde_json::json!({ "chain_version": LOG_CHAIN_VERSION }).to_string(),
+            );
+        }
     }
     if log_compacted_bytes(store) > LOG_COMPACT_BYTES {
         let _ = compact_log(store);
