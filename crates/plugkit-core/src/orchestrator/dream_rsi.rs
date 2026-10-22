@@ -244,6 +244,7 @@ fn evaluate_worlds(
     worlds: Vec<World>,
     beta1: f64,
     beta2: f64,
+    promotion_margin: f64,
 ) -> Result<ReplayOutcome, String> {
     let mut policy_ids = BTreeSet::new();
     for policy in &policies {
@@ -333,7 +334,6 @@ fn evaluate_worlds(
             wins as f64 / usable_count as f64
         })
         .collect();
-    let promotion_margin = crate::ragconfig::RagConfig::resolved().scoring.promotion_margin;
     let clears_margin = |index: usize| -> bool {
         finite_score(ranked[index].score).unwrap_or(f64::NEG_INFINITY) > baseline_score + promotion_margin
     };
@@ -1121,7 +1121,8 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
         });
     }
     let candidate_count = candidates.len();
-    let replay = evaluate_worlds(incumbent.id.clone(), candidates.clone(), scan.worlds, beta1, beta2)?;
+    let promotion_margin = crate::ragconfig::RagConfig::resolved().scoring.promotion_margin;
+    let replay = evaluate_worlds(incumbent.id.clone(), candidates.clone(), scan.worlds, beta1, beta2, promotion_margin)?;
     let baseline_score = finite_score(replay.baseline_score).ok_or("dream-replay-cycle baseline score missing")?;
     let selected_id = replay.selected.policy_id.clone();
     let selected_score = finite_score(replay.selected.score).ok_or("dream-replay-cycle selected score missing")?;
