@@ -7,7 +7,7 @@ use crate::wasm_dispatch::{
 use crate::wasm_dispatch::host_abi::host_read_via_exec;
 use serde_json::{json, Value};
 
-const MAX_ENTRIES: usize = 5000;
+const MAX_ENTRIES: usize = 20000;
 pub const RETAIN_MS: u64 = 24 * 60 * 60 * 1000;
 const SPOOL_TMP_MARKER: &str = ".tmp-";
 const SPOOL_TMP_STALE_MS: u64 = 30 * 1000;
