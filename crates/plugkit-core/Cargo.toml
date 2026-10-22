@@ -1,6 +1,6 @@
 [package]
 name = "rs-plugkit"
-version = "0.1.2066"
+version = "0.1.2067"
 edition.workspace = true
 license = "MIT"
 
