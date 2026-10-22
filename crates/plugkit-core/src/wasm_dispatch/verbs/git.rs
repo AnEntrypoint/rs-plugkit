@@ -2047,6 +2047,15 @@ pub(super) fn git_push(body: &Value) -> u64 {
             }
         }
         hoist_identity_required(&mut refusal);
+        if refusal.get("phases").is_none() {
+            refusal["phases"] = json!({
+                "fetch_ms": fetch_ms,
+                "gates_ms": gates_ms,
+                "push_ms": unsafe { host_now_ms() }.saturating_sub(push_call_started),
+                "recovery_ms": unsafe { host_now_ms() }.saturating_sub(push_call_started),
+                "total_ms": unsafe { host_now_ms() }.saturating_sub(push_started),
+            });
+        }
         return pack(refusal.to_string());
     }
     while !push_succeeded
@@ -4380,7 +4389,7 @@ pub(super) fn pull_past_remote_moved(
 }
 
 pub(super) enum RemoteMovedScopeFix {
-    NotApplicable,
+    NotApplicable(String),
     Blocked(String),
     Failed(String),
     Landed {
@@ -4632,7 +4641,10 @@ pub(super) fn scope_recommit_past_remote_moved(
     identity: &(String, String),
 ) -> RemoteMovedScopeFix {
     if scope.is_empty() {
-        return RemoteMovedScopeFix::NotApplicable;
+        return RemoteMovedScopeFix::NotApplicable(
+            "no path is scoped for publication, so there is no scoped range to re-land onto the remote tip"
+                .to_string(),
+        );
     }
     if !is_full_sha(local_sha) {
         return RemoteMovedScopeFix::Failed(format!(
@@ -4650,7 +4662,10 @@ pub(super) fn scope_recommit_past_remote_moved(
         || ref_is_ancestor(cwd, local_sha, remote_tip.as_str())
         || ref_is_ancestor(cwd, remote_tip.as_str(), local_sha)
     {
-        return RemoteMovedScopeFix::NotApplicable;
+        return RemoteMovedScopeFix::NotApplicable(format!(
+            "the commit being published ({}) and origin/{} ({}) are already on one line of history, so there is no divergence to re-land; nothing here needs a scope-only re-land",
+            local_sha, branch, remote_tip
+        ));
     }
     let merge_base = exec_git_in(cwd, &format!("merge-base {} {}", remote_tip, local_sha))
         .trim()
@@ -4883,6 +4898,69 @@ fn unpublished_local_paths(cwd: Option<&str>, branch: &str) -> Vec<String> {
     delta_paths_between(cwd, &base, &head).unwrap_or_default()
 }
 
+
+fn temp_publish_worktree_dir(cwd: Option<&str>, sha: &str) -> String {
+    let root = cwd.unwrap_or(".").trim_end_matches(['/', '\\']).to_string();
+    let short: String = sha.chars().take(8).collect();
+    format!(
+        "{}/.gm/publish-wt-{}-{}",
+        root,
+        short,
+        unsafe { crate::wasm_dispatch::host_now_ms() }
+    )
+}
+
+fn remove_temp_publish_worktree(cwd: Option<&str>, dir: &str) {
+    let _ = git_call_argv(&["worktree", "remove", "--force", dir], cwd);
+    let _ = git_call_argv(&["worktree", "prune"], cwd);
+}
+
+fn publish_via_temp_worktree(
+    cwd: Option<&str>,
+    branch: &str,
+    sha: &str,
+    identity: &(String, String),
+) -> Result<String, String> {
+    if !is_full_sha(sha) {
+        return Err(format!(
+            "a temp-worktree publish needs the full sha of the commit to publish; got '{sha}'"
+        ));
+    }
+    let _ = git_call_argv(&["fetch", "origin", branch], cwd);
+    let remote_ref = format!("origin/{branch}");
+    let dir = temp_publish_worktree_dir(cwd, sha);
+    let add = git_call_argv(
+        &["worktree", "add", "--detach", dir.as_str(), remote_ref.as_str()],
+        cwd,
+    );
+    if add.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1) != 0 {
+        return Err(format!(
+            "could not create a detached worktree at {remote_ref} in {dir}: {}",
+            git_output_text(&add)
+        ));
+    }
+    let pick = git_call_with_identity(&["cherry-pick", sha], identity, Some(dir.as_str()));
+    if pick.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1) != 0 {
+        let detail = git_output_text(&pick);
+        let _ = git_call_argv(&["cherry-pick", "--abort"], Some(dir.as_str()));
+        remove_temp_publish_worktree(cwd, dir.as_str());
+        return Err(format!(
+            "cherry-pick of {sha} onto {remote_ref} failed in the temporary worktree, so nothing was published: {detail}"
+        ));
+    }
+    let head = exec_git_in(Some(dir.as_str()), "rev-parse HEAD").trim().to_string();
+    let target = format!("HEAD:{branch}");
+    let pushed = git_call_argv(&["push", "origin", target.as_str()], Some(dir.as_str()));
+    remove_temp_publish_worktree(cwd, dir.as_str());
+    if pushed.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(1) != 0 {
+        return Err(format!(
+            "push of the re-landed commit {head} to origin/{branch} failed: {}",
+            git_output_text(&pushed)
+        ));
+    }
+    Ok(head)
+}
+
 pub(super) fn pull_and_repush_remote_moved(
     body: &Value,
     repo: &Option<String>,
@@ -4914,7 +4992,15 @@ pub(super) fn pull_and_repush_remote_moved(
                 &commit_identity(body),
             );
             match fix {
-                RemoteMovedScopeFix::NotApplicable => {}
+                RemoteMovedScopeFix::NotApplicable(reason) => {
+                    scope_failure = Some(reason.clone());
+                    refusal["auto_recovery"] = json!({
+                        "attempted": false,
+                        "via": "scope-recommit",
+                        "skipped_reason": reason,
+                        "scope_paths": scope.clone(),
+                    });
+                }
                 RemoteMovedScopeFix::Blocked(reason) => {
                     log_deviation_push("push-remote-moved-scope-blocked", branch);
                     refusal["recovered"] = json!(false);
@@ -5033,8 +5119,26 @@ pub(super) fn pull_and_repush_remote_moved(
                 == 0
         })
         .unwrap_or(false);
+    let worktree_free_publish_steps = |sha: &str| -> Vec<Value> {
+        vec![json!({
+            "step": 1,
+            "verb": "git_push",
+            "rev": sha,
+            "publish_from_temp_worktree": true,
+            "action": format!(
+                "re-dispatch git_push with rev {} and publish_from_temp_worktree:true: it opens a detached worktree at origin/{}, re-lands the committed sha there and pushes it, so this checkout's dirty paths are never written",
+                sha, branch
+            ),
+        })]
+    };
     match pull_past_remote_moved(cwd, &refusal, Some(&pull_identity(body))) {
-        RemoteMovedPull::NotApplicable => refusal,
+        RemoteMovedPull::NotApplicable => {
+            if let Some(reason) = scope_failure.as_deref() {
+                refusal["auto_recovery"]["scope_recommit_reason"] = json!(reason);
+                refusal["auto_recovery"]["scope_recommit_via"] = json!("scope-recommit-not-applicable");
+            }
+            refusal
+        }
         RemoteMovedPull::Blocked(reason) => {
             let clash = pull_clashing_paths(cwd, branch);
             let lanes = lane_marker_summary(&live_lane_markers());
@@ -5064,9 +5168,63 @@ pub(super) fn pull_and_repush_remote_moved(
                 refusal["auto_recovery"]["via"] = json!("pull");
                 refusal["auto_recovery"]["scope_recommit_reason"] = json!(reason);
             }
+            if !clash.is_empty() {
+                let sha = refusal
+                    .get("source_sha")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                refusal["auto_recovery"]["recovery_blocked_by"] = json!("live_dirty_overlap");
+                refusal["auto_recovery"]["recovery_route"] = json!("worktree-free-publish");
+                refusal["auto_recovery"]["recovery_route_note"] = json!(format!(
+                    "a whole-tree pull is refused while {} path(s) are both dirty here and changed by the incoming range, so pull-then-push is a dead end on this checkout; the committed sha can still be published from a detached worktree at origin/{} without writing this checkout",
+                    clash.len(),
+                    branch
+                ));
+                refusal["auto_recovery"]["worktree_free_publish_steps"] =
+                    json!(worktree_free_publish_steps(if sha.is_empty() { "<committed full sha>" } else { sha.as_str() }));
+            }
             refusal
         }
         RemoteMovedPull::Failed(result) => {
+            if body.get("publish_from_temp_worktree").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let sha = refusal
+                    .get("source_sha")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                match publish_via_temp_worktree(cwd, branch, &sha, &commit_identity(body)) {
+                    Ok(new_sha) => {
+                        refusal["ok"] = json!(true);
+                        refusal["recovered"] = json!(true);
+                        refusal["remote_moved"] = json!(false);
+                        refusal["published_via_temp_worktree"] = json!(true);
+                        refusal["remote_sha"] = json!(new_sha.clone());
+                        refusal["relanded_commit"] = json!(new_sha.clone());
+                        refusal["stranded_local_commit"] = json!(sha.clone());
+                        refusal["auto_recovery"] = json!({
+                            "attempted": true,
+                            "via": "temp-worktree-publish",
+                            "pull_result": result.clone(),
+                            "relanded_commit": new_sha,
+                            "worktree_paths_written": [],
+                            "preserved_dirty_worktree": true,
+                        });
+                        stamp_dirty_split(&mut refusal, &dirty_split);
+                        return refusal;
+                    }
+                    Err(detail) => {
+                        refusal["auto_recovery"] = json!({
+                            "attempted": true,
+                            "via": "temp-worktree-publish",
+                            "pull_result": result.clone(),
+                            "error": detail,
+                        });
+                    }
+                }
+            }
             let clash = pull_clashing_paths(cwd, branch);
             refusal["recovered"] = json!(false);
             refusal["auto_recovery"] = json!({
