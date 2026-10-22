@@ -54,6 +54,12 @@ impl Kind {
             Kind::Mutables => "unknowns-log.jsonl",
         }
     }
+    fn log_dir_name(&self) -> &'static str {
+        match self {
+            Kind::Prd => "prd-log.d",
+            Kind::Mutables => "unknowns-log.d",
+        }
+    }
     fn marker_name(&self) -> &'static str {
         match self {
             Kind::Prd => "prd.absorbed.json",
@@ -82,6 +88,8 @@ pub struct Store {
     pub legacy_dir: Option<String>,
     pub legacy_log: Option<String>,
     pub log: String,
+    pub log_dir: String,
+    log_dir_marker: String,
     marker: String,
     dir_migration_marker: Option<String>,
 }
@@ -107,6 +115,8 @@ impl Store {
             legacy_dir: legacy_dir_path(&gm, &kind),
             legacy_log: legacy_log_path(&gm, &kind),
             log: format!("{}/{}", gm, kind.log_name()),
+            log_dir: format!("{}/{}", gm, kind.log_dir_name()),
+            log_dir_marker: format!("{}/{}.log-dir-migrated.json", gm, kind.dir_name()),
             marker: format!("{}/{}", gm, kind.marker_name()),
             dir_migration_marker,
             kind,
@@ -633,17 +643,158 @@ pub fn remove_item(store: &Store, id: &str) -> bool {
     pkfs::remove_file(&item_path(store, id))
 }
 
-fn quarantine_torn_tail(log: &str, raw: &str, keep: usize) {
-    let sidecar = format!("{}.torn", log);
+fn quarantine_torn_tail(store: &Store, raw: &str, keep: usize) {
+    let sidecar = format!("{}.torn", store.log);
     if !pkfs::append(&sidecar, &format!("{}\n", &raw[keep..])) {
         return;
     }
-    let _ = pkfs::cas_write(log, raw, &raw[..keep]);
+    if matches!(
+        pkfs::cas_write(&store.log, raw, &raw[..keep]),
+        pkfs::CasWriteOutcome::Swapped
+    ) {
+        bump_torn_count(store);
+    }
 }
 
 pub struct LogRead {
     pub entries: Vec<serde_json::Value>,
     pub dropped_torn_lines: usize,
+}
+
+// The log is one append-only chained file and grows with every resolution, so a lookup that needs one
+// row would otherwise parse every row ever resolved. <log>.d holds one file per id carrying that id's
+// newest entry; a readdir of the directory is the index, so a lookup reads one small file and a listing
+// reads the directory plus the page it names. The log stays the chained record of record.
+pub const LOG_COMPACT_BYTES: usize = 4 * 1024 * 1024;
+
+fn torn_count_path(store: &Store) -> String {
+    format!("{}.torn-count.json", store.log)
+}
+
+pub fn log_torn_count(store: &Store) -> usize {
+    let raw = pkfs::read_to_string(&torn_count_path(store)).unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|value| value.get("dropped").and_then(|v| v.as_u64()))
+        .unwrap_or(0) as usize
+}
+
+fn bump_torn_count(store: &Store) {
+    let next = log_torn_count(store).saturating_add(1);
+    let _ = pkfs::write(
+        &torn_count_path(store),
+        &serde_json::json!({ "dropped": next }).to_string(),
+    );
+}
+
+fn log_sidecar_path(store: &Store, id: &str) -> String {
+    format!("{}/{}.json", store.log_dir, item_stem(id))
+}
+
+fn write_log_sidecar(store: &Store, id: &str, entry: &serde_json::Value) -> bool {
+    let Ok(text) = serde_json::to_string(entry) else {
+        return false;
+    };
+    pkfs::write(&log_sidecar_path(store, id), &text)
+}
+
+fn read_log_sidecar(store: &Store, id: &str) -> Option<serde_json::Value> {
+    let raw = pkfs::read_to_string(&log_sidecar_path(store, id))?;
+    serde_json::from_str::<serde_json::Value>(raw.trim()).ok()
+}
+
+// The directory listing is the index. Names are sorted so a page is stable across calls.
+fn log_sidecar_names(store: &Store) -> Vec<String> {
+    let Some(serde_json::Value::Array(names)) = pkfs::readdir(&store.log_dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = names
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .filter_map(|name| name.strip_suffix(".json"))
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out
+}
+
+fn log_sidecar_entry_by_stem(store: &Store, stem: &str) -> Option<serde_json::Value> {
+    let raw = pkfs::read_to_string(&format!("{}/{}.json", store.log_dir, stem))?;
+    serde_json::from_str::<serde_json::Value>(raw.trim()).ok()
+}
+
+// One-time split of the historical single-file log into the per-id directory.
+fn migrate_log_to_dir(store: &Store) {
+    if pkfs::exists(&store.log_dir_marker) {
+        return;
+    }
+    let Ok(entries) = log_entries(store) else {
+        return;
+    };
+    let mut landed = true;
+    for entry in &entries {
+        let Some(id) = entry.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !write_log_sidecar(store, id, entry) {
+            landed = false;
+        }
+    }
+    if !pkfs::exists(&store.log_dir) {
+        landed = false;
+    }
+    if landed {
+        let _ = pkfs::write(&store.log_dir_marker, "{\"log_dir_migrated\":true}");
+    }
+}
+
+// Keeps the newest entry per id and rewrites the log as one fresh chain, so the file stays under
+// LOG_COMPACT_BYTES while every resolved id stays citable. Entries keep their id, status, ts and
+// material; the chain digests are recomputed because they cover the surviving chain.
+pub fn compact_log(store: &Store) -> Result<bool, String> {
+    let Some(raw) = pkfs::read_to_string(&store.log) else {
+        return Ok(false);
+    };
+    if raw.len() <= LOG_COMPACT_BYTES {
+        return Ok(false);
+    }
+    let entries = log_entries(store)?;
+    let mut newest: std::collections::BTreeMap<String, serde_json::Value> =
+        std::collections::BTreeMap::new();
+    for entry in &entries {
+        let Some(id) = entry.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        newest.insert(id.to_string(), entry.clone());
+    }
+    let mut out = String::new();
+    let mut prev = "0".repeat(64);
+    for (id, entry) in &newest {
+        let mut entry = entry.clone();
+        entry["prev"] = serde_json::json!(prev);
+        if let Some(map) = entry.as_object_mut() {
+            map.remove("sha256");
+        }
+        let body = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
+        let hash = sha256_hex(&body);
+        entry["sha256"] = serde_json::json!(hash);
+        let line = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
+        out.push_str(&line);
+        out.push('\n');
+        prev = hash;
+        let _ = write_log_sidecar(store, id, &entry);
+    }
+    if !matches!(
+        pkfs::cas_write(&store.log, &raw, &out),
+        pkfs::CasWriteOutcome::Swapped
+    ) {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+pub fn log_compacted_bytes(store: &Store) -> usize {
+    pkfs::read_to_string(&store.log).map(|raw| raw.len()).unwrap_or(0)
 }
 
 pub fn read_log(store: &Store) -> Result<LogRead, String> {
@@ -659,7 +810,7 @@ pub fn read_log(store: &Store) -> Result<LogRead, String> {
         let keep = raw.rfind('\n').map_or(0, |i| i + 1);
         let torn = raw[keep..].trim();
         if !torn.is_empty() && serde_json::from_str::<serde_json::Value>(torn).is_err() {
-            quarantine_torn_tail(&store.log, &raw, keep);
+            quarantine_torn_tail(store, &raw, keep);
             body = &raw[..keep];
             dropped_torn_lines = 1;
         }
@@ -704,6 +855,9 @@ pub fn log_entries(store: &Store) -> Result<Vec<serde_json::Value>, String> {
 }
 
 fn resolved_stems(store: &Store) -> Result<BTreeSet<String>, String> {
+    if let Some(names) = sidecar_resolved_stems(store) {
+        return Ok(names);
+    }
     Ok(log_entries(store)?
         .iter()
         .filter_map(|entry| entry.get("id").and_then(|v| v.as_str()))
@@ -711,7 +865,27 @@ fn resolved_stems(store: &Store) -> Result<BTreeSet<String>, String> {
         .collect())
 }
 
+// Readdir of the sidecar directory answers "which ids are already resolved" without opening the log.
+// A directory that does not exist yet is unknown, not empty, so the caller falls back to the log.
+fn sidecar_resolved_stems(store: &Store) -> Option<BTreeSet<String>> {
+    if pkfs::readdir(&store.log_dir).is_none() {
+        return None;
+    }
+    let mut out = BTreeSet::new();
+    for stem in log_sidecar_names(store) {
+        if let Some(entry) = log_sidecar_entry_by_stem(store, &stem) {
+            if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
+                out.insert(item_stem(id));
+            }
+        }
+    }
+    Some(out)
+}
+
 pub fn log_row(store: &Store, id: &str) -> Result<Option<serde_json::Value>, String> {
+    if let Some(entry) = read_log_sidecar(store, id) {
+        return Ok(Some(log_row_from_entry(store, id, &entry)));
+    }
     let mut found: Option<serde_json::Value> = None;
     for entry in log_entries(store)? {
         if entry.get("id").and_then(|v| v.as_str()) == Some(id) {
@@ -719,6 +893,46 @@ pub fn log_row(store: &Store, id: &str) -> Result<Option<serde_json::Value>, Str
         }
     }
     Ok(found.map(|entry| log_row_from_entry(store, id, &entry)))
+}
+
+// Reads at most `limit` sidecar files starting at `offset` of the sorted id listing, so a listing
+// costs the directory index plus its own page and never the whole log. `limit` None means every
+// matching row; every resolved id stays reachable through log_row.
+pub fn log_rows_with_status_paged(
+    store: &Store,
+    statuses: &[String],
+    offset: usize,
+    limit: Option<usize>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let names = log_sidecar_names(store);
+    if !names.is_empty() {
+        let window: Vec<&String> = match limit {
+            Some(n) => names.iter().skip(offset).take(n).collect(),
+            None => names.iter().skip(offset).collect(),
+        };
+        let mut out = Vec::new();
+        for stem in window {
+            let Some(entry) = log_sidecar_entry_by_stem(store, stem) else {
+                continue;
+            };
+            let status = entry
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !statuses.iter().any(|want| want == &status) {
+                continue;
+            }
+            let id = entry
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(stem.as_str())
+                .to_string();
+            out.push(log_row_from_entry(store, &id, &entry));
+        }
+        return Ok(out);
+    }
+    Ok(log_rows_from_entries(store, &log_entries(store)?, statuses))
 }
 
 fn log_row_from_entry(store: &Store, id: &str, entry: &serde_json::Value) -> serde_json::Value {
@@ -751,16 +965,23 @@ pub fn log_rows_with_status(
     store: &Store,
     statuses: &[String],
 ) -> Result<Vec<serde_json::Value>, String> {
-    let entries = log_entries(store)?;
+    log_rows_with_status_paged(store, statuses, 0, None)
+}
+
+fn log_rows_from_entries(
+    store: &Store,
+    entries: &[serde_json::Value],
+    statuses: &[String],
+) -> Vec<serde_json::Value> {
     let mut newest: std::collections::HashMap<&str, &serde_json::Value> =
         std::collections::HashMap::new();
-    for entry in &entries {
+    for entry in entries {
         if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
             newest.insert(id, entry);
         }
     }
     let mut out = Vec::new();
-    for entry in &entries {
+    for entry in entries {
         let status = entry
             .get("status")
             .and_then(|v| v.as_str())
@@ -774,7 +995,7 @@ pub fn log_rows_with_status(
             out.push(log_row_from_entry(store, id, last));
         }
     }
-    Ok(out)
+    out
 }
 
 fn iso_ms(ms: u128) -> String {
@@ -812,7 +1033,19 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 pub fn append_log(store: &Store, entry: serde_json::Value) -> Result<serde_json::Value, String> {
-    append_chained(&store.log, store.kind.label(), entry)
+    migrate_log_to_dir(store);
+    let id = entry
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let entry = append_chained(&store.log, store.kind.label(), entry)?;
+    if let Some(id) = id {
+        let _ = write_log_sidecar(store, &id, &entry);
+    }
+    if log_compacted_bytes(store) > LOG_COMPACT_BYTES {
+        let _ = compact_log(store);
+    }
+    Ok(entry)
 }
 
 pub fn append_chained(
