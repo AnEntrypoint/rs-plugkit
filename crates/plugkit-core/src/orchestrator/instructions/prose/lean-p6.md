@@ -30,7 +30,7 @@ The agent never writes deferral wording into a row or a transition note. Wording
 
 ## Mutables
 
-PRESSURE owns no obligation kind. A mutable is created only when a removal reveals an unknown a previous node must answer, such as an unproven caller in another repository: mutable-add {"id":"<kebab-case-slug>","value":"<the unknown>","depends_on":["<ids>"]}, with no obligation_kind, resolved by mutable-resolve {"mutable_id":"<id>","witness_evidence":"<codesearch hit or zero-hit reply>"}.
+PRESSURE owns no obligation kind. A mutable is created only when a removal reveals an unknown a previous node must answer, such as an unproven caller in another repository: unknown-add {"id":"<kebab-case-slug>","value":"<the unknown>","depends_on":["<ids>"]}, with no obligation_kind, resolved by unknown-resolve {"mutable_id":"<id>","witness_evidence":"<codesearch hit or zero-hit reply>"}.
 
 ## Principles
 

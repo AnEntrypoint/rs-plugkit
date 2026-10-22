@@ -14,7 +14,7 @@ Before writing or changing a signature, dispatch `callers {symbol}` to list ever
 
 Every build, subprocess and filesystem probe is an exec_js dispatch. exec_js runs in a separate Node process and has no tools object. Run a command with arguments through `require("node:child_process").execFileSync(command, args, { encoding: "utf8" })`. Examples are the compiler check for the touched crate or package, and `node --check` on a touched file. Do not run bash or PowerShell for these. Git is read with `git_show` and `git_diff` and written with the git_* verbs, never through a shell. For a resource-bound witness, run exec_js with `opts.profile:true`. The response's duration_ms is free, and the worst-N self-time lines locate the cost.
 
-Resolve obligations with `mutable-resolve {"mutable_id":"<id>","witness_evidence":"<witness>"}`. For a resource-bound mutable, add `"measured_value":<number>` to the same body. Resolve rows with `prd-resolve {"id":"<row id>","witness_evidence":"<witness>","witness_dispatch_id":"<dispatch id of your own live run>"}`, with id at top level beside witness_evidence and never nested inside a string. A reply of deviation kind prd-resolve-unknown-id means the id missed. Read its hint field and re-dispatch corrected, never blind. Declare new obligations with `mutable-add {"id":"<kebab-case slug>","obligation_kind":"<kind>","depends_on":[...],"status":"unknown"}`.
+Resolve obligations with `unknown-resolve {"mutable_id":"<id>","witness_evidence":"<witness>"}`. For a resource-bound mutable, add `"measured_value":<number>` to the same body. Resolve rows with `prd-resolve {"id":"<row id>","witness_evidence":"<witness>","witness_dispatch_id":"<dispatch id of your own live run>"}`, with id at top level beside witness_evidence and never nested inside a string. A reply of deviation kind prd-resolve-unknown-id means the id missed. Read its hint field and re-dispatch corrected, never blind. Declare new obligations with `unknown-add {"id":"<kebab-case slug>","obligation_kind":"<kind>","depends_on":[...],"status":"unknown"}`.
 
 Reshaping is `transition to=EARS`, dispatched in the same turn as the discovery, with the affected rows re-cut in place through prd-add on their existing ids. Advancing is `transition to=TOTALITY`.
 
@@ -38,13 +38,13 @@ This node owns the five PROVE kinds, and only these five: `precondition`, `invar
 
 A precondition is what must hold on entry: input shape, caller invariant, resource availability. An invariant is what must hold across every reachable state of a mutation sequence. A postcondition is what must hold on exit: output shape and side-effect completeness. A resource-bound is a worst-case time, size or memory bound the path must not exceed, and it carries a numeric `bound` field. A type-shape is a data representation in which the invalid state has no constructor, so the implementation inhabits the type rather than merely satisfying it at run time.
 
-Every obligation is a node in one dependency DAG. A mutable declares `depends_on` with the ids it requires resolved first. A dependency may cross node boundaries, since the DAG is store-wide: a CONTRACT mutable may depend on a P1 mutable, and a BUILD mutable may depend on a CONTRACT mutable. mutable-add rejects a cycle and names the cycle path. Resolve in dependency order. A row whose depends_on are all resolved is ready. A row with an unresolved dependency is not reachable yet, so resolve the dependency first.
+Every obligation is a node in one dependency DAG. A mutable declares `depends_on` with the ids it requires resolved first. A dependency may cross node boundaries, since the DAG is store-wide: a CONTRACT mutable may depend on a P1 mutable, and a BUILD mutable may depend on a CONTRACT mutable. unknown-add rejects a cycle and names the cycle path. Resolve in dependency order. A row whose depends_on are all resolved is ready. A row with an unresolved dependency is not reachable yet, so resolve the dependency first.
 
 Composition: a row declares `supplies: "<description>"` naming what its postcondition hands to a dependent row's precondition. The handoff is written into both rows' text, so a reader can trace how obligations chain.
 
-The resource-bound check is mechanical. `mutable-resolve` accepts `measured_value`. When the value exceeds `bound`, the resolution is refused with both numbers named, so a prose claim alone cannot close it. The other four kinds have no equally cheap mechanical check and rest on witness_evidence.
+The resource-bound check is mechanical. `unknown-resolve` accepts `measured_value`. When the value exceeds `bound`, the resolution is refused with both numbers named, so a prose claim alone cannot close it. The other four kinds have no equally cheap mechanical check and rest on witness_evidence.
 
-Mutable gate: drain every pending PROVE-kind mutable before leaving the node. Loop: `mutable-resolve` each ready row. When one resolution surfaces a new unknown, `mutable-add` it immediately with its obligation_kind and depends_on, and resolve it in the same turn before advancing. When the transition refuses, the mutables-all-resolved and mutables-all-typed predicates name the blocking row and its reason. That row is resolved next.
+Mutable gate: drain every pending PROVE-kind mutable before leaving the node. Loop: `unknown-resolve` each ready row. When one resolution surfaces a new unknown, `unknown-add` it immediately with its obligation_kind and depends_on, and resolve it in the same turn before advancing. When the transition refuses, the mutables-all-resolved and mutables-all-typed predicates name the blocking row and its reason. That row is resolved next.
 
 Two-pass rule: a mutable that survives two genuine resolution attempts without a witness is reclassified as a fresh, differently scoped unknown with a new id. Re-cut the affected rows, and dispatch `transition to=EARS`, since the reclassification shows the plan must reshape.
 
@@ -140,7 +140,7 @@ An invariant is discharged by a mutation sequence run live in exec_js, where the
 
 A postcondition is discharged by running the real path and printing its real output beside the stated shape.
 
-A resource-bound is discharged by an exec_js run with `opts.profile:true` against an input sized at or past the bound. The measured value goes to `mutable-resolve` as measured_value.
+A resource-bound is discharged by an exec_js run with `opts.profile:true` against an input sized at or past the bound. The measured value goes to `unknown-resolve` as measured_value.
 
 A type-shape is discharged by showing that the invalid state has no constructor in the chosen representation. A runtime check that rejects the state after construction does not discharge it.
 

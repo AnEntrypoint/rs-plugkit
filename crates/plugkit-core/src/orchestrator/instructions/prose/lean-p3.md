@@ -14,7 +14,7 @@ Before changing a function's signature or behaviour, dispatch `callers {symbol}`
 
 Every build, subprocess, filesystem probe and live witness is an exec_js dispatch. exec_js runs in a separate Node process with no tools object. Use `require("node:child_process").execFileSync(command, args, { encoding: "utf8" })` for commands with arguments. Use `opts.profile:true` to locate cost. Git is read with `git_diff {stat:true}` to measure the net line change, `git_status` for the worktree, and `git_show` for committed content. Git is never run through a shell.
 
-Each sweep finding is declared as a typed mutable before it is resolved: `mutable-add {"id":"<kebab-case slug>","obligation_kind":"<kind>","depends_on":[...],"status":"unknown"}`. The kinds are the STATE kinds (totality, ownership, replay, effect-boundary) and the CONC kinds (happens-before, disjointness, contention). Resolve each with `mutable-resolve {"mutable_id":"<id>","witness_evidence":"<live witness>"}`. Resolve rows with `prd-resolve {"id":"<row id>","witness_evidence":"<witness>"}`.
+Each sweep finding is declared as a typed mutable before it is resolved: `unknown-add {"id":"<kebab-case slug>","obligation_kind":"<kind>","depends_on":[...],"status":"unknown"}`. The kinds are the STATE kinds (totality, ownership, replay, effect-boundary) and the CONC kinds (happens-before, disjointness, contention). Resolve each with `unknown-resolve {"mutable_id":"<id>","witness_evidence":"<live witness>"}`. Resolve rows with `prd-resolve {"id":"<row id>","witness_evidence":"<witness>"}`.
 
 Write the closure narrative to the commit message in ADRN. It never goes into the response body. Advance with `transition to=G_INDEP`. Reshaping goes to `transition to=EARS`, and a contract defect goes to `transition to=G_CONTRACT`.
 
@@ -34,7 +34,7 @@ The STATE kinds are totality, ownership, replay and effect-boundary. Each sweep 
 
 The CONC kinds are happens-before, disjointness and contention. The conc-obligations-ready predicate applies the same test to them. A CONC-kind row may depend on a STATE-kind row, because a contention bound presupposes an ownership invariant that already holds. A STATE-kind row may depend on a PROVE-kind row from G_CONTRACT, because a replay obligation may presuppose a proven invariant.
 
-Dependency rule: resolve in order. A mutable whose depends_on are all resolved is ready. A mutable whose dependency is pending is blocked, so resolve the dependency first. A resolution that surfaces a new unknown gets `mutable-add` in the same turn with its kind and depends_on.
+Dependency rule: resolve in order. A mutable whose depends_on are all resolved is ready. A mutable whose dependency is pending is blocked, so resolve the dependency first. A resolution that surfaces a new unknown gets `unknown-add` in the same turn with its kind and depends_on.
 
 Two-pass rule: a mutable that survives two genuine resolution attempts without a witness is reclassified as a fresh unknown with a new id, the affected rows are re-cut, and the walk reshapes with `transition to=EARS`. The same discipline holds for a repair attempt that fails twice: change the approach in the next attempt, witness the result, and do not repeat the identical approach.
 
