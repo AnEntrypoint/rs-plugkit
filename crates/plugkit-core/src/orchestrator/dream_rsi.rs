@@ -1323,6 +1323,7 @@ fn observe_dispatch(observed: ObservedDispatch<'_>) {
     };
     if crate::pkfs::append(&path, &format!("{line}\n")) {
         bump_live_count(session_id);
+        super::dream_cycle::replay_if_due(session_id);
     } else {
         record_observation_drop(session_id, dispatch_id, "append_failed");
     }

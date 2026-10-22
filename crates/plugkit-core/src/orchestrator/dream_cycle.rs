@@ -54,6 +54,37 @@ fn evaluate(content: &str) -> Result<Value, String> {
     if active_owner.as_deref() != Some(owner) {
         return Err("dream-replay-cycle owner differs from dispatch session".into());
     }
+    run(owner, &body)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn replay_if_due(owner: &str) {
+    let path = format!(".gm/dream-rsi/{owner}/{}", super::dream_rsi::OBSERVATIONS_FILE);
+    let Some(raw) = crate::pkfs::read_to_string(&path) else {
+        return;
+    };
+    let rows: Vec<String> = raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|row| row.get("dispatch_id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    let fresh = match stored_cursor(owner) {
+        Some(cursor) => match rows.iter().rposition(|id| *id == cursor) {
+            Some(index) => rows.len() - 1 - index,
+            None => rows.len(),
+        },
+        None => rows.len(),
+    };
+    if fresh >= MIN_NEW_OBSERVATIONS {
+        let _ = run(owner, &json!({ "session_id": owner }));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+const MIN_NEW_OBSERVATIONS: usize = 20;
+
+#[cfg(target_arch = "wasm32")]
+fn run(owner: &str, body: &Value) -> Result<Value, String> {
     let cycle_id = optional_id(&body, "cycle_id", 128)?;
     let after = optional_id(&body, "after_dispatch_id", 512)?;
     let beta1 = optional_beta(&body, "beta1", super::dream_rsi::DEFAULT_CYCLE_BETA1)?;
