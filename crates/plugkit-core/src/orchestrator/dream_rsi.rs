@@ -1508,7 +1508,7 @@ pub(super) fn promote_strategy(owner: &str, fields: &Value) -> Value {
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let policy_id = fields.get("selected_policy_id").and_then(Value::as_str).map(str::to_owned);
-    let path = session_store_path(PROJECT_WIDE_SESSION, &format!("{ACTIVE_STRATEGY_FILE}.json"));
+    let path = session_store_path(owner, &format!("{ACTIVE_STRATEGY_FILE}.json"));
     let refusal = if !(improved && never_worse) {
         Some("replay is not a strict win that is never worse; active strategy unchanged")
     } else if observations < INSUFFICIENT_RECORD_THRESHOLD {
@@ -1523,8 +1523,8 @@ pub(super) fn promote_strategy(owner: &str, fields: &Value) -> Value {
     }
     let policy_id = policy_id.unwrap_or_default();
     let record = json!({
-        "kind": "project-strategy",
-        "scope": "project",
+        "kind": "session-strategy",
+        "scope": "session",
         "owner_session_id": owner,
         "selected_policy_id": policy_id,
         "selected_score": fields.get("selected_score").cloned().unwrap_or(Value::Null),
