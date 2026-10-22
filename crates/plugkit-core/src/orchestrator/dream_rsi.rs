@@ -223,13 +223,29 @@ const PROMOTION_MARGIN: f64 = 0.02;
 const PROMOTION_MIN_WORLDS: usize = 3;
 const PROMOTION_MIN_WIN_FRACTION: f64 = 0.5;
 
+struct RankedReplay {
+    policy_id: String,
+    score: f64,
+    cost: u64,
+}
+
+struct ReplayOutcome {
+    baseline_score: f64,
+    selected: RankedReplay,
+    rankings: Vec<RankedReplay>,
+}
+
+fn finite_score(value: f64) -> Option<f64> {
+    value.is_finite().then_some(value)
+}
+
 fn evaluate_worlds(
     baseline_id: String,
     mut policies: Vec<Policy>,
     worlds: Vec<World>,
     beta1: f64,
     beta2: f64,
-) -> Result<Value, String> {
+) -> Result<ReplayOutcome, String> {
     let mut policy_ids = BTreeSet::new();
     for policy in &policies {
         if !policy_ids.insert(policy.id.clone()) {
@@ -249,20 +265,16 @@ fn evaluate_worlds(
         policies.insert(0, incumbent);
     }
     // Replay every world under every policy once. A world that fails under any policy is dropped from
-    // every ranking so the candidates stay comparable, and it is reported in skipped_worlds.
+    // every ranking so the candidates stay comparable.
     let evaluated: Vec<Vec<Result<Value, String>>> = policies
         .iter()
         .map(|policy| worlds.iter().map(|world| evaluate_policy(world, policy, beta1, beta2)).collect())
         .collect();
     let mut usable = vec![true; worlds.len()];
-    let mut skipped_worlds = Vec::new();
-    for (policy_index, policy) in policies.iter().enumerate() {
-        for (index, result) in evaluated[policy_index].iter().enumerate() {
-            if let Err(error) = result {
-                if usable[index] {
-                    usable[index] = false;
-                    skipped_worlds.push(json!({ "world_id": worlds[index].id, "policy_id": policy.id, "error": error }));
-                }
+    for policy_results in &evaluated {
+        for (index, result) in policy_results.iter().enumerate() {
+            if result.is_err() {
+                usable[index] = false;
             }
         }
     }
@@ -270,7 +282,8 @@ fn evaluate_worlds(
     if usable_count == 0 {
         return Err("dream-replay-cycle: no sealed world replays under every policy".to_string());
     }
-    let mut rankings = Vec::new();
+    let mut ranked: Vec<RankedReplay> = Vec::new();
+    let mut world_scores: Vec<Vec<f64>> = Vec::new();
     for (policy_index, policy) in policies.iter().enumerate() {
         let replays = evaluated[policy_index]
             .iter()
@@ -301,110 +314,47 @@ fn evaluate_worlds(
                 })
             })
             .sum::<Result<u64, String>>()?;
-        rankings.push(json!({
-            "policy_id": policy.id,
-            "score": score,
-            "cost": cost,
-            "attempt": policy.attempt.unwrap_or(1).max(1),
-            "group_size": policy.group_size.unwrap_or(1).max(1),
-            "stop": policy.stop.map(Stop::name),
-            "replays": replays,
-        }));
+        ranked.push(RankedReplay { policy_id: policy.id.clone(), score, cost });
+        world_scores.push(scores);
     }
-    let baseline = rankings
+    let baseline_index = ranked
         .iter()
-        .find(|ranking| {
-            ranking.get("policy_id").and_then(Value::as_str) == Some(baseline_id.as_str())
-        })
-        .cloned()
+        .position(|ranking| ranking.policy_id == baseline_id)
         .ok_or_else(|| "dream-replay-cycle baseline ranking missing".to_string())?;
-    let baseline_score = baseline
-        .get("score")
-        .and_then(Value::as_f64)
-        .ok_or_else(|| "dream-replay-cycle baseline score missing".to_string())?;
-    let replay_score = |replay: &Value| replay.get("replay_score").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY);
-    let baseline_replays = baseline.get("replays").and_then(Value::as_array).cloned().unwrap_or_default();
-    for ranking in rankings.iter_mut() {
-        let wins = ranking
-            .get("replays")
-            .and_then(Value::as_array)
-            .map_or(0, |replays| {
-                replays
-                    .iter()
-                    .zip(baseline_replays.iter())
-                    .filter(|(challenger, incumbent)| replay_score(challenger) > replay_score(incumbent))
-                    .count()
-            });
-        let win_fraction = if usable_count == 0 { 0.0 } else { wins as f64 / usable_count as f64 };
-        ranking["win_fraction"] = json!(win_fraction);
-    }
-    let clears_margin = |ranking: &Value| -> bool {
-        ranking.get("score").and_then(Value::as_f64).unwrap_or(f64::NEG_INFINITY) > baseline_score + PROMOTION_MARGIN
-    };
-    let clears_win_fraction = |ranking: &Value| -> bool {
-        ranking.get("win_fraction").and_then(Value::as_f64).unwrap_or(0.0) >= PROMOTION_MIN_WIN_FRACTION
-    };
-    let margin_only = rankings.iter().any(|ranking| clears_margin(ranking) && !clears_win_fraction(ranking));
-    let selected = rankings
+    let baseline_score = ranked[baseline_index].score;
+    let baseline_world_scores = world_scores[baseline_index].clone();
+    let win_fractions: Vec<f64> = world_scores
         .iter()
-        .filter(|ranking| usable_count >= PROMOTION_MIN_WORLDS && clears_margin(ranking) && clears_win_fraction(ranking))
-        .max_by(|left, right| {
-            let score = |ranking: &Value| {
-                ranking
-                    .get("score")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(f64::NEG_INFINITY)
-            };
+        .map(|scores| {
+            let wins = scores
+                .iter()
+                .zip(baseline_world_scores.iter())
+                .filter(|(challenger, incumbent)| challenger > incumbent)
+                .count();
+            wins as f64 / usable_count as f64
+        })
+        .collect();
+    let clears_margin = |index: usize| -> bool {
+        finite_score(ranked[index].score).unwrap_or(f64::NEG_INFINITY) > baseline_score + PROMOTION_MARGIN
+    };
+    let clears_win_fraction = |index: usize| -> bool { win_fractions[index] >= PROMOTION_MIN_WIN_FRACTION };
+    let selected_index = (0..ranked.len())
+        .filter(|&index| usable_count >= PROMOTION_MIN_WORLDS && clears_margin(index) && clears_win_fraction(index))
+        .max_by(|&left, &right| {
+            let score = |index: usize| finite_score(ranked[index].score).unwrap_or(f64::NEG_INFINITY);
             score(left)
                 .partial_cmp(&score(right))
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    right
-                        .get("cost")
-                        .and_then(Value::as_u64)
-                        .cmp(&left.get("cost").and_then(Value::as_u64))
-                })
-                .then_with(|| {
-                    right
-                        .get("policy_id")
-                        .and_then(Value::as_str)
-                        .cmp(&left.get("policy_id").and_then(Value::as_str))
-                })
+                .then_with(|| ranked[right].cost.cmp(&ranked[left].cost))
+                .then_with(|| ranked[right].policy_id.cmp(&ranked[left].policy_id))
         })
-        .cloned()
-        .unwrap_or(baseline.clone());
-    let declared = |key: &str| selected.get(key).cloned().unwrap_or(Value::Null);
-    let selected_score = selected.get("score").and_then(Value::as_f64);
-    let improved = selected.get("policy_id") != baseline.get("policy_id")
-        && selected_score.unwrap_or(f64::NEG_INFINITY) > baseline_score;
-    Ok(json!({
-        "ok": true,
-        "baseline_policy_id": baseline_id,
-        "selected_policy_id": selected.get("policy_id").and_then(Value::as_str),
-        "baseline_score": baseline_score,
-        "selected_score": selected_score,
-        "attempt": declared("attempt"),
-        "group_size": declared("group_size"),
-        "stop": declared("stop"),
-        "improved": improved,
-        "promotion_reason": if improved {
-            "improved"
-        } else if usable_count < PROMOTION_MIN_WORLDS {
-            "insufficient_worlds"
-        } else if margin_only {
-            "below_win_fraction"
-        } else {
-            "below_margin"
-        },
-        "promotion_margin": PROMOTION_MARGIN,
-        "promotion_min_win_fraction": PROMOTION_MIN_WIN_FRACTION,
-        "n_observations": usable_count,
-        "skipped_worlds": skipped_worlds,
-        "domain": if usable_count < PROMOTION_MIN_WORLDS { "disorder" } else { "order" },
-        "beta1": beta1,
-        "beta2": beta2,
-        "rankings": rankings,
-    }))
+        .unwrap_or(baseline_index);
+    let selected = RankedReplay {
+        policy_id: ranked[selected_index].policy_id.clone(),
+        score: ranked[selected_index].score,
+        cost: ranked[selected_index].cost,
+    };
+    Ok(ReplayOutcome { baseline_score, selected, rankings: ranked })
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1132,6 +1082,8 @@ pub struct HistoryRound {
     pub summary: Value,
     pub lost_cursor: Option<String>,
     pub no_replayable_worlds: bool,
+    pub baseline_score: Option<f64>,
+    pub ranked_scores: Vec<(String, f64)>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1159,19 +1111,21 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
             summary: json!({ "history": history, "incumbent_policy_id": incumbent.id, "candidates": candidates.len() }),
             lost_cursor: lost_cursor.clone(),
             no_replayable_worlds: true,
+            baseline_score: None,
+            ranked_scores: Vec::new(),
         });
     }
     let candidate_count = candidates.len();
     let replay = evaluate_worlds(incumbent.id.clone(), candidates.clone(), scan.worlds, beta1, beta2)?;
-    let baseline_score = replay.get("baseline_score").and_then(Value::as_f64).ok_or("dream-replay-cycle baseline score missing")?;
-    let selected_id = replay.get("selected_policy_id").and_then(Value::as_str).unwrap_or(&incumbent.id).to_string();
-    let selected_score = replay.get("selected_score").and_then(Value::as_f64).ok_or("dream-replay-cycle selected score missing")?;
+    let baseline_score = finite_score(replay.baseline_score).ok_or("dream-replay-cycle baseline score missing")?;
+    let selected_id = replay.selected.policy_id.clone();
+    let selected_score = finite_score(replay.selected.score).ok_or("dream-replay-cycle selected score missing")?;
     let ranked_score = |id: &str| {
         replay
-            .get("rankings")
-            .and_then(Value::as_array)
-            .and_then(|rankings| rankings.iter().find(|ranking| ranking.get("policy_id").and_then(Value::as_str) == Some(id)))
-            .and_then(|ranking| ranking.get("score").and_then(Value::as_f64))
+            .rankings
+            .iter()
+            .find(|ranking| ranking.policy_id == id)
+            .and_then(|ranking| finite_score(ranking.score))
     };
     let never_worse = matches!(
         (ranked_score(&selected_id), ranked_score(&incumbent.id)),
@@ -1181,15 +1135,10 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
         defects.push("postcondition_selected_below_incumbent");
     }
     let mut rankings: Vec<Value> = replay
-        .get("rankings")
-        .and_then(Value::as_array)
-        .map(|rankings| {
-            rankings
-                .iter()
-                .map(|ranking| json!({ "policy_id": ranking.get("policy_id"), "score": ranking.get("score"), "cost": ranking.get("cost") }))
-                .collect()
-        })
-        .unwrap_or_default();
+        .rankings
+        .iter()
+        .map(|ranking| json!({ "policy_id": ranking.policy_id, "score": ranking.score, "cost": ranking.cost }))
+        .collect();
     if rankings.len() != candidate_count {
         defects.push("postcondition_rankings_incomplete");
     }
@@ -1206,6 +1155,8 @@ pub(super) fn history_round(owner: &str, cursor: Option<&str>, beta1: f64, beta2
         latest_dispatch_id,
         lost_cursor,
         no_replayable_worlds: false,
+        baseline_score: Some(baseline_score),
+        ranked_scores: replay.rankings.iter().map(|ranking| (ranking.policy_id.clone(), ranking.score)).collect(),
         summary: json!({
             "selection": if improved { "propose-challenger" } else { "keep-incumbent" },
             "incumbent_policy_id": incumbent.id,
@@ -1442,22 +1393,18 @@ pub const PROJECT_WIDE_SESSION: &str = "_any-session";
 pub const PROBE_STRATEGY_FILE: &str = "probe-strategy.json";
 
 #[cfg(target_arch = "wasm32")]
-pub(super) fn update_probe(owner: &str, fields: &Value) {
+pub(super) fn update_probe(owner: &str, baseline: Option<f64>, ranked_scores: &[(String, f64)]) {
     let path = session_store_path(owner, PROBE_STRATEGY_FILE);
-    let baseline = fields.get("baseline_score").and_then(Value::as_f64);
     if crate::pkfs::exists(&path) {
         let probe = crate::pkfs::read_to_string(&path).and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
         let probe_score = probe
             .as_ref()
             .and_then(|probe| probe.get("policy_id")?.as_str())
             .and_then(|policy| {
-                fields
-                    .get("rankings")?
-                    .as_array()?
+                ranked_scores
                     .iter()
-                    .find(|ranking| ranking.get("policy_id").and_then(Value::as_str) == Some(policy))?
-                    .get("score")?
-                    .as_f64()
+                    .find(|(policy_id, _)| policy_id == policy)
+                    .and_then(|(_, score)| finite_score(*score))
             });
         let dampen = matches!((probe_score, baseline), (Some(score), Some(base)) if score < base);
         if dampen {
