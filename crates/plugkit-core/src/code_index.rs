@@ -3455,6 +3455,47 @@ fn save_file_digest_cache(path: &str, map: &std::collections::HashMap<String, Fi
     let _ = crate::wasm_dispatch::host_write(path, &body);
 }
 
+const FILE_DIGEST_LOG_MAX_LINES: usize = 512;
+
+fn file_digest_log_path_for(project_path: Option<&str>) -> String {
+    format!("{}.log", file_digest_cache_path_for(project_path))
+}
+
+fn load_file_digest_log(path: &str, map: &mut std::collections::HashMap<String, FileDigestEntry>) -> usize {
+    let Some(raw) = crate::wasm_dispatch::host_read(path) else {
+        return 0;
+    };
+    let mut lines = 0usize;
+    for line in raw.lines() {
+        let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let (Some(key), Some(mtime_bits), Some(size), Some(hash)) = (
+            arr.first().and_then(Value::as_str),
+            arr.get(1).and_then(Value::as_u64),
+            arr.get(2).and_then(Value::as_u64),
+            arr.get(3).and_then(Value::as_u64),
+        ) else {
+            continue;
+        };
+        map.insert(key.to_string(), FileDigestEntry { mtime_bits, size, hash: hash as u32 });
+        lines += 1;
+    }
+    lines
+}
+
+fn append_file_digest_log(
+    path: &str,
+    map: &std::collections::HashMap<String, FileDigestEntry>,
+    keys: &[String],
+) -> bool {
+    let body: String = keys
+        .iter()
+        .filter_map(|k| map.get(k).map(|e| format!("{}\n", json!([k, e.mtime_bits, e.size, e.hash]))))
+        .collect();
+    crate::pkfs::append(path, &body)
+}
+
 pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Option<&str>) -> String {
     let cache_key = project_scoped_cache_key(project_path);
     let now_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
@@ -3470,8 +3511,11 @@ pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Op
     let listing_complete = enumeration.complete;
     let files = enumeration.files;
     let cache_path = file_digest_cache_path_for(project_path);
+    let log_path = file_digest_log_path_for(project_path);
     let mut file_digests = load_file_digest_cache(&cache_path);
-    let mut cache_dirty = false;
+    let log_lines = load_file_digest_log(&log_path, &mut file_digests);
+    let mut changed_keys: Vec<String> = Vec::new();
+    let mut full_rewrite = false;
     let mut entries: Vec<(String, u32)> = Vec::new();
     let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     for raw_fp in &files {
@@ -3504,15 +3548,18 @@ pub fn current_digest_cfg_at(cfg: &crate::ragconfig::RagConfig, project_path: Op
         { Some(c) => c, None => continue };
         let content_hash = crate::hash::fnv1a64(content.as_bytes()) as u32;
         file_digests.insert(canon.clone(), FileDigestEntry { mtime_bits, size, hash: content_hash });
-        cache_dirty = true;
+        changed_keys.push(canon.clone());
         entries.push((canon, content_hash));
     }
     if file_digests.len() > seen_paths.len() + 4096 {
         file_digests.retain(|k, _| seen_paths.contains(k));
-        cache_dirty = true;
+        full_rewrite = true;
     }
-    if cache_dirty {
+    if full_rewrite || (!changed_keys.is_empty() && log_lines + changed_keys.len() > FILE_DIGEST_LOG_MAX_LINES) {
         save_file_digest_cache(&cache_path, &file_digests);
+        let _ = crate::wasm_dispatch::host_write(&log_path, "");
+    } else if !changed_keys.is_empty() {
+        append_file_digest_log(&log_path, &file_digests, &changed_keys);
     }
     let digest = digest_from_entries(entries);
     let digest = if listing_complete {
