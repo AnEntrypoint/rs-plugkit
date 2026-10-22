@@ -84,6 +84,7 @@ pub enum CasWriteOutcome {
     Swapped,
     Mismatch,
     IoError,
+    NoSpace,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -91,6 +92,8 @@ pub fn cas_write(path: &str, expected: &str, data: &str) -> CasWriteOutcome {
     match crate::wasm_dispatch::host_cas_write(&anchor(path), expected, data) {
         1 => CasWriteOutcome::Swapped,
         2 => CasWriteOutcome::Mismatch,
+        // Host code 3 is the only failure a caller can act on: the volume holding the target is full.
+        3 => CasWriteOutcome::NoSpace,
         _ => CasWriteOutcome::IoError,
     }
 }

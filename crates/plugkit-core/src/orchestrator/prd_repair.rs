@@ -208,6 +208,11 @@ pub fn repair_prd_store(
                     "prd-repair: concurrent writer changed {path_s} between the backup and the write; its bytes are at {backup_path}"
                 ));
             }
+            pkfs::CasWriteOutcome::NoSpace => {
+                last_err = Some(format!(
+                    "prd-repair: write to {path_s} failed, no space left on the volume holding it; its bytes are at {backup_path}"
+                ));
+            }
             pkfs::CasWriteOutcome::IoError => {
                 last_err = Some(format!("prd-repair: write to {path_s} failed"));
             }

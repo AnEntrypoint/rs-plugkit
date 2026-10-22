@@ -490,6 +490,13 @@ pub fn handle_check_removal(content: &str) -> (String, String, i32) {
                 1,
             );
         }
+        pkfs::CasWriteOutcome::NoSpace => {
+            return (
+                String::new(),
+                "discipline-check-removal failed: no space left on the volume holding enabled.txt".to_string(),
+                1,
+            );
+        }
         pkfs::CasWriteOutcome::IoError => {
             return (
                 String::new(),

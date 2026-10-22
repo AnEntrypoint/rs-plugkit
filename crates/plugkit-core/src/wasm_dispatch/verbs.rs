@@ -335,6 +335,7 @@ pub const ERR_CODE_APPEND_ONLY_REWRITE: &str = "append_only_rewrite_refused";
 // Host write code 3 is StorageFull. A full disk is a different recovery from a refused write, so it
 // gets its own error_code instead of the generic "failed".
 pub const ERR_CODE_STORAGE_FULL: &str = "storage_full";
+pub const HOST_WRITE_OK: u32 = 1;
 pub const HOST_WRITE_STORAGE_FULL: u32 = 3;
 
 const APPEND_ONLY_PATH_SUFFIXES: &[&str] = &["/.gm/lean-walk/new-nodes.jsonl"];
@@ -1378,7 +1379,7 @@ fn fs_write(body: &Value) -> u64 {
         );
     }
     let write_code = super::host_abi::host_write_code(path, &content);
-    if write_code != 0 {
+    if write_code == HOST_WRITE_OK {
         return ok("fs_write", json!({ "bytes": content.len(), "path": path }));
     }
     let parents = ensure_parent_dirs(path);
@@ -1387,19 +1388,15 @@ fn fs_write(body: &Value) -> u64 {
     } else {
         0
     };
-    if retried != 0 {
+    if retried == HOST_WRITE_OK {
         return ok(
             "fs_write",
             json!({ "bytes": content.len(), "path": path, "parents_created": true }),
         );
     }
-    let failed_code = if retried != 0 {
-        0
-    } else if write_code == HOST_WRITE_STORAGE_FULL {
-        write_code
-    } else {
-        0
-    };
+    // The host returns 1 only when the bytes landed. A full volume is 3, which is a failure a caller
+    // can act on, so it must never be reported as a successful write.
+    let no_space = write_code == HOST_WRITE_STORAGE_FULL || retried == HOST_WRITE_STORAGE_FULL;
     let cause = parents
         .get("error")
         .and_then(Value::as_str)
@@ -1407,8 +1404,12 @@ fn fs_write(body: &Value) -> u64 {
     err_json(
         "fs_write",
         json!({
-            "error": format!("write failed for {path}: {cause}"),
-            "error_code": if failed_code == HOST_WRITE_STORAGE_FULL {
+            "error": if no_space {
+                format!("write failed for {path}: no space left on the volume holding it")
+            } else {
+                format!("write failed for {path}: {cause}")
+            },
+            "error_code": if no_space {
                 ERR_CODE_STORAGE_FULL
             } else {
                 parents.get("code").and_then(Value::as_str).unwrap_or(ERR_CODE_FAILED)
