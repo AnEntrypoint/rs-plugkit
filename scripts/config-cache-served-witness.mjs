@@ -415,8 +415,8 @@ async function instantiateWasm(module, root, home, onGit, note) {
 }
 
 function ensureWasm(root) {
-  run('cargo', ['build', '--target', 'wasm32-wasip1', '--features', 'slim'], root, CARGO_BUILD_TIMEOUT_MS);
-  const wasm = path.join(root, 'target', 'wasm32-wasip1', 'debug', 'rs_plugkit.wasm');
+  run('cargo', ['+nightly', 'build', '--target', 'wasm32-wasip3', '--features', 'slim,wit-env'], root, CARGO_BUILD_TIMEOUT_MS);
+  const wasm = path.join(root, 'target', 'wasm32-wasip3', 'debug', 'rs_plugkit.wasm');
   if (!fs.existsSync(wasm)) throw new Error(`no wasm at ${wasm} after cargo build`);
   return wasm;
 }
