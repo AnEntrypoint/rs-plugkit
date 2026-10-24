@@ -151,6 +151,8 @@ fn default_longgap_refresh_verbs() -> Vec<String> {
         "prd-list",
         "prd-defer",
         "prd-retire",
+        "prd-note",
+        "prd-close",
         "mutable-add",
         "mutable-resolve",
         "mutable-list",
