@@ -3913,6 +3913,379 @@ pub fn handle_retire(content: &str) -> (String, String, i32) {
     }
 }
 
+const NOTE_DEFAULT_FIELD: &str = "notes";
+
+const NOTE_RESERVED_FIELDS: &[&str] = &[
+    "id",
+    "subject",
+    "description",
+    "acceptance_criteria",
+    "witness_plan",
+    "status",
+    "blockedBy",
+    "owner",
+    "disposition",
+    "recheck_by",
+    "session_id",
+    "witness",
+    "witness_evidence",
+    "witness_binding",
+    "deferReason",
+    "resolution",
+    "commit_sha",
+];
+
+fn note_field_refusal(field: &str) -> Option<&'static str> {
+    let well_formed = field.len() <= 40
+        && field.starts_with(|c: char| c.is_ascii_lowercase())
+        && field
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if well_formed && !NOTE_RESERVED_FIELDS.contains(&field) {
+        None
+    } else {
+        Some("prd_note_invalid_field")
+    }
+}
+
+fn request_text_first(request: &serde_json::Value, fields: &[&str]) -> Option<String> {
+    fields.iter().find_map(|field| {
+        request
+            .get(*field)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn note_entry(note: &str, session: Option<&str>, ts: &str) -> Value {
+    let mut map = yaml_serde::Mapping::new();
+    map.insert(Value::String("ts".to_string()), Value::String(ts.to_string()));
+    if let Some(session) = session {
+        map.insert(
+            Value::String("session_id".to_string()),
+            Value::String(session.to_string()),
+        );
+    }
+    map.insert(Value::String("note".to_string()), Value::String(note.to_string()));
+    Value::Mapping(map)
+}
+
+fn note_row_index(seq: &[Value], id: &str) -> Option<usize> {
+    seq.iter().rposition(|item| {
+        item.as_mapping()
+            .and_then(|map| map.get(&Value::String("id".to_string())))
+            .and_then(Value::as_str)
+            == Some(id)
+    })
+}
+
+fn attach_note(
+    doc: &mut Value,
+    id: &str,
+    field: &str,
+    entry: Value,
+) -> Result<usize, &'static str> {
+    let Some(seq) = doc.as_sequence_mut() else {
+        return Err("prd_note_unknown_id");
+    };
+    let Some(index) = note_row_index(seq.as_slice(), id) else {
+        return Err("prd_note_unknown_id");
+    };
+    let Some(map) = seq[index].as_mapping_mut() else {
+        return Err("prd_note_unknown_id");
+    };
+    let key = Value::String(field.to_string());
+    let mut notes = match map.get(&key) {
+        None => Vec::new(),
+        Some(Value::Sequence(existing)) => existing.clone(),
+        Some(_) => return Err("prd_note_field_not_a_list"),
+    };
+    notes.push(entry);
+    let count = notes.len();
+    map.insert(key, Value::Sequence(notes));
+    Ok(count)
+}
+
+fn note_present(doc: &Value, id: &str, field: &str, ts: &str, note: &str) -> bool {
+    let Some(seq) = doc.as_sequence() else {
+        return false;
+    };
+    let Some(index) = note_row_index(seq.as_slice(), id) else {
+        return false;
+    };
+    let Some(map) = seq[index].as_mapping() else {
+        return false;
+    };
+    match map.get(&Value::String(field.to_string())) {
+        Some(Value::Sequence(notes)) => notes.iter().any(|item| {
+            item.as_mapping().is_some_and(|entry| {
+                mapping_text(entry, "ts").as_deref() == Some(ts)
+                    && mapping_text(entry, "note").as_deref() == Some(note)
+            })
+        }),
+        _ => false,
+    }
+}
+
+fn note_refusal(code: &str, id: &str, field: &str) -> (String, String) {
+    if code == "prd_note_field_not_a_list" {
+        (
+            serde_json::json!({"ok": false, "error_code": code, "id": id, "field": field}).to_string(),
+            format!(
+                "prd-note refused: field '{}' on row '{}' is not a list, so a note cannot be appended without overwriting it. Nothing was written.",
+                field, id
+            ),
+        )
+    } else {
+        (
+            serde_json::json!({"ok": false, "error_code": "prd_note_unknown_id", "id": id}).to_string(),
+            format!(
+                "prd-note refused: no open row '{}' in .gm/prd/ (a closed row lives in .gm/prd-log.jsonl). Nothing was written.",
+                id
+            ),
+        )
+    }
+}
+
+pub fn handle_note(content: &str) -> (String, String, i32) {
+    let request = request_object(content);
+    let Some(id) = request_strings(&request, PRD_ROW_ID_FIELDS).into_iter().next() else {
+        return (
+            String::new(),
+            "prd-note refused: body must name the open row: {\"id\":\"<row id>\",\"note\":\"<text>\",\"field\"?:\"<list name, default notes>\"}".to_string(),
+            1,
+        );
+    };
+    let Some(note) = request_text_first(&request, &["note"]) else {
+        return (
+            String::new(),
+            format!("prd-note refused: note for '{}' must be a non-empty string", id),
+            1,
+        );
+    };
+    let field = request_text_first(&request, &["field"]).unwrap_or_else(|| NOTE_DEFAULT_FIELD.to_string());
+    if let Some(code) = note_field_refusal(&field) {
+        return (
+            serde_json::json!({"ok": false, "error_code": code, "id": id, "field": field}).to_string(),
+            format!(
+                "prd-note refused: field '{}' is not a note list name (lowercase letters, digits and underscores, and not a reserved row field). Nothing was written.",
+                field
+            ),
+            1,
+        );
+    }
+    let ts = row_store::now_iso();
+    let session = body_session_id(&request);
+    let entry = note_entry(&note, session.as_deref(), &ts);
+    let policy = super::fsm::graph().policy.clone();
+    let store = row_store::Store::prd();
+    let outcome = row_store::cas_retry_write_verified(
+        &store,
+        policy.cas_max_attempts,
+        "prd-note",
+        |mut doc: Value| match attach_note(&mut doc, &id, &field, entry.clone()) {
+            Ok(count) => cas::CasOutcome::Write(doc, count),
+            Err(code) => {
+                let (body, err) = note_refusal(code, &id, &field);
+                cas::CasOutcome::Abort(body, err, 1)
+            }
+        },
+        |doc: &Value| note_present(doc, &id, &field, &ts, &note),
+    );
+    match outcome {
+        Ok(count) => {
+            invalidate_residual_marker("prd-note");
+            (
+                serde_json::json!({"noted": id, "field": field, "count": count}).to_string(),
+                String::new(),
+                0,
+            )
+        }
+        Err((out, err, rc)) => (out, err, rc),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn close_witness_refusal(
+    request: &serde_json::Value,
+    dispatch_id: &str,
+    resolver: Option<&str>,
+) -> Option<String> {
+    let cwd = request_text_first(request, &["cwd"])
+        .unwrap_or_else(|| crate::wasm_dispatch::host_cwd_string().unwrap_or_default());
+    let recorded = match crate::dispatch_ledger::lookup_in_scope(&cwd, dispatch_id) {
+        Ok(found) => found,
+        Err(reason) => return Some(format!("could not be checked: the dispatch ledger is unreadable ({})", reason)),
+    };
+    if recorded.is_none() && !dispatch_in_spool_out(&cwd, dispatch_id) {
+        return Some("is not recorded in this project's dispatch ledger or exec spool, so it is not a live run".to_string());
+    }
+    let dispatch_session = recorded
+        .as_ref()
+        .and_then(|entry| entry.get("session_id"))
+        .and_then(serde_json::Value::as_str);
+    if dispatch_session.is_some() && dispatch_session == resolver {
+        return Some("was produced by the resolving session; the witness must come from a separate SESSION_ID".to_string());
+    }
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn close_witness_refusal(
+    _request: &serde_json::Value,
+    _dispatch_id: &str,
+    _resolver: Option<&str>,
+) -> Option<String> {
+    None
+}
+
+pub fn handle_close(content: &str) -> (String, String, i32) {
+    let request = request_object(content);
+    let Some(id) = request_strings(&request, PRD_ROW_ID_FIELDS).into_iter().next() else {
+        return (
+            String::new(),
+            "prd-close refused: body must name the open row: {\"id\":\"<row id>\",\"status\":\"resolved\" or \"stale\",\"resolution\":\"<text>\",\"witness_evidence\":\"<observed output>\",\"witness_dispatch_id\":\"<dispatch id of a live run>\"}".to_string(),
+            1,
+        );
+    };
+    let status = request_text_first(&request, &["status"]).unwrap_or_default();
+    if status != "resolved" && status != "stale" {
+        return (
+            serde_json::json!({"ok": false, "error_code": "prd_close_invalid_status", "id": id, "status": status}).to_string(),
+            format!(
+                "prd-close refused: status for '{}' must be \"resolved\" or \"stale\", not '{}'. Nothing was written.",
+                id, status
+            ),
+            1,
+        );
+    }
+    let resolution = request_text_first(&request, &["resolution", "resolution_text"]);
+    let witness = request_text_first(&request, &["witness_evidence", "witness"]);
+    let dispatch = request_text_first(&request, &["witness_dispatch_id", "dispatch_id"]);
+    let mut missing: Vec<&str> = Vec::new();
+    if resolution.is_none() {
+        missing.push("resolution");
+    }
+    if witness.is_none() {
+        missing.push("witness_evidence");
+    }
+    if dispatch.is_none() {
+        missing.push("witness_dispatch_id");
+    }
+    if !missing.is_empty() {
+        return (
+            serde_json::json!({"ok": false, "error_code": "prd_close_missing_field", "id": id, "missing": missing}).to_string(),
+            format!(
+                "prd-close refused: {} missing for '{}'. Every close names the resolution, the observed witness output and the witness_dispatch_id of a live run. Nothing was written.",
+                missing.join(", "),
+                id
+            ),
+            1,
+        );
+    }
+    let resolution = resolution.unwrap_or_default();
+    let witness = witness.unwrap_or_default();
+    let dispatch = dispatch.unwrap_or_default();
+    let store = row_store::Store::prd();
+    let blocks = match row_store::read_blocks(&store) {
+        Ok(read) => read.blocks,
+        Err((message, code)) => return (String::new(), message, code),
+    };
+    let Some(row) = blocks
+        .iter()
+        .filter_map(Value::as_mapping)
+        .find(|map| mapping_text(map, "id").as_deref() == Some(id.as_str()))
+    else {
+        return (
+            serde_json::json!({"ok": false, "error_code": "prd_close_unknown_id", "id": id}).to_string(),
+            format!(
+                "prd-close refused: no open row '{}' in .gm/prd/ (a closed row already lives in .gm/prd-log.jsonl). Nothing was written.",
+                id
+            ),
+            1,
+        );
+    };
+    let resolver = body_session_id(&request).or_else(super::state::dispatch_session_id);
+    let recheck_by = mapping_text(row, "recheck_by");
+    if recheck_by.is_some() && recheck_by == resolver {
+        return (
+            serde_json::json!({"ok": false, "error_code": "prd_close_recheck_refused", "id": id}).to_string(),
+            format!(
+                "prd-close refused: {} has recheck_by equal to the closing session; the session that must recheck a row cannot close it. Nothing was written.",
+                id
+            ),
+            1,
+        );
+    }
+    let disposition_open = mapping_text(row, "disposition")
+        .map(|d| disposition_head(&d) == "open")
+        .unwrap_or(false);
+    if disposition_open {
+        return (
+            serde_json::json!({"ok": false, "error_code": "prd_close_disposition_open", "id": id}).to_string(),
+            format!(
+                "prd-close refused: {} has disposition open; set accepted, rejected or deferred before closing. Nothing was written.",
+                id
+            ),
+            1,
+        );
+    }
+    if let Some(reason) = close_witness_refusal(&request, &dispatch, resolver.as_deref()) {
+        return (
+            serde_json::json!({"ok": false, "error_code": "prd_close_unbound_witness", "id": id, "witness_dispatch_id": dispatch, "reason": reason}).to_string(),
+            format!(
+                "prd-close refused: witness_dispatch_id {} for '{}' {}. Nothing was written.",
+                dispatch, id, reason
+            ),
+            1,
+        );
+    }
+    let closed_at = row_store::now_iso();
+    let closure = serde_json::json!({
+        "status": status.clone(),
+        "resolution": resolution.clone(),
+        "witness": witness.clone(),
+        "witness_dispatch_id": dispatch.clone(),
+        "closed_at": closed_at.clone(),
+    });
+    match row_store::close_to_log(&store, &id, &status, Some(resolution.as_str()), closure) {
+        Ok(_) => {
+            prune_receipts(&id);
+            invalidate_residual_marker("prd-close");
+            #[cfg(target_arch = "wasm32")]
+            crate::wasm_dispatch::emit_event(
+                "prd.closed",
+                serde_json::json!({ "id": id.clone(), "status": status.clone() }),
+            );
+            (
+                serde_json::json!({
+                    "closed": id,
+                    "status": status,
+                    "witness_dispatch_id": dispatch,
+                    "closed_at": closed_at,
+                })
+                .to_string(),
+                String::new(),
+                0,
+            )
+        }
+        Err(reason) => (
+            serde_json::json!({
+                "ok": false,
+                "error_code": if row_store::is_no_space(&reason) { "storage_full" } else { "failed" },
+                "error": format!("prd-close: {} could not be moved into {}: {}", id, store.log, reason),
+                "id": id,
+                "log": store.log,
+            })
+            .to_string(),
+            String::new(),
+            1,
+        ),
+    }
+}
+
 pub fn handle_witness_request(content: &str) -> (String, String, i32) {
     let body = json_body(content);
     let Some(id) = body_str(&body, &["id", "prd_id", "row"]) else {
@@ -4095,6 +4468,113 @@ pub fn handle_expansion_audit(content: &str) -> (String, String, i32) {
             0,
         ),
         Err(e) => (String::new(), format!("expansion-audit: {}", e), 1),
+    }
+}
+
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+
+    fn open_row_doc(id: &str) -> Value {
+        let mut row = yaml_serde::Mapping::new();
+        row.insert(Value::String("id".to_string()), Value::String(id.to_string()));
+        row.insert(
+            Value::String("subject".to_string()),
+            Value::String("subject line".to_string()),
+        );
+        row.insert(
+            Value::String("description".to_string()),
+            Value::String("original prose".to_string()),
+        );
+        row.insert(
+            Value::String("status".to_string()),
+            Value::String("pending".to_string()),
+        );
+        Value::Sequence(vec![Value::Mapping(row)])
+    }
+
+    fn row_map(doc: &Value) -> &yaml_serde::Mapping {
+        doc.as_sequence()
+            .and_then(|seq| seq.first())
+            .and_then(Value::as_mapping)
+            .expect("the open row is the first block")
+    }
+
+    fn field_text<'a>(doc: &'a Value, key: &str) -> Option<&'a str> {
+        row_map(doc)
+            .get(&Value::String(key.to_string()))
+            .and_then(Value::as_str)
+    }
+
+    fn note_texts(doc: &Value) -> Vec<String> {
+        match row_map(doc).get(&Value::String("notes".to_string())) {
+            Some(Value::Sequence(items)) => items
+                .iter()
+                .filter_map(|item| item.as_mapping().and_then(|map| mapping_text(map, "note")))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sequential_notes_both_survive_and_keep_the_row_fields() {
+        let mut doc = open_row_doc("row-1");
+        assert_eq!(
+            attach_note(&mut doc, "row-1", "notes", note_entry("first measurement", Some("drain-a"), "2026-10-24T10:00:00.000Z")),
+            Ok(1)
+        );
+        assert_eq!(
+            attach_note(&mut doc, "row-1", "notes", note_entry("second measurement", Some("drain-b"), "2026-10-24T10:00:01.000Z")),
+            Ok(2)
+        );
+        assert_eq!(
+            note_texts(&doc),
+            vec!["first measurement".to_string(), "second measurement".to_string()]
+        );
+        assert_eq!(field_text(&doc, "description"), Some("original prose"));
+        assert_eq!(field_text(&doc, "subject"), Some("subject line"));
+        assert_eq!(field_text(&doc, "status"), Some("pending"));
+    }
+
+    #[test]
+    fn note_refuses_to_overwrite_a_scalar_field() {
+        let mut doc = open_row_doc("row-2");
+        assert_eq!(
+            attach_note(&mut doc, "row-2", "description", note_entry("x", None, "t")),
+            Err("prd_note_field_not_a_list")
+        );
+        assert_eq!(field_text(&doc, "description"), Some("original prose"));
+        assert!(note_texts(&doc).is_empty());
+    }
+
+    #[test]
+    fn note_on_an_unknown_row_writes_nothing() {
+        let mut doc = open_row_doc("row-3");
+        assert_eq!(
+            attach_note(&mut doc, "row-404", "notes", note_entry("x", None, "t")),
+            Err("prd_note_unknown_id")
+        );
+        assert!(note_texts(&doc).is_empty());
+        assert_eq!(field_text(&doc, "description"), Some("original prose"));
+    }
+
+    #[test]
+    fn note_field_names_are_list_names_not_row_fields() {
+        assert_eq!(note_field_refusal("notes"), None);
+        assert_eq!(note_field_refusal("measurements_2"), None);
+        assert_eq!(note_field_refusal("blockedBy"), Some("prd_note_invalid_field"));
+        assert_eq!(note_field_refusal("description"), Some("prd_note_invalid_field"));
+        assert_eq!(note_field_refusal("Bad Field"), Some("prd_note_invalid_field"));
+        assert_eq!(note_field_refusal(""), Some("prd_note_invalid_field"));
+    }
+
+    #[test]
+    fn note_present_confirms_only_the_appended_entry() {
+        let mut doc = open_row_doc("row-4");
+        attach_note(&mut doc, "row-4", "notes", note_entry("kept", None, "ts-1")).unwrap();
+        assert!(note_present(&doc, "row-4", "notes", "ts-1", "kept"));
+        assert!(!note_present(&doc, "row-4", "notes", "ts-2", "kept"));
+        assert!(!note_present(&doc, "row-4", "notes", "ts-1", "other"));
     }
 }
 

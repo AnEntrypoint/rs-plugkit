@@ -437,6 +437,8 @@ orchestrator_dispatch_table! {
     "pool-observe" => pool_slots::handle_observe(content),
     "prd-repair" => prd_repair::handle_repair(content),
     "prd-defer" => prd::handle_defer(content),
+    "prd-note" => prd::handle_note(content),
+    "prd-close" => prd::handle_close(content),
     "prd-retire" => prd::handle_retire(content),
     "prd-witness-request" => prd::handle_witness_request(content),
     "expansion-audit" => prd::handle_expansion_audit(content),

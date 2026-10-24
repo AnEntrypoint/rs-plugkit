@@ -1341,26 +1341,52 @@ pub fn append_correction(
     append_log(store, entry)
 }
 
+pub fn now_iso() -> String {
+    iso_ms(super::state::now_ms())
+}
+
 pub fn retire_to_log(
     store: &Store,
     id: &str,
     status: &str,
     note: Option<&str>,
 ) -> Result<serde_json::Value, String> {
+    close_to_log(store, id, status, note, serde_json::Value::Null)
+}
+
+pub fn close_to_log(
+    store: &Store,
+    id: &str,
+    status: &str,
+    note: Option<&str>,
+    closure: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let blocks = item_blocks(store, id);
     if blocks.is_empty() {
         return Err(format!("no item file for {} to retire", id));
     }
     let rows: Vec<serde_json::Value> = blocks.iter().map(yaml_to_json).collect();
-    let entry = serde_json::json!({
+    let extra = closure.as_object().cloned().unwrap_or_default();
+    let mut row = rows.last().cloned().unwrap_or(serde_json::Value::Null);
+    if let Some(map) = row.as_object_mut() {
+        for (key, value) in &extra {
+            map.insert(key.clone(), value.clone());
+        }
+    }
+    let mut entry = serde_json::json!({
         "id": id,
         "status": status,
         "file": format!("{}/{}{}", store.kind.dir_rel(), item_stem(id), ITEM_SUFFIX),
         "note": note,
         "blocks": rows.len(),
-        "row": rows.last().cloned().unwrap_or(serde_json::Value::Null),
+        "row": row,
         "material": rows,
     });
+    if let Some(map) = entry.as_object_mut() {
+        for (key, value) in extra {
+            map.insert(key, value);
+        }
+    }
     let entry = append_log(store, entry)?;
     if !remove_item(store, id) && pkfs::exists(&item_path(store, id)) {
         return Err(format!(
