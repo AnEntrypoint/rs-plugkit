@@ -457,7 +457,7 @@ pub fn record(
         "request_body_truncated": body_truncated,
     })
     .to_string();
-    if !crate::pkfs::append(&path, &format!("{}\n", line)) {
+    if !append_ledger_line(&path, &format!("{}\n", line)) {
         return Err(ledger_unavailable(&path));
     }
     if !write_head_from(cwd, head.entries + 1, head.seq + 1, &head.raw) {
@@ -475,6 +475,48 @@ fn ledger_unavailable(path: &str) -> String {
     format!(
         "dispatch ledger {path} could not be read or written; dispatch not recorded and the file left unchanged"
     )
+}
+
+const EXEC_APPEND_BACKOFF_MS: u64 = 60 * 1000;
+const LEDGER_CAS_ATTEMPTS: usize = 16;
+
+static EXEC_APPEND_SKIP_UNTIL_MS: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+
+fn append_ledger_line(path: &str, line: &str) -> bool {
+    let now = now_ms();
+    let skip_exec = EXEC_APPEND_SKIP_UNTIL_MS
+        .lock()
+        .map(|until| now < *until)
+        .unwrap_or(false);
+    if !skip_exec {
+        if crate::pkfs::append(path, line) {
+            return true;
+        }
+        if let Ok(mut until) = EXEC_APPEND_SKIP_UNTIL_MS.lock() {
+            *until = now + EXEC_APPEND_BACKOFF_MS;
+        }
+    }
+    cas_append_ledger_line(path, line)
+}
+
+fn cas_append_ledger_line(path: &str, line: &str) -> bool {
+    for _ in 0..LEDGER_CAS_ATTEMPTS {
+        let current = crate::pkfs::read_to_string(path).unwrap_or_default();
+        let separator = if current.is_empty() || current.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        let next = format!("{current}{separator}{line}");
+        match crate::pkfs::cas_write(path, &current, &next) {
+            crate::pkfs::CasWriteOutcome::Swapped => return true,
+            crate::pkfs::CasWriteOutcome::Mismatch => continue,
+            crate::pkfs::CasWriteOutcome::IoError | crate::pkfs::CasWriteOutcome::NoSpace => {
+                return false
+            }
+        }
+    }
+    false
 }
 
 pub fn read_entries(cwd: &str) -> Result<Vec<Value>, String> {
@@ -567,7 +609,7 @@ pub fn attach_reply_sha256(
     if let Some(spill) = spill_file {
         supplement["spill_file"] = json!(spill);
     }
-    if crate::pkfs::append(&path, &format!("{}\n", supplement)) {
+    if append_ledger_line(&path, &format!("{}\n", supplement)) {
         Ok(())
     } else {
         Err(ledger_unavailable(&path))
