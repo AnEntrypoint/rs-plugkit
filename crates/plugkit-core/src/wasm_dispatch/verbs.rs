@@ -1220,7 +1220,7 @@ fn content_value_to_text(value: &Value) -> Option<String> {
     Some(joined)
 }
 
-// One writer per checkout: `.gm/locks/<repo>.writer` (scripts/triage/writer-lock.sh take) names the session
+// One writer per checkout: `.gm/locks/<repo>.writer` (the writer_lock verb, action take) names the session
 // allowed to write that repository, and fs_write from any other session is refused. A path whose first
 // component has no lock file of its own falls to the root lock `gm`. Paths under a `.gm` or `.agentplug*`
 // component are gm state and never locked.
@@ -1248,7 +1248,7 @@ fn writer_lock_refusal(path: &str) -> Option<Value> {
     let caller_label = if caller.is_empty() { "<none>".to_string() } else { caller };
     Some(json!({
         "error": format!(
-            "{normalized} is under the writer lock of {repo}, held by session {holder}; this session ({caller_label}) is not the holder. Wait for its release, or take the lock with scripts/triage/writer-lock.sh take {repo} <session>."
+            "{normalized} is under the writer lock of {repo}, held by session {holder}; this session ({caller_label}) is not the holder. Wait for its release, or take the lock with the writer_lock verb (action take, repo {repo})."
         ),
         "error_code": "writer_lock_held",
         "path": normalized,
