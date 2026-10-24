@@ -203,9 +203,24 @@ pub fn ledger_path(cwd: &str) -> String {
     } else {
         format!(
             "{}/.gm/exec-spool/.dispatch-ledger.json",
-            cwd.trim_end_matches('/').trim_end_matches('\\')
+            ledger_root(cwd).trim_end_matches('/').trim_end_matches('\\')
         )
     }
+}
+
+// The gm checkout is addressed by two names: the host root the sandbox serves (for gm, /data/workspace/gm) and
+// the path a caller passes (/workspace/gm), which names the same ledger file. The sandbox reads and creates files
+// only under the host root, so a ledger addressed by the caller name was refused on some dispatches. A caller
+// path of two or more segments that is a suffix of the host root names the host root.
+fn ledger_root(cwd: &str) -> String {
+    let caller = cwd.trim_end_matches('/').trim_end_matches('\\');
+    let host = crate::wasm_dispatch::host_cwd_string().unwrap_or_default();
+    let host = host.trim_end_matches('/').trim_end_matches('\\');
+    let is_alias = caller.starts_with('/')
+        && caller.matches('/').count() >= 2
+        && caller.len() < host.len()
+        && host.ends_with(caller);
+    if is_alias { host.to_string() } else { cwd.to_string() }
 }
 
 fn now_ms() -> u64 {
@@ -458,7 +473,7 @@ pub fn record(
 
 fn ledger_unavailable(path: &str) -> String {
     format!(
-        "dispatch ledger {path} could not be read or written as a JSON array; dispatch not recorded and the file left unchanged"
+        "dispatch ledger {path} could not be read or written; dispatch not recorded and the file left unchanged"
     )
 }
 
