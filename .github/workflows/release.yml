@@ -27,6 +27,6 @@ jobs:
       release_title_prefix: plugkit
       version_manifest: crates/plugkit-core/Cargo.toml
       dependency_repos: AnEntrypoint/rs-search
-      build_command: cargo build -p rs-plugkit --release --target wasm32-wasip1 --features slim
+      build_command: cargo +nightly build -p rs-plugkit --release --target wasm32-wasip3 --features slim,wit-env
     secrets:
       publisher_token: ${{ secrets.PUBLISHER_TOKEN }}

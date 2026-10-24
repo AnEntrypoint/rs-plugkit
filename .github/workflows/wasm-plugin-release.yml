@@ -162,8 +162,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
         with:
-          toolchain: stable
-          targets: wasm32-wasip1
+          toolchain: nightly
+          targets: wasm32-wasip3
 
       - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7
         with:
@@ -239,7 +239,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-assets
-          cp "target/wasm32-wasip1/release/${{ inputs.wasm_artifact_name }}" "release-assets/${{ inputs.published_asset_basename }}.wasm"
+          cp "target/wasm32-wasip3/release/${{ inputs.wasm_artifact_name }}" "release-assets/${{ inputs.published_asset_basename }}.wasm"
           cd release-assets
           sha256sum "${{ inputs.published_asset_basename }}.wasm" | sed 's/ \*/  /' > "${{ inputs.published_asset_basename }}.wasm.sha256"
 
