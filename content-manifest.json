@@ -3,7 +3,7 @@
   "artifacts": {
     "core": {
       "kind": "wasm-module",
-      "target": "wasm32-wasip1",
+      "target": "wasm32-wasip3",
       "path": "plugkit.wasm",
       "description": "orchestrator/gates/state-machine/spool dispatch -- rebuilds on any plugkit-core src change"
     },

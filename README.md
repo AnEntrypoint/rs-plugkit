@@ -480,10 +480,10 @@ checkout.
 ## Build
 
 ```bash
-cargo build --release
+cargo +nightly build -p rs-plugkit --release --target wasm32-wasip3 --features slim,wit-env
 ```
 
-Outputs `target/wasm32-wasip1/release/rs_plugkit.wasm`. The release workflow
+Outputs `target/wasm32-wasip3/release/rs_plugkit.wasm`. The release workflow
 publishes that artifact as `plugkit-slim.wasm`. Release artifacts for the wasm target are
 produced by `.github/workflows/release.yml` on `git push` to `main`, and
 published to `AnEntrypoint/plugkit-bin` as GitHub Releases assets,
