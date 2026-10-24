@@ -19,15 +19,11 @@ impl LedgerCheck {
         let Some(cwd) = crate::wasm_dispatch::host_cwd_string().filter(|cwd| !cwd.is_empty()) else {
             return LedgerCheck { unreadable: Some("cwd_unavailable"), ..Default::default() };
         };
-        let path = crate::dispatch_ledger::ledger_path(&cwd);
-        let Some(raw) = crate::pkfs::read_to_string(&path) else {
-            if crate::pkfs::exists(&path) {
-                return LedgerCheck { unreadable: Some("ledger_unreadable"), ..Default::default() };
-            }
-            return LedgerCheck::default();
-        };
-        let Ok(parsed) = serde_json::from_str::<Vec<Value>>(&raw) else {
-            return LedgerCheck { unreadable: Some("ledger_unparsed"), ..Default::default() };
+        // The ledger is JSONL with supplement lines. read_entries parses that format and merges the
+        // supplements; parsing the file as one JSON array refused every observation as unparsed.
+        let parsed = match crate::dispatch_ledger::read_entries(&cwd) {
+            Ok(parsed) => parsed,
+            Err(_) => return LedgerCheck { unreadable: Some("ledger_unreadable"), ..Default::default() },
         };
         let evicted_possible = parsed.len() >= crate::dispatch_ledger::RETAINED_ENTRIES;
         let newest_ts = parsed.iter().filter_map(|entry| entry.get("ts")?.as_u64()).max().unwrap_or(0);
