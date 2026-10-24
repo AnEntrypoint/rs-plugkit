@@ -12,13 +12,12 @@ on:
       - '.github/workflows/wasm-plugin-release.yml'
   workflow_dispatch:
 
-concurrency:
-  group: rs-plugkit-release
-  cancel-in-progress: false
-
 jobs:
   publish:
     if: "${{ !startsWith(github.event.head_commit.message, 'chore: auto-bump version') }}"
+    concurrency:
+      group: rs-plugkit-release
+      cancel-in-progress: false
     uses: ./.github/workflows/wasm-plugin-release.yml
     with:
       wasm_artifact_name: rs_plugkit.wasm
