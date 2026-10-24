@@ -1,4 +1,5 @@
 use super::gm_dir;
+use crate::pkfs;
 #[cfg(target_arch = "wasm32")]
 use crate::wasm_dispatch::host_abi::{host_cas_write, host_random_fill, host_read};
 #[cfg(target_arch = "wasm32")]
@@ -439,7 +440,49 @@ pub fn handle_end(content: &str) -> (String, String, i32) {
     if cause.chars().count() > CAUSE_MAX_CHARS {
         return reject("cause must be at most 500 characters");
     }
+    if status == "done" && hop_receipt_missing(body_str(&body, "cwd"), subagent) {
+        return reject("hop receipt missing: a hop launched with row=- must write .gm/lean-walk/<NODE>.<SESSION>.json before subagent-end (gm-hop, Node emission)");
+    }
     run_end(body_str(&body, "cwd"), parent, subagent, status, cause)
+}
+
+fn dir_names(dir: &str) -> Vec<String> {
+    let Some(Value::Array(entries)) = pkfs::readdir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .as_str()
+                .or_else(|| entry.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn hop_receipt_missing(cwd: &str, subagent: &str) -> bool {
+    let root = if cwd.is_empty() { "." } else { cwd };
+    let pool = format!("{root}/.gm/pool");
+    let launched_as_hop = dir_names(&pool)
+        .into_iter()
+        .filter(|name| name.starts_with("ledger-") && name.ends_with(".txt"))
+        .any(|name| {
+            pkfs::read_to_string(&format!("{pool}/{name}"))
+                .unwrap_or_default()
+                .lines()
+                .any(|line| {
+                    let tokens: Vec<&str> = line.split_whitespace().collect();
+                    tokens.first() == Some(&"launch") && tokens.get(1) == Some(&subagent) && tokens.contains(&"row=-")
+                })
+        });
+    if !launched_as_hop {
+        return false;
+    }
+    let receipt_suffix = format!(".{subagent}.json");
+    !dir_names(&format!("{root}/.gm/lean-walk"))
+        .iter()
+        .any(|name| name.ends_with(receipt_suffix.as_str()))
 }
 
 pub fn handle_checkpoint(content: &str) -> (String, String, i32) {
