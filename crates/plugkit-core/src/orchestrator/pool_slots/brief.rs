@@ -34,6 +34,19 @@ pub fn handle_brief(content: &str) -> (String, String, i32) {
     if role != "resolver" && role != "traversal" {
         return (String::new(), format!("pool-brief: role must be resolver or traversal, got {}", role), 1);
     }
+    if role == "traversal" {
+        let open = super::super::transitions::prd_open_rows_with_recency().len();
+        if open >= super::super::prd::TRAVERSAL_MIN_OPEN_ROWS {
+            return (
+                String::new(),
+                format!(
+                    "pool-brief: traversal launch refused: {open} rows are pending (traversal launches only below {} pending). Drain first.",
+                    super::super::prd::TRAVERSAL_MIN_OPEN_ROWS
+                ),
+                1,
+            );
+        }
+    }
     let Some(template) = pkfs::read_to_string(WORKER_BRIEF_PATH) else {
         return (String::new(), format!("pool-brief: worker brief missing at {}", WORKER_BRIEF_PATH), 1);
     };

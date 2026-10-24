@@ -7,6 +7,8 @@ use super::yaml_util::{
 use crate::pkfs;
 use yaml_serde::Value;
 
+pub const TRAVERSAL_MIN_OPEN_ROWS: usize = 20;
+
 pub fn prd_path() -> std::path::PathBuf {
     gm_dir().join("prd.yml")
 }
@@ -1086,6 +1088,20 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                 format!(
                     "prd-add refused: disposition '{}' must start with one of open, accepted, rejected, deferred (a reason may follow ':')",
                     disposition
+                ),
+                1,
+            );
+        }
+    }
+    if mapping_text(&item_map, "origin").as_deref() == Some("traversal") {
+        let open = super::transitions::prd_open_rows_with_recency().len();
+        if open >= TRAVERSAL_MIN_OPEN_ROWS {
+            return (
+                String::new(),
+                format!(
+                    "prd-add refused: traversal row while {} rows are pending (traversal files rows only below {} pending). Drain first; file a fix row or wait for the drain.",
+                    open,
+                    TRAVERSAL_MIN_OPEN_ROWS
                 ),
                 1,
             );

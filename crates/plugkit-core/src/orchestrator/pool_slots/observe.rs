@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 
 use super::super::pool_rank;
+use super::super::prd::TRAVERSAL_MIN_OPEN_ROWS;
 use super::super::transitions::prd_open_rows_with_recency;
 use super::floor::{ceiling_from_refusal, floor_denial_text, launch_instruction, monitor_block};
 use super::heartbeats::{count_of_record_live, declared_holds, write_count_of_record, HELD_ROWS_FILE};
@@ -131,7 +132,9 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     let launchable = slots["launchable"].as_u64().unwrap_or(0);
     let node_launchable = slots["node_launchable"].as_u64().unwrap_or(0);
     let traversal_threshold = TRAVERSAL_SUPPLY_FACTOR * REFILL_FLOOR;
-    let traversal_needed = (node_launchable < traversal_threshold || launchable < shortfall) && !unscanned.is_empty();
+    let traversal_needed = open_rows < TRAVERSAL_MIN_OPEN_ROWS as u64
+        && (node_launchable < traversal_threshold || launchable < shortfall)
+        && !unscanned.is_empty();
     let refill_needed = if open_rows > 0 {
         free_slots.min(launchable + u64::from(traversal_needed))
     } else {
