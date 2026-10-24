@@ -103,9 +103,9 @@ fn ensure_jsonl(cwd: &str) -> Result<Head, String> {
         None => return Err(ledger_unavailable(&path)),
     };
     if existing.trim().is_empty() {
-        if !crate::pkfs::write(&path, "") {
-            return Err(ledger_unavailable(&path));
-        }
+        // Creating the empty file is not required: the append that follows creates it, and the append takes the
+        // host route, which does not depend on the sandbox reaching this cwd.
+        let _ = crate::pkfs::write(&path, "");
         let _ = write_head(cwd, 0, 0);
         return Ok(head_of(String::new(), 0, 0));
     }
