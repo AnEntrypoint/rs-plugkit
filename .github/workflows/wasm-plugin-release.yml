@@ -195,6 +195,8 @@ jobs:
         env:
           BUILD_ENV_SCRIPT: ${{ inputs.build_env }}
           BUILD_COMMAND: ${{ inputs.build_command }}
+          # build.rs embeds this as health source_sha; the release records the same commit as source-head.
+          PLUGKIT_BUILD_SHA: ${{ steps.built.outputs.source }}
         run: |
           printf '%s\n' "$BUILD_ENV_SCRIPT" > "${{ runner.temp }}/build_env.sh"
           set -a
