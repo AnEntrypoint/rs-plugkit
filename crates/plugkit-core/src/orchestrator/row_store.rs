@@ -1354,6 +1354,38 @@ pub fn retire_to_log(
     close_to_log(store, id, status, note, serde_json::Value::Null)
 }
 
+fn closed_entry_json(
+    id: &str,
+    status: &str,
+    note: Option<&str>,
+    file: String,
+    rows: Vec<serde_json::Value>,
+    closure: &serde_json::Value,
+) -> serde_json::Value {
+    let extra = closure.as_object().cloned().unwrap_or_default();
+    let mut row = rows.last().cloned().unwrap_or(serde_json::Value::Null);
+    if let Some(map) = row.as_object_mut() {
+        for (key, value) in &extra {
+            map.insert(key.clone(), value.clone());
+        }
+    }
+    let mut entry = serde_json::json!({
+        "id": id,
+        "status": status,
+        "file": file,
+        "note": note,
+        "blocks": rows.len(),
+        "row": row,
+        "material": rows,
+    });
+    if let Some(map) = entry.as_object_mut() {
+        for (key, value) in extra {
+            map.insert(key, value);
+        }
+    }
+    entry
+}
+
 pub fn close_to_log(
     store: &Store,
     id: &str,
@@ -1366,27 +1398,8 @@ pub fn close_to_log(
         return Err(format!("no item file for {} to retire", id));
     }
     let rows: Vec<serde_json::Value> = blocks.iter().map(yaml_to_json).collect();
-    let extra = closure.as_object().cloned().unwrap_or_default();
-    let mut row = rows.last().cloned().unwrap_or(serde_json::Value::Null);
-    if let Some(map) = row.as_object_mut() {
-        for (key, value) in &extra {
-            map.insert(key.clone(), value.clone());
-        }
-    }
-    let mut entry = serde_json::json!({
-        "id": id,
-        "status": status,
-        "file": format!("{}/{}{}", store.kind.dir_rel(), item_stem(id), ITEM_SUFFIX),
-        "note": note,
-        "blocks": rows.len(),
-        "row": row,
-        "material": rows,
-    });
-    if let Some(map) = entry.as_object_mut() {
-        for (key, value) in extra {
-            map.insert(key, value);
-        }
-    }
+    let file = format!("{}/{}{}", store.kind.dir_rel(), item_stem(id), ITEM_SUFFIX);
+    let entry = closed_entry_json(id, status, note, file, rows, &closure);
     let entry = append_log(store, entry)?;
     if !remove_item(store, id) && pkfs::exists(&item_path(store, id)) {
         return Err(format!(
@@ -1491,5 +1504,37 @@ mod tests {
     #[test]
     fn item_stem_maps_blank_ids_to_placeholder() {
         assert_eq!(item_stem("   "), "_no-id");
+    }
+
+    #[test]
+    fn closed_entry_carries_closure_fields_on_entry_and_row() {
+        let rows = vec![serde_json::json!({"id": "row-9", "status": "pending", "description": "keep"})];
+        let closure = serde_json::json!({
+            "status": "resolved",
+            "resolution": "fixed",
+            "witness": "exec output",
+            "witness_dispatch_id": "1792848606442-685-ab75b04a601d649d",
+            "closed_at": "2026-10-24T10:00:00.000Z"
+        });
+        let entry = super::closed_entry_json("row-9", "resolved", Some("fixed"), "x".to_string(), rows, &closure);
+        assert_eq!(entry["status"].as_str(), Some("resolved"));
+        assert_eq!(entry["note"].as_str(), Some("fixed"));
+        assert_eq!(entry["resolution"].as_str(), Some("fixed"));
+        assert_eq!(entry["closed_at"].as_str(), Some("2026-10-24T10:00:00.000Z"));
+        assert_eq!(entry["blocks"].as_u64(), Some(1));
+        assert_eq!(entry["row"]["status"].as_str(), Some("resolved"));
+        assert_eq!(entry["row"]["description"].as_str(), Some("keep"));
+        assert_eq!(entry["row"]["witness_dispatch_id"].as_str(), Some("1792848606442-685-ab75b04a601d649d"));
+        assert_eq!(entry["material"][0]["description"].as_str(), Some("keep"));
+    }
+
+    #[test]
+    fn retire_entry_gains_no_closure_fields() {
+        let rows = vec![serde_json::json!({"id": "row-8", "status": "pending"})];
+        let entry = super::closed_entry_json("row-8", "superseded", Some("superseded by row-9"), "x".to_string(), rows, &serde_json::Value::Null);
+        assert_eq!(entry["status"].as_str(), Some("superseded"));
+        assert_eq!(entry["row"]["status"].as_str(), Some("pending"));
+        assert!(entry.get("closed_at").is_none());
+        assert!(entry.get("witness_dispatch_id").is_none());
     }
 }

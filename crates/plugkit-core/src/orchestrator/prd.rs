@@ -3959,6 +3959,28 @@ fn request_text_first(request: &serde_json::Value, fields: &[&str]) -> Option<St
     })
 }
 
+fn close_status_valid(status: &str) -> bool {
+    status == "resolved" || status == "stale"
+}
+
+fn close_missing_fields(
+    resolution: Option<&str>,
+    witness: Option<&str>,
+    dispatch: Option<&str>,
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if resolution.is_none() {
+        missing.push("resolution");
+    }
+    if witness.is_none() {
+        missing.push("witness_evidence");
+    }
+    if dispatch.is_none() {
+        missing.push("witness_dispatch_id");
+    }
+    missing
+}
+
 fn note_entry(note: &str, session: Option<&str>, ts: &str) -> Value {
     let mut map = yaml_serde::Mapping::new();
     map.insert(Value::String("ts".to_string()), Value::String(ts.to_string()));
@@ -4151,7 +4173,7 @@ pub fn handle_close(content: &str) -> (String, String, i32) {
         );
     };
     let status = request_text_first(&request, &["status"]).unwrap_or_default();
-    if status != "resolved" && status != "stale" {
+    if !close_status_valid(&status) {
         return (
             serde_json::json!({"ok": false, "error_code": "prd_close_invalid_status", "id": id, "status": status}).to_string(),
             format!(
@@ -4164,16 +4186,7 @@ pub fn handle_close(content: &str) -> (String, String, i32) {
     let resolution = request_text_first(&request, &["resolution", "resolution_text"]);
     let witness = request_text_first(&request, &["witness_evidence", "witness"]);
     let dispatch = request_text_first(&request, &["witness_dispatch_id", "dispatch_id"]);
-    let mut missing: Vec<&str> = Vec::new();
-    if resolution.is_none() {
-        missing.push("resolution");
-    }
-    if witness.is_none() {
-        missing.push("witness_evidence");
-    }
-    if dispatch.is_none() {
-        missing.push("witness_dispatch_id");
-    }
+    let missing = close_missing_fields(resolution.as_deref(), witness.as_deref(), dispatch.as_deref());
     if !missing.is_empty() {
         return (
             serde_json::json!({"ok": false, "error_code": "prd_close_missing_field", "id": id, "missing": missing}).to_string(),
@@ -4575,6 +4588,31 @@ mod note_tests {
         assert!(note_present(&doc, "row-4", "notes", "ts-1", "kept"));
         assert!(!note_present(&doc, "row-4", "notes", "ts-2", "kept"));
         assert!(!note_present(&doc, "row-4", "notes", "ts-1", "other"));
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+
+    #[test]
+    fn close_accepts_only_resolved_or_stale() {
+        assert!(close_status_valid("resolved"));
+        assert!(close_status_valid("stale"));
+        assert!(!close_status_valid("completed"));
+        assert!(!close_status_valid("superseded"));
+        assert!(!close_status_valid(""));
+    }
+
+    #[test]
+    fn close_names_each_missing_required_field() {
+        assert!(close_missing_fields(Some("fixed"), Some("exec output"), Some("1792-1-abc")).is_empty());
+        assert_eq!(close_missing_fields(None, Some("w"), Some("d")), vec!["resolution"]);
+        assert_eq!(close_missing_fields(Some("r"), None, None), vec!["witness_evidence", "witness_dispatch_id"]);
+        assert_eq!(
+            close_missing_fields(None, None, None),
+            vec!["resolution", "witness_evidence", "witness_dispatch_id"]
+        );
     }
 }
 
