@@ -8539,10 +8539,11 @@ pub(super) fn ci_status(body: &Value) -> u64 {
 }
 
 pub(super) const CI_LOG_GH_TIMEOUT_MS: u64 = 120_000;
-pub(super) const CI_LOG_DEFAULT_MAX_LINES: usize = 40;
-pub(super) const CI_LOG_MAX_LINES_CEILING: usize = 500;
-pub(super) const CI_LOG_DEFAULT_MAX_CHARS: usize = 8000;
-pub(super) const CI_LOG_MAX_CHARS_CEILING: usize = 40000;
+pub(super) const CI_LOG_DEFAULT_MAX_LINES: usize = 200;
+pub(super) const CI_LOG_MAX_LINES_CEILING: usize = 200;
+pub(super) const CI_LOG_LINE_MAX_CHARS: usize = 300;
+pub(super) const CI_LOG_DEFAULT_MAX_CHARS: usize = CI_LOG_DEFAULT_MAX_LINES * CI_LOG_LINE_MAX_CHARS;
+pub(super) const CI_LOG_MAX_CHARS_CEILING: usize = CI_LOG_MAX_LINES_CEILING * CI_LOG_LINE_MAX_CHARS;
 pub(super) const CI_LOG_SCANNED_MARKER: &str = "ci_log_scanned=";
 pub(super) const CI_LOG_MATCHED_MARKER: &str = "ci_log_matched=";
 pub(super) const CI_LOG_FAILURE_MARKER: &str = "ci_log_gh_failed=";
@@ -8587,8 +8588,6 @@ pub(super) const CI_LOG_AWK: &str = r###"BEGIN {
   BCAP = ENVIRON["GMCLOG_BCAP"] + 0
   FO = ENVIRON["GMCLOG_FO"] + 0
   TAIL = ENVIRON["GMCLOG_TAIL"] + 0
-  TAILMODE = (PAT == "" && CAP > 0)
-  R = 0
   AFTER = 2
   ANSI = "(" sprintf("%c", 27) "|\\^\\[)\\[[0-9;]*[A-Za-z]"
   ns = 0
@@ -8685,38 +8684,16 @@ function emit(kind, k, j, s, ts, m) {
     }
     next
   }
-  if (!keep(m, PAT)) next
-  total++
-  if (TAILMODE) {
-    R++
-    REC[R] = k "\034" j "\034" s "\034" ts "\034" m
-    if (!(j in JN)) { JN[j] = 0; NJ++; JOBS[NJ] = j }
-    JN[j]++
-    JSQ[j, JN[j]] = R
-    if (iserr(m) && NE < CAP) { NE++; ERRQ[NE] = R }
-    next
+  if (PAT != "") {
+    if (!keep(m, PAT)) next
+  } else {
+    if (!iserr(m)) next
+    if (ns > 0 && !(k > 0 && SF[k])) next
   }
+  total++
   if (printed < CAP && used <= BCAP) emit("L", k, j, s, ts, m)
 }
 END {
-  if (TAILMODE && R > 0) {
-    left = CAP
-    for (e = 1; e <= NE && left > 0; e++) { SEL[ERRQ[e]] = 1; left-- }
-    for (jj = 1; jj <= NJ && left > 0; jj++) {
-      j = JOBS[jj]
-      for (t = JN[j] - TAIL + 1; t <= JN[j] && left > 0; t++) {
-        if (t < 1) continue
-        q = JSQ[j, t]
-        if (!(q in SEL)) { SEL[q] = 1; left-- }
-      }
-    }
-    for (q = R; q >= 1 && left > 0; q--) if (!(q in SEL)) { SEL[q] = 1; left-- }
-    for (q = 1; q <= R; q++) {
-      if (!(q in SEL)) continue
-      split(REC[q], f, "\034")
-      emit("L", f[1] + 0, f[2], f[3], f[4], f[5])
-    }
-  }
   if (FO && TAIL > 0) {
     for (k = 1; k <= ns; k++) {
       if (seen[k] == 0 || errs[k] > generic[k] + 0) continue
@@ -8891,6 +8868,14 @@ pub(super) fn ci_log_optional_id(body: &Value, field: &str) -> Result<Option<u64
             })),
         },
     }
+}
+
+pub(super) fn ci_log_clip_line(text: &str) -> String {
+    if text.chars().count() <= CI_LOG_LINE_MAX_CHARS {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(CI_LOG_LINE_MAX_CHARS - 3).collect();
+    format!("{}...", kept)
 }
 
 pub(super) fn ci_log_bounded(
@@ -9095,7 +9080,7 @@ pub(super) fn ci_log_shell_result(code: &str) -> Value {
     }
 }
 
-pub(super) const CI_LOG_TASK_POLL_MS: u64 = 500;
+pub(super) const CI_LOG_TASK_POLL_MS: u64 = 2_000;
 pub(super) const CI_LOG_TASK_OUTPUT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 pub(super) fn ci_log_await_background_task(task_id: &str, handover: &Value) -> Value {
@@ -9123,7 +9108,16 @@ pub(super) fn ci_log_await_background_task(task_id: &str, handover: &Value) -> V
             crate::wasm_dispatch::host_task("stop", &json!({ "id": task_id }));
             return json!({ "timed_out": true, "task_id": task_id });
         }
-        std::thread::sleep(std::time::Duration::from_millis(CI_LOG_TASK_POLL_MS));
+        if !crate::orchestrator::task::host_sleep_ms(CI_LOG_TASK_POLL_MS) {
+            let mut failed = handover.clone();
+            failed["stderr"] = json!(format!(
+                "{}{}1\nbackground task {} wait: the poll sleep host call failed",
+                handover.get("stderr").and_then(Value::as_str).unwrap_or(""),
+                CI_LOG_FAILURE_MARKER,
+                task_id,
+            ));
+            return failed;
+        }
     }
 }
 
@@ -9407,9 +9401,7 @@ pub(super) fn ci_log(body: &Value) -> u64 {
                 ))
             })
     {
-        std::thread::sleep(std::time::Duration::from_millis(
-            CI_LOG_TRANSIENT_BACKOFF_MS * attempts as u64,
-        ));
+        crate::orchestrator::task::host_sleep_ms(CI_LOG_TRANSIENT_BACKOFF_MS * attempts as u64);
         attempts += 1;
         result = ci_log_shell_result(&command);
     }
@@ -9519,7 +9511,7 @@ pub(super) fn ci_log(body: &Value) -> u64 {
             .unwrap_or("")
             .trim_start_matches('\u{feff}')
             .to_string();
-        let text = parts.next().unwrap_or("").to_string();
+        let text = ci_log_clip_line(parts.next().unwrap_or(""));
         if failed_only {
             let Some(slot) = failure_slot.get(&step_index).copied() else {
                 continue;
@@ -9667,7 +9659,7 @@ pub(super) fn ci_log(body: &Value) -> u64 {
         } else if matched == 0 && filtered {
             "no line matched these filters; narrow job, step or pattern, or drop the filters to see the whole log".to_string()
         } else if matched == 0 {
-            "gh returned no log lines for this run".to_string()
+            "no failing step printed an error line; pass pattern (literal, or regex with mode regex) to match any log line".to_string()
         } else {
             "no line fit the max_chars budget; raise max_chars".to_string()
         };

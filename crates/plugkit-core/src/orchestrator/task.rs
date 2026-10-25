@@ -228,7 +228,7 @@ const WAIT_FOR_TASK_DEFAULT_MS: u64 = 100_000;
 const WAIT_FOR_TASK_MAX_MS: u64 = 100_000;
 
 #[cfg(target_arch = "wasm32")]
-fn host_sleep_ms(ms: u64) -> bool {
+pub(crate) fn host_sleep_ms(ms: u64) -> bool {
     let code = format!("await new Promise(resolve => setTimeout(resolve, {ms}));");
     let opts = json!({ "timeoutMs": ms.saturating_add(5_000) }).to_string();
     let packed = unsafe {
@@ -245,7 +245,7 @@ fn host_sleep_ms(ms: u64) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn host_sleep_ms(ms: u64) -> bool {
+pub(crate) fn host_sleep_ms(ms: u64) -> bool {
     std::thread::sleep(std::time::Duration::from_millis(ms));
     true
 }

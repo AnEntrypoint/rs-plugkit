@@ -260,7 +260,7 @@ verb family (`git_status`, `git_log`, `git_diff`, `git_show`, `git_branch`, `git
 `git_rm`, `git_revert`, `git_reset`, `git_poll`), plus `ci-status` (real
 GitHub Actions workflow-run query with each job's name and conclusion in `jobs`) and `ci-log`
 (the run's printed text: `run_id` or `sha`, optional `job_id`, filtered by `job`, `step` and
-`pattern`, capped by `max_lines` and `max_chars`, each line split into `{n, job, step, at, text}`), `prd-add`/`prd-list`/`prd-resolve`/
+`pattern` (literal, or regex with `mode` `regex`); with no pattern, the error lines of failing steps; at most 200 lines of 300 characters each, capped by `max_lines` and `max_chars`, each line split into `{n, job, step, at, text}`), `prd-add`/`prd-list`/`prd-resolve`/
 `mutable-add`/`mutable-list`, `discipline-note`, `fsm-vendor`,
 `fsm-validate`, `fsm-propose-override`, `submodule-check`, `sql_open`/`sql_query`/`sql_exec`/`sql_list_dbs`/
 `sql_smoke`, `task-spawn`/`task-list`/`task-output`/`task-stop`, `wait-for-task` (`{id, timeout_ms?}`, default and max 100000; blocks until the task leaves `running` and returns its output, or returns `timed_out:true` at the deadline),
