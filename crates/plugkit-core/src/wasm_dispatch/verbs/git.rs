@@ -2,6 +2,32 @@ use super::*;
 use super::lane_claims::{lane_claim_conflicts, lane_claim_record, lane_claim_refusal, lane_claim_release};
 use super::secrets_gate::{committed_tree, gate_added_lines, gate_diff_step, gate_staged_index, staged_tree, tree_moved};
 
+fn pack(s: String) -> u64 {
+    super::host_abi::pack(with_gate_error(s))
+}
+
+fn with_gate_error(reply: String) -> String {
+    if !reply.contains("\"gate_denied\":true") {
+        return reply;
+    }
+    let Ok(mut value) = serde_json::from_str::<Value>(&reply) else {
+        return reply;
+    };
+    if value.get("gate_denied") != Some(&Value::Bool(true)) || value.get("error").is_some() {
+        return reply;
+    }
+    let reason = value.get("reason").and_then(Value::as_str).unwrap_or("").to_string();
+    let hint = value.get("next_action_hint").and_then(Value::as_str).unwrap_or("").to_string();
+    let remedy = match (reason.is_empty(), hint.is_empty()) {
+        (false, false) => format!("{reason} Remedy: {hint}"),
+        (false, true) => reason,
+        (true, false) => hint,
+        (true, true) => "gate denied with no remedy text: dispatch git_status, read its porcelain, then re-dispatch the verb".to_string(),
+    };
+    value["error"] = json!(remedy);
+    value.to_string()
+}
+
 pub(super) const GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS: &str = "git_async";
 pub(super) const GIT_PENDING_RESULT_OUTBOX_NS: &str = "outbox";
 pub(super) const GIT_COMMIT_DEDUP_NS: &str = "git_commit_dedup";
@@ -12913,39 +12939,35 @@ pub(super) fn push_dirty_refusal(
     } else {
         String::new()
     };
-    let reason = if !scope.delta_known {
+    let repo = cwd.unwrap_or("cwd");
+    let diagnosis = if !scope.delta_known {
         format!(
-            "worktree dirty in {} and the delta of branch {} cannot be bounded: refs/remotes/origin/{} does not resolve, so no path can be shown to sit outside what the push would carry. Dirty submodule pointers (not part of any push): {}. Commit or revert the tracked files before pushing; an unpushed delta that cannot be separated from a dirty tree is an unwitnessed slice. Porcelain:\n{}{}",
-            cwd.unwrap_or("cwd"), branch, branch, list_or_none(&scope.dirty_submodule_pointers), preview, more
+            "worktree dirty in {repo} and the delta of branch {branch} cannot be bounded: refs/remotes/origin/{branch} does not resolve, so no path can be shown to sit outside what the push would carry. Dirty submodule pointers (not part of any push): {}.",
+            list_or_none(&scope.dirty_submodule_pointers)
         )
     } else if scope.submodule_only && !scope.fast_forward {
         format!(
-            "worktree dirty only in submodule pointer(s) {}, which a push never carries; the blocker is that branch {} is not a fast-forward of refs/remotes/origin/{}, so dispatch git_pull {{\"branch\":\"{}\"}} to advance this checkout, then re-dispatch git_push -- the dirty pointer is not what refuses this push. Porcelain:\n{}{}",
-            list_or_none(&scope.dirty_submodule_pointers),
-            branch,
-            branch,
-            branch,
-            preview,
-            more
+            "worktree dirty only in submodule pointer(s) {}, which a push never carries; the blocker is that branch {branch} is not a fast-forward of refs/remotes/origin/{branch}, so dispatch git_pull {{\"branch\":\"{branch}\"}} to advance this checkout, then re-dispatch git_push.",
+            list_or_none(&scope.dirty_submodule_pointers)
         )
     } else if !scope.fast_forward {
         format!(
-            "worktree dirty in {} and branch {} is not a fast-forward of refs/remotes/origin/{}: publishing needs a pull first, and a pull over {} dirty path(s) can clobber them. Commit or revert, then push. Porcelain:\n{}{}",
-            cwd.unwrap_or("cwd"), branch, branch, scope.dirty_count, preview, more
+            "worktree dirty in {repo} and branch {branch} is not a fast-forward of refs/remotes/origin/{branch}: a pull over {} dirty path(s) can clobber them.",
+            scope.dirty_count
         )
     } else {
         format!(
-            "worktree dirty in {} and {} of its {} dirty path(s) are files the delta of branch {} over origin/{} also touches, so those uncommitted edits belong to what the push would carry: {}. Commit or revert them, then push. Porcelain:\n{}{}",
-            cwd.unwrap_or("cwd"),
+            "worktree dirty in {repo} and {} of its {} dirty path(s) are files the delta of branch {branch} over origin/{branch} also touches: {}.",
             scope.overlapping.len(),
             scope.dirty_count,
-            branch,
-            branch,
-            scope.overlapping.join(", "),
-            preview,
-            more
+            scope.overlapping.join(", ")
         )
     };
+    let remedy = format!(
+        "Remedy: publish_on_origin {{\"repo_dir\":\"{repo}\",\"row\":\"<row id>\",\"message\":\"<commit message>\",\"paths\":[\"<path>\", ...],\"cwd\":\"{repo}\"}} applies only the named paths onto origin/main by three-way merge and never touches the working tree, so the other {} dirty path(s) are left untouched.",
+        scope.dirty_count
+    );
+    let reason = format!("{diagnosis} {remedy} Porcelain:\n{preview}{more}");
     json!({
         "ok": false,
         "verb": verb,
@@ -12961,22 +12983,23 @@ pub(super) fn push_dirty_refusal(
         "dirty_submodule_pointers": scope.dirty_submodule_pointers,
         "dirty_tracked_files": scope.dirty_tracked_files,
         "live_lane_markers": live_lane_markers(),
+        "error": reason.clone(),
         "reason": reason,
         "next_dispatch": if scope.delta_known && scope.submodule_only && !scope.fast_forward {
             "git_pull"
         } else {
-            "git_status"
+            "publish_on_origin"
         },
         "next_dispatch_hint": if scope.delta_known && scope.submodule_only && !scope.fast_forward {
-            format!("git_pull {{\"branch\":\"{}\"}}", branch)
+            format!("git_pull {{\"branch\":\"{branch}\"}}")
         } else {
-            "git_status".to_string()
+            "publish_on_origin".to_string()
         },
         "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
         "next_action_hint": if scope.delta_known && scope.submodule_only && !scope.fast_forward {
-            format!("Dispatch git_pull {{\"branch\":\"{}\"}} once, then re-dispatch git_push: the dirty submodule pointer is not part of this push and re-dispatching git_push without the pull repeats this same refusal.", branch)
+            format!("Dispatch git_pull {{\"branch\":\"{branch}\"}} once, then re-dispatch git_push: the dirty submodule pointer is not part of this push and re-dispatching git_push without the pull repeats this same refusal.")
         } else {
-            "Dirty paths the pushed commits do not touch are not part of the delta and no longer block this push; only dirty_overlapping_delta does. Commit or revert those, dispatch git_status to confirm, then re-dispatch git_push.".to_string()
+            String::new()
         },
     })
 }
