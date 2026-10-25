@@ -217,9 +217,11 @@ pub fn handle_observe(content: &str) -> (String, String, i32) {
     if body.get("blocker_notes").and_then(Value::as_bool) == Some(true) {
         out["blocker_notes"] = blocker_notes_block(limit);
     }
-    let supply_exhausted = observed.is_some() && open_rows > 0 && live < floor && launch_ids.is_empty() && launchable == 0 && !traversal_needed;
+    let zero_supply = open_rows > 0 && launch_ids.is_empty() && launchable == 0 && !traversal_needed;
+    let held_open = if zero_supply { held_open_rows(&dir, record_now) } else { Vec::new() };
+    let under_floor = observed.is_some() && live < floor;
+    let supply_exhausted = zero_supply && (under_floor || !held_open.is_empty());
     if supply_exhausted {
-        let held_open = held_open_rows(&dir, record_now);
         let unlaunchable = open_rows.saturating_sub(held_open.len() as u64);
         let route_text = supply_exhausted_route(&held_open, unlaunchable);
         out["state"] = json!("supply_exhausted");
