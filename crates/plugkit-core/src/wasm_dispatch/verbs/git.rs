@@ -8309,6 +8309,31 @@ pub(super) fn ci_status_reply_shape(mut reply: Value) -> Value {
                 "skipped": count("skipped"),
             }),
         );
+        let mut per_workflow = serde_json::Map::new();
+        let mut workflow_names: Vec<String> = jobs
+            .iter()
+            .map(|j| j.get("workflow").and_then(Value::as_str).unwrap_or("").to_string())
+            .collect();
+        workflow_names.sort();
+        workflow_names.dedup();
+        for workflow_name in workflow_names {
+            let group: Vec<Value> = jobs
+                .iter()
+                .filter(|j| j.get("workflow").and_then(Value::as_str).unwrap_or("") == workflow_name)
+                .cloned()
+                .collect();
+            let group_count = |wanted: &str| group.iter().filter(|j| conclusion_of(j) == wanted).count();
+            per_workflow.insert(
+                workflow_name,
+                json!({
+                    "total": group.len(),
+                    "success": group_count("success"),
+                    "failure": group_count("failure"),
+                    "pending": group_count("pending"),
+                }),
+            );
+        }
+        data.insert("job_counts_by_workflow".into(), Value::Object(per_workflow));
         data.insert("pending_count".into(), json!(count("pending")));
         data.insert("failing_jobs".into(), Value::Array(failing_jobs));
     }
