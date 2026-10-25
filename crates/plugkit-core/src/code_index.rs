@@ -4109,10 +4109,88 @@ fn first_changed_location(diff: &str) -> Option<(String, u64)> {
     None
 }
 
-pub fn git_commit_rank_at(root: &str, query: &str, k: usize) -> Vec<Value> {
+pub struct CommitRank {
+    pub hits: Vec<Value>,
+    pub complete: bool,
+    pub skipped: Option<&'static str>,
+    pub stalled_step: Option<&'static str>,
+}
+
+type CommitTerms = (Vec<String>, Option<(String, u64)>, usize);
+
+const COMMIT_INDEX_DIR: &str = ".gm/exec-spool/commit-index";
+const COMMIT_INDEX_VERSION: u64 = 1;
+const COMMIT_DIFF_CHAR_CAP: usize = 16_000;
+
+fn commit_index_path_for(root: &str, hash: &str) -> String {
+    match root {
+        "" | "." => format!("{}/{}", COMMIT_INDEX_DIR, hash),
+        r => format!("{}/{}/{}", r.trim_end_matches(['/', '\\']), COMMIT_INDEX_DIR, hash),
+    }
+}
+
+fn cached_commit_terms(path: &str) -> Option<CommitTerms> {
+    let text = crate::wasm_dispatch::host_read(path)?;
+    let doc: Value = serde_json::from_str(&text).ok()?;
+    if doc.get("v").and_then(Value::as_u64) != Some(COMMIT_INDEX_VERSION) {
+        return None;
+    }
+    let tokens: Vec<String> = serde_json::from_value(doc.get("tokens")?.clone()).ok()?;
+    let location = match (
+        doc.get("path").and_then(Value::as_str),
+        doc.get("line").and_then(Value::as_u64),
+    ) {
+        (Some(file), Some(line)) => Some((file.to_string(), line)),
+        _ => None,
+    };
+    let chars = doc.get("chars").and_then(Value::as_u64).unwrap_or(0) as usize;
+    Some((tokens, location, chars))
+}
+
+fn persist_commit_terms(path: &str, terms: &CommitTerms) {
+    let (tokens, location, chars) = terms;
+    let (file, line) = match location {
+        Some((file, line)) => (json!(file), json!(line)),
+        None => (Value::Null, Value::Null),
+    };
+    let doc = json!({
+        "v": COMMIT_INDEX_VERSION,
+        "tokens": tokens,
+        "path": file,
+        "line": line,
+        "chars": chars,
+    });
+    let _ = crate::wasm_dispatch::host_write(path, &doc.to_string());
+}
+
+fn fresh_commit_terms(root: &str, hash: &str) -> CommitTerms {
+    let shown = crate::wasm_dispatch::git_call_argv(
+        &["show", "--no-color", "--format=", "--unified=0", "--no-ext-diff", hash],
+        Some(root),
+    );
+    let diff = shown.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    let capped: String = diff.chars().take(COMMIT_DIFF_CHAR_CAP).collect();
+    let tokens: Vec<String> = rs_search::tokenize::tokenize(&capped).into_iter().collect();
+    (tokens, first_changed_location(&capped), capped.len())
+}
+
+pub fn git_commit_rank_within(root: &str, query: &str, k: usize, budget_ms: u64) -> CommitRank {
+    let mut out = CommitRank {
+        hits: Vec::new(),
+        complete: true,
+        skipped: None,
+        stalled_step: None,
+    };
+    if budget_ms == 0 {
+        out.complete = false;
+        out.skipped = Some("budget_exhausted");
+        out.stalled_step = Some("commit_log");
+        return out;
+    }
+    let started = unsafe { crate::wasm_dispatch::host_now_ms() };
     let q_tokens = rs_search::tokenize::tokenize(query);
     if q_tokens.is_empty() {
-        return Vec::new();
+        return out;
     }
     let log = crate::wasm_dispatch::git_call_argv(
         &["log", "--format=%H%x00%s%x1e", "-n", "100", "--no-decorate"],
@@ -4125,7 +4203,7 @@ pub fn git_commit_rank_at(root: &str, query: &str, k: usize) -> Vec<Value> {
             let mut fields = record.trim().splitn(2, '\u{0}');
             let hash = fields.next()?.trim();
             let subject = fields.next()?.trim();
-            if hash.len() != 40 {
+            if hash.len() != 40 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
                 return None;
             }
             let tokens = rs_search::tokenize::tokenize(subject);
@@ -4137,20 +4215,22 @@ pub fn git_commit_rank_at(root: &str, query: &str, k: usize) -> Vec<Value> {
     let candidate_cap = k.saturating_mul(4).max(k);
     let mut ranked = Vec::new();
     for (hash, subject, log_score) in candidates.into_iter().take(candidate_cap) {
-        let shown = crate::wasm_dispatch::git_call_argv(
-            &[
-                "show",
-                "--no-color",
-                "--format=",
-                "--unified=0",
-                "--no-ext-diff",
-                &hash,
-            ],
-            Some(root),
-        );
-        let diff = shown.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
-        let capped: String = diff.chars().take(16_000).collect();
-        let diff_tokens = rs_search::tokenize::tokenize(&capped);
+        let now = unsafe { crate::wasm_dispatch::host_now_ms() };
+        if now.saturating_sub(started) >= budget_ms {
+            out.complete = false;
+            out.stalled_step = Some("commit_diff");
+            break;
+        }
+        let index_path = commit_index_path_for(root, &hash);
+        let terms = match cached_commit_terms(&index_path) {
+            Some(terms) => terms,
+            None => {
+                let terms = fresh_commit_terms(root, &hash);
+                persist_commit_terms(&index_path, &terms);
+                terms
+            }
+        };
+        let (diff_tokens, location, diff_chars) = terms;
         let diff_score = q_tokens.iter().filter(|t| diff_tokens.contains(t)).count() as f64;
         let score = log_score + diff_score;
         if score == 0.0 {
@@ -4164,11 +4244,11 @@ pub fn git_commit_rank_at(root: &str, query: &str, k: usize) -> Vec<Value> {
                 "log_score": log_score,
                 "diff_score": diff_score,
                 "indexed_fields": ["commit_message", "code_diff"],
-                "diff_chars_examined": capped.len(),
+                "diff_chars_examined": diff_chars,
             },
         });
-        if let Some((path, line)) = first_changed_location(&capped) {
-            entry["path"] = json!(path);
+        if let Some((file, line)) = location {
+            entry["path"] = json!(file);
             entry["line"] = json!(line);
         }
         ranked.push(entry);
@@ -4180,7 +4260,8 @@ pub fn git_commit_rank_at(root: &str, query: &str, k: usize) -> Vec<Value> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     ranked.truncate(k);
-    ranked
+    out.hits = ranked;
+    out
 }
 
 fn fold_name_key(text: &str) -> String {

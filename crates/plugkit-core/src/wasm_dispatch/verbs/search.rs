@@ -380,6 +380,90 @@ pub(super) fn caller_remaining_ms() -> Option<u64> {
     Some(budget.saturating_sub(guest_elapsed_ms()))
 }
 
+pub(super) fn narrow_caller_budget(ms: u64) {
+    CALLER_BUDGET_MS.with(|c| {
+        let current = c.get();
+        if current == 0 || ms < current {
+            c.set(ms);
+        }
+    });
+}
+
+pub(super) const COMMITS_GROUP_BUDGET_MS: u64 = 10_000;
+
+pub(super) const BM25_GROUP_MIN_BUDGET_MS: u64 = 5_000;
+
+pub(super) const GROUP_HIT_TEXT_CHARS: usize = 240;
+
+pub(super) fn dual_group_budget(default_ms: u64) -> u64 {
+    match caller_remaining_ms() {
+        Some(left) => default_ms.min(left.saturating_sub(VECTOR_CHANNEL_RESERVE_MS)),
+        None => default_ms,
+    }
+}
+
+pub(super) fn group_reply(
+    hits: Vec<Value>,
+    complete: bool,
+    elapsed_ms: u64,
+    skipped: Option<&str>,
+    stalled_step: Option<&str>,
+) -> Value {
+    let mut group = json!({ "hits": hits, "complete": complete, "elapsed_ms": elapsed_ms });
+    if let Some(map) = group.as_object_mut() {
+        if let Some(reason) = skipped {
+            map.insert("skipped".to_string(), json!(reason));
+        }
+        if let Some(step) = stalled_step {
+            map.insert("stalled_step".to_string(), json!(step));
+        }
+    }
+    group
+}
+
+pub(super) fn group_hit(hit: &Value) -> Value {
+    let text: String = hit
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .chars()
+        .take(GROUP_HIT_TEXT_CHARS)
+        .collect();
+    let mut out = json!({
+        "key": hit.get("key").cloned().unwrap_or(Value::Null),
+        "score": hit.get("score").cloned().unwrap_or(Value::Null),
+        "text": text,
+    });
+    if let (Some(symbol), Some(map)) = (hit.get("symbol"), out.as_object_mut()) {
+        map.insert("symbol".to_string(), symbol.clone());
+    }
+    out
+}
+
+fn outside_project_root(body: &Value) -> Option<String> {
+    let mut entries: Vec<&str> = Vec::new();
+    for field in PATH_SCOPE_FIELDS {
+        match body.get(*field) {
+            Some(Value::String(text)) => entries.push(text.as_str()),
+            Some(Value::Array(items)) => entries.extend(items.iter().filter_map(Value::as_str)),
+            _ => {}
+        }
+    }
+    let absolute = entries.into_iter().find(|entry| crate::pkfs::is_absolute(entry.trim()))?;
+    let project = crate::pkfs::anchor(".").replace('\\', "/");
+    let project = project.trim_end_matches("/.").trim_end_matches('/').to_string();
+    if project.is_empty() || project == "." {
+        return None;
+    }
+    let normalized = absolute.trim().replace('\\', "/");
+    if normalized == project || normalized.starts_with(&format!("{project}/")) {
+        return None;
+    }
+    Some(format!(
+        "path '{absolute}' is outside the project root '{project}' -- codesearch searches only inside the project root, so nothing was scanned; name a path under that root, relative or absolute under it"
+    ))
+}
+
 pub(super) const DUAL_SEARCH_RESERVE_MS: u64 = 30_000;
 
 pub(super) const VECTOR_CHANNEL_RESERVE_MS: u64 = 15_000;
@@ -659,6 +743,7 @@ pub(super) fn codesearch_at_root(
         .unwrap_or(false);
     let started_ms = unsafe { crate::wasm_dispatch::host_now_ms() };
     let prior_stage_ms = body.get("stage_ms").cloned().unwrap_or_else(|| json!({}));
+    let mut stale_digest: Option<String> = None;
     if !already_indexed {
         let digest_started = unsafe { crate::wasm_dispatch::host_now_ms() };
         let stored = crate::code_index::stored_digest_at(Some(root));
@@ -706,34 +791,58 @@ pub(super) fn codesearch_at_root(
             }
             return codesearch_at_root(&retry, root, query, k, cfg);
         }
+        if stale {
+            stale_digest = Some(stored.clone().unwrap_or_else(|| "absent".to_string()));
+        }
     }
+    if already_indexed {
+        stale_digest = crate::code_index::stored_digest_at(Some(root)).filter(|s| s.contains(":partial="));
+    }
+    let index_current = stale_digest.is_none();
     let stage = |from: u64| unsafe { crate::wasm_dispatch::host_now_ms() }.saturating_sub(from);
     let mut at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let shown_k = dual_channel_depth(body, k);
     let scan_k = scoped_candidate_k(shown_k as u32, scope.as_ref());
-    let mut corpus = crate::code_index::FusionCorpus::load_at(Some(root));
-    let corpus_ms = stage(at);
-    at = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let bm25_ranked = corpus.bm25_rank_cfg(query, scan_k, &cfg.scoring);
-    let bm25_ms = stage(at);
-    at = unsafe { crate::wasm_dispatch::host_now_ms() };
-    let mut bm25_hits: Vec<Value> = bm25_ranked
-        .into_iter()
-        .map(|(key, score)| {
-            let text = corpus.text_for_key(&key).unwrap_or_default();
-            let mut hit = serde_json::Map::new();
-            hit.insert("key".to_string(), json!(key));
-            hit.insert("text".to_string(), json!(text));
-            hit.insert("score".to_string(), json!(score));
-            if let Some(symbol) =
-                corpus.symbol_for_key(hit.get("key").and_then(|v| v.as_str()).unwrap_or(""))
-            {
-                hit.insert("symbol".to_string(), symbol);
-            }
-            Value::Object(hit)
-        })
-        .collect();
-    let commits = crate::code_index::git_commit_rank_at(root, query, 20);
+    let bm25_skip: Option<&str> = if !index_current {
+        Some("stale_digest")
+    } else if caller_remaining_ms().is_some_and(|left| left < BM25_GROUP_MIN_BUDGET_MS) {
+        Some("budget_exhausted")
+    } else {
+        None
+    };
+    let (corpus_ms, bm25_ms, mut bm25_hits): (u64, u64, Vec<Value>) = if bm25_skip.is_none() {
+        let mut corpus = crate::code_index::FusionCorpus::load_at(Some(root));
+        let corpus_ms = stage(at);
+        at = unsafe { crate::wasm_dispatch::host_now_ms() };
+        let bm25_ranked = corpus.bm25_rank_cfg(query, scan_k, &cfg.scoring);
+        let bm25_ms = stage(at);
+        at = unsafe { crate::wasm_dispatch::host_now_ms() };
+        let hits: Vec<Value> = bm25_ranked
+            .into_iter()
+            .map(|(key, score)| {
+                let text = corpus.text_for_key(&key).unwrap_or_default();
+                let mut hit = serde_json::Map::new();
+                hit.insert("key".to_string(), json!(key));
+                hit.insert("text".to_string(), json!(text));
+                hit.insert("score".to_string(), json!(score));
+                if let Some(symbol) =
+                    corpus.symbol_for_key(hit.get("key").and_then(|v| v.as_str()).unwrap_or(""))
+                {
+                    hit.insert("symbol".to_string(), symbol);
+                }
+                Value::Object(hit)
+            })
+            .collect();
+        (corpus_ms, bm25_ms, hits)
+    } else {
+        (0u64, 0u64, Vec::new())
+    };
+    let commit_budget = dual_group_budget(COMMITS_GROUP_BUDGET_MS);
+    let commit_rank = crate::code_index::git_commit_rank_within(root, query, 20, commit_budget);
+    let commit_complete = commit_rank.complete;
+    let commit_skipped = commit_rank.skipped;
+    let commit_stalled = commit_rank.stalled_step;
+    let commits = commit_rank.hits;
     let commits_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
     let scope_paths: Vec<String> = scope.as_ref().map(|s| s.literal_scopes()).unwrap_or_default();
     let scope_refs: Vec<&str> = scope_paths.iter().map(String::as_str).collect();
@@ -744,7 +853,13 @@ pub(super) fn codesearch_at_root(
     } else {
         VECTOR_CHANNEL_RESERVE_MS
     };
-    let vector_channel_ran = caller_remaining_ms().map(|left| left >= vector_reserve_ms).unwrap_or(true);
+    let vector_channel_ran = index_current
+        && caller_remaining_ms().map(|left| left >= vector_reserve_ms).unwrap_or(true);
+    let vector_skip = if index_current {
+        "the embedding channel could not finish inside this dispatch's remaining budget, so bm25, phrase and commits answered instead; re-dispatch for the vector channel"
+    } else {
+        "stale_digest: the code index digest is partial or cooling down, so no index-backed answer is served until a top-up proves it current; phrase and commits answered"
+    };
     let (mut vector_hits, embed_ms, vector_ms, degraded) = if vector_channel_ran {
         let embedding = embed_query(query);
         let embed_ms = stage(at); at = unsafe { crate::wasm_dispatch::host_now_ms() };
@@ -792,7 +907,7 @@ pub(super) fn codesearch_at_root(
                     "independent": true,
                     "indexed_root": root,
                     "ran": false,
-                    "skipped": "the embedding channel could not finish inside this dispatch's remaining budget, so bm25, phrase and commits answered instead; re-dispatch for the vector channel",
+                    "skipped": vector_skip,
                 })
             },
             "bm25": { "independent": true, "indexed_root": root },
@@ -812,7 +927,23 @@ pub(super) fn codesearch_at_root(
     if let Some(scope) = scope.as_ref() {
         apply_scope_echo(&mut raw, scope, &[&vector_hits, &bm25_hits]);
     }
-    ok("codesearch", compact_dual_reply(body, query, k, raw))
+    let mut reply = compact_dual_reply(body, query, k, raw);
+    if let Some(map) = reply.as_object_mut() {
+        let bm25_group = group_reply(
+            bm25_hits.iter().map(group_hit).collect(),
+            bm25_skip.is_none(),
+            corpus_ms.saturating_add(bm25_ms),
+            bm25_skip,
+            if bm25_skip == Some("budget_exhausted") { Some("corpus_load") } else { None },
+        );
+        let commits_group = group_reply(commits, commit_complete, commits_ms, commit_skipped, commit_stalled);
+        map.insert("groups".to_string(), json!({ "bm25": bm25_group, "commits": commits_group }));
+        if let Some(stored) = stale_digest.as_ref() {
+            map.insert("semantic_skipped".to_string(), json!("stale_digest"));
+            map.insert("stale_digest".to_string(), json!(stored));
+        }
+    }
+    ok("codesearch", reply)
 }
 
 pub(super) fn sum_stage_ms(prior: Value, now: Value) -> Value {
@@ -864,6 +995,7 @@ pub(super) const CODESEARCH_EXHAUSTIVE_FIELDS: &[&str] = &[
     "verbose",
     "docs",
     "timeout_ms",
+    "timeout_seconds",
     "refresh",
     "no_cache",
     "force_disk",
@@ -2657,6 +2789,20 @@ pub(super) fn codesearch_identifier(
 }
 
 pub(super) fn codesearch(body: &Value) -> u64 {
+    let query_text = body.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    emit_event(
+        "codesearch_dispatch_start",
+        json!({
+            "query": query_text.chars().take(120).collect::<String>(),
+            "mode": body.get("mode").and_then(|v| v.as_str()).unwrap_or("dual"),
+        }),
+    );
+    if let Some(reason) = outside_project_root(body) {
+        return err("codesearch", &reason);
+    }
+    if let Some(seconds) = body.get("timeout_seconds").and_then(|v| v.as_u64()) {
+        narrow_caller_budget(seconds.max(1).saturating_mul(1000));
+    }
     #[cfg(target_arch = "wasm32")]
     if let Some(reply) = super::ref_read::codesearch_at_ref(body) {
         return reply;
@@ -2671,7 +2817,42 @@ pub(super) fn codesearch(body: &Value) -> u64 {
     }
     add_match_accounting(body, &mut v);
     add_dual_timing_split(&mut v);
+    attach_unrouted_groups(body, &mut v);
     pack(v.to_string())
+}
+
+fn dual_requested(body: &Value) -> bool {
+    let flag = |name: &str| body.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
+    body.get("mode").and_then(|v| v.as_str()).unwrap_or("dual") == "dual"
+        && !flag("literal")
+        && !flag("regex")
+        && body.get("pattern").is_none()
+}
+
+fn attach_unrouted_groups(body: &Value, v: &mut Value) {
+    if !dual_requested(body)
+        || v.get("error_code").is_some()
+        || v.get("ok").and_then(Value::as_bool) == Some(false)
+        || v.get("groups").is_some()
+    {
+        return;
+    }
+    let scoped = matches!(PathScope::from_body(body), Ok(Some(_)));
+    let query = body.get("query").and_then(Value::as_str).unwrap_or("");
+    let started = unsafe { host_now_ms() };
+    let ranked = crate::code_index::git_commit_rank_within(
+        ".",
+        query,
+        20,
+        dual_group_budget(COMMITS_GROUP_BUDGET_MS),
+    );
+    let elapsed = unsafe { host_now_ms() }.saturating_sub(started);
+    let commits_group = group_reply(ranked.hits, ranked.complete, elapsed, ranked.skipped, ranked.stalled_step);
+    let bm25_skip = if scoped { "scope_exhaustive" } else { "route_without_index" };
+    let bm25_group = group_reply(Vec::new(), false, 0, Some(bm25_skip), None);
+    if let Some(map) = v.as_object_mut() {
+        map.insert("groups".to_string(), json!({ "bm25": bm25_group, "commits": commits_group }));
+    }
 }
 
 fn add_dual_timing_split(v: &mut Value) {
