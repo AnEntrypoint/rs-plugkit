@@ -1,5 +1,6 @@
 use super::*;
 use super::lane_claims::{lane_claim_conflicts, lane_claim_record, lane_claim_refusal, lane_claim_release};
+use super::secrets_gate::{committed_tree, gate_staged_index, staged_tree, tree_moved};
 
 pub(super) const GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS: &str = "git_async";
 pub(super) const GIT_PENDING_RESULT_OUTBOX_NS: &str = "outbox";
@@ -4081,6 +4082,15 @@ pub(super) fn git_commit(body: &Value) -> u64 {
                 }),
             ));
         }
+        let secrets_gate = match gate_staged_index(&mut |argv: &[&str]| git_step_replayed_by_call_order(plan, argv, cwd))? {
+            Ok(gate) => gate,
+            Err(refusal) => {
+                if let Some(filter) = own_rows_filter.as_mut() {
+                    filter.restore();
+                }
+                return Ok(err_json("git_commit", refusal));
+            }
+        };
         let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd, &commit_note_paths(cwd, scoped_paths));
         let bundled_message = bundle_prd_commit_comments(message, &commit_notes);
         let identity = commit_identity(body);
@@ -4089,6 +4099,21 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             .filter(|p| !index_removed_paths.contains(p) || head_tracks_path(cwd, p))
             .cloned()
             .collect();
+        match staged_tree(&mut |argv: &[&str]| git_step_replayed_by_call_order(plan, argv, cwd))? {
+            Ok(tree) if tree == secrets_gate.tree => {}
+            Ok(tree) => {
+                if let Some(filter) = own_rows_filter.as_mut() {
+                    filter.restore();
+                }
+                return Ok(err_json("git_commit", tree_moved(&secrets_gate.tree, &tree, None)));
+            }
+            Err(refusal) => {
+                if let Some(filter) = own_rows_filter.as_mut() {
+                    filter.restore();
+                }
+                return Ok(err_json("git_commit", refusal));
+            }
+        }
         let commit_lock = git_commit_lock_key(cwd);
         if !git_commit_lock_acquire(&commit_lock, &plan.id) {
             return Ok(err_json(
@@ -4144,6 +4169,15 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         if head_after.is_empty() || head_after == head_before {
             return Ok(err("git_commit", "commit reported success (exit 0) but HEAD did not move -- refusing to claim committed:true without a real new sha"));
         }
+        if left_staged.is_empty() {
+            match committed_tree(&mut |argv: &[&str]| git_step_replayed_by_call_order(plan, argv, cwd))? {
+                Ok(tree) if tree == secrets_gate.tree => {}
+                Ok(tree) => {
+                    return Ok(err_json("git_commit", tree_moved(&secrets_gate.tree, &tree, Some(head_after.as_str()))));
+                }
+                Err(refusal) => return Ok(err_json("git_commit", refusal)),
+            }
+        }
         crate::orchestrator::prd::drain_commit_comments(cwd, &commit_notes);
         let sha = head_after[..head_after.len().min(10)].to_string();
         let summary = message.lines().next().unwrap_or("").to_string();
@@ -4155,6 +4189,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
         );
         record_commit_in_liqology(&summary, &head_after);
         let mut payload = json!({ "committed": true, "sha_full": head_after, "sha": sha, "summary": summary });
+        payload["secrets_gate"] = secrets_gate.report();
         if let Some(rows) = prd_own_rows.as_ref() {
             payload["prd_own_rows_only"] = json!(true);
             payload["prd_own_rows"] = json!(rows);
@@ -5696,9 +5731,45 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
             }));
         }
         let scoped_paths: &[String] = if scoped { &paths } else { &[] };
+        let secrets_gate = match gate_staged_index(&mut |argv: &[&str]| Ok(git_call_argv(argv, cwd_ref))) {
+            Ok(Ok(gate)) => gate,
+            Ok(Err(refusal)) => {
+                if let Some(filter) = own_rows_filter.as_mut() {
+                    filter.restore();
+                }
+                return err_json("git_finalize", refusal);
+            }
+            Err(_) => {
+                if let Some(filter) = own_rows_filter.as_mut() {
+                    filter.restore();
+                }
+                return err("git_finalize", "the secrets gate did not complete; nothing was committed");
+            }
+        };
         let commit_notes = crate::orchestrator::prd::pending_commit_comments_for_paths(cwd_ref, &commit_note_paths(cwd_ref, scoped_paths));
         let bundled_message = bundle_prd_commit_comments(message.as_str(), &commit_notes);
         let identity = commit_identity(body);
+        match staged_tree(&mut |argv: &[&str]| Ok(git_call_argv(argv, cwd_ref))) {
+            Ok(Ok(tree)) if tree == secrets_gate.tree => {}
+            Ok(Ok(tree)) => {
+                if let Some(filter) = own_rows_filter.as_mut() {
+                    filter.restore();
+                }
+                return err_json("git_finalize", tree_moved(&secrets_gate.tree, &tree, None));
+            }
+            Ok(Err(refusal)) => {
+                if let Some(filter) = own_rows_filter.as_mut() {
+                    filter.restore();
+                }
+                return err_json("git_finalize", refusal);
+            }
+            Err(_) => {
+                if let Some(filter) = own_rows_filter.as_mut() {
+                    filter.restore();
+                }
+                return err("git_finalize", "the secrets gate did not complete; nothing was committed");
+            }
+        }
         let cr = git_call_argv(&as_argv(&git_commit_argv(&bundled_message, false, false, scoped_paths, &identity)), cwd_ref);
         prd_own_rows = own_rows_filter.as_ref().map(|f| f.own_rows.clone());
         prd_foreign_row_count = foreign_prd_rows.len();

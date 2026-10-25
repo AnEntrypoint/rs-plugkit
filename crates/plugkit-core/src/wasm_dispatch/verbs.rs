@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 mod git;
 mod lane_claims;
 mod search;
+mod secrets_gate;
 #[cfg(target_arch = "wasm32")]
 mod ref_read;
 mod tree_staleness;
