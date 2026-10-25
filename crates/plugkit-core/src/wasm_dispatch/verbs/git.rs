@@ -540,11 +540,8 @@ fn submodule_divergence(cwd: Option<&str>, modified: &[String]) -> Option<Value>
         let stdout = (v.get("exit_code").and_then(Value::as_i64) == Some(0))
             .then(|| v.get("stdout").and_then(Value::as_str).map(str::to_string))
             .flatten();
-        let entry = match stdout {
-            Some(stdout) => {
-                let mut n = stdout.split_whitespace().map(|x| x.parse::<u64>().unwrap_or(0));
-                json!({ "behind": n.next().unwrap_or(0), "ahead": n.next().unwrap_or(0) })
-            }
+        let entry = match stdout.as_deref().and_then(parse_left_right_counts) {
+            Some((behind, ahead)) => json!({ "behind": behind, "ahead": ahead }),
             None => json!({ "behind": null, "ahead": null, "note": "no upstream to compare" }),
         };
         out.insert(path.clone(), entry);
@@ -809,22 +806,51 @@ pub(super) fn git_status(body: &Value) -> u64 {
         }
         if let Some(map) = lists.as_object_mut() {
             map.insert("root".to_string(), json!(cwd));
-            map.insert("remote".to_string(), resolved_remote_report(cwd));
+            if let Some(remote) = resolved_remote_report(cwd) {
+                map.insert("remote".to_string(), remote);
+            }
         }
         Ok(ok("git_status", lists))
     })
 }
 
-fn resolved_remote_report(cwd: Option<&str>) -> Value {
+fn configured_remotes(cwd: Option<&str>) -> Vec<String> {
+    exec_git_in(cwd, "remote")
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn branch_remote_name(cwd: Option<&str>, branch: &str) -> Option<String> {
+    let configured = exec_git_in(cwd, &format!("config --get branch.{}.remote", branch));
+    let name = configured.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn parse_left_right_counts(text: &str) -> Option<(u64, u64)> {
+    let mut parts = text.split_whitespace().map(str::parse::<u64>);
+    let left = parts.next()?.ok()?;
+    let right = parts.next()?.ok()?;
+    parts.next().is_none().then_some((left, right))
+}
+
+fn resolved_remote_report(cwd: Option<&str>) -> Option<Value> {
+    let remotes = configured_remotes(cwd);
+    if remotes.is_empty() {
+        return None;
+    }
     let branch = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string();
-    let name = exec_git_in(cwd, &format!("config --get branch.{}.remote", branch))
-        .trim()
-        .to_string();
-    let name = if name.is_empty() { "origin".to_string() } else { name };
-    let url = exec_git_in(cwd, &format!("remote get-url {}", name))
-        .trim()
-        .to_string();
-    json!({ "name": name, "url": url })
+    Some(match branch_remote_name(cwd, &branch) {
+        Some(name) => {
+            let url = exec_git_in(cwd, &format!("remote get-url {}", name))
+                .trim()
+                .to_string();
+            json!({ "name": name, "url": url })
+        }
+        None => json!({ "name": null, "remotes": remotes }),
+    })
 }
 
 pub(super) fn branch_status(body: &Value) -> u64 {
@@ -835,13 +861,22 @@ pub(super) fn branch_status(body: &Value) -> u64 {
     if branch.is_empty() {
         return err("branch_status", "unable to determine branch");
     }
-    let remote = exec_git_in(cwd, &format!("config --get branch.{}.remote", branch))
-        .trim()
-        .to_string();
-    let remote = if remote.is_empty() {
-        "origin".to_string()
-    } else {
-        remote
+    let Some(remote) = branch_remote_name(cwd, &branch) else {
+        let note = if configured_remotes(cwd).is_empty() {
+            "remotes: none (no remotes configured); no upstream to compare"
+        } else {
+            "no upstream: the current branch has no configured remote"
+        };
+        return ok(
+            "branch_status",
+            json!({
+                "root": cwd,
+                "branch": branch,
+                "ahead": null,
+                "behind": null,
+                "note": note,
+            }),
+        );
     };
     if !body
         .get("no_fetch")
@@ -850,28 +885,32 @@ pub(super) fn branch_status(body: &Value) -> u64 {
     {
         let _ = exec_git_in(cwd, &format!("fetch {} {}", remote, branch));
     }
-    let counts = exec_git_in(
-        cwd,
-        &format!("rev-list --left-right --count {}/{}...HEAD", remote, branch),
-    );
-    let counts = counts.trim();
-    let mut behind: u64 = 0;
-    let mut ahead: u64 = 0;
-    let parts: Vec<&str> = counts.split_whitespace().collect();
-    if parts.len() == 2 {
-        behind = parts[0].parse().unwrap_or(0);
-        ahead = parts[1].parse().unwrap_or(0);
+    let tracking = format!("{}/{}", remote, branch);
+    let counts = resolve_ref(cwd, &tracking).and_then(|_| {
+        parse_left_right_counts(&exec_git_in(
+            cwd,
+            &format!("rev-list --left-right --count {}...HEAD", tracking),
+        ))
+    });
+    let (behind, ahead, note) = match counts {
+        Some((behind, ahead)) => (json!(behind), json!(ahead), None),
+        None => (
+            Value::Null,
+            Value::Null,
+            Some(format!("no upstream: {} is not a remote-tracking ref", tracking)),
+        ),
+    };
+    let mut reply = json!({
+        "root": cwd,
+        "branch": branch,
+        "remote": remote,
+        "ahead": ahead,
+        "behind": behind,
+    });
+    if let Some(note) = note {
+        reply["note"] = json!(note);
     }
-    ok(
-        "branch_status",
-        json!({
-            "root": cwd,
-            "branch": branch,
-            "ahead": ahead,
-            "behind": behind,
-            "remote": remote,
-        }),
-    )
+    ok("branch_status", reply)
 }
 
 fn expand_short_rev(cwd: Option<&str>, rev: String) -> String {
@@ -10009,10 +10048,17 @@ fn git_remote_list(body: &Value) -> u64 {
                 .trim();
             remotes.push(json!({ "name": name, "fetch_url": fetch_url, "push_url": push_url }));
         }
-        Ok(ok(
-            "git_remote",
-            json!({ "branch": branch, "upstream": upstream, "remotes": remotes }),
-        ))
+        let none_configured = remotes.is_empty();
+        let remotes_value = if none_configured {
+            json!("none")
+        } else {
+            json!(remotes)
+        };
+        let mut reply = json!({ "branch": branch, "upstream": upstream, "remotes": remotes_value });
+        if none_configured {
+            reply["note"] = json!("no remotes configured");
+        }
+        Ok(ok("git_remote", reply))
     })
 }
 
