@@ -767,6 +767,19 @@ fn path_traversal_message(path: &str) -> String {
     format!("path must not contain a \"..\" segment, even with allowOutsideRoot:true -- the opt-in widens which root a read may address, never whether it may climb out of one; pass the final absolute path directly instead of \"{path}\"")
 }
 
+fn trim_root_path(path: &str) -> String {
+    let slashed = path.replace('\\', "/");
+    let segments: Vec<&str> = slashed
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect();
+    if slashed.starts_with('/') {
+        format!("/{}", segments.join("/"))
+    } else {
+        segments.join("/")
+    }
+}
+
 fn path_inside_host_root(path: &str) -> bool {
     if path_has_parent_traversal(path) {
         return false;
@@ -774,12 +787,28 @@ fn path_inside_host_root(path: &str) -> bool {
     let Some(root) = super::host_abi::host_cwd_string() else {
         return false;
     };
-    let root_slashed = root.replace('\\', "/");
-    let root_trimmed = root_slashed.trim_end_matches('/');
-    let path_slashed = path.replace('\\', "/");
-    path_slashed
-        .strip_prefix(root_trimmed)
-        .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1)
+    let root = trim_root_path(&root);
+    let root = root.trim_end_matches('/');
+    let path = trim_root_path(path);
+    path.strip_prefix(root)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+fn host_root_relative_path(path: &str) -> Option<String> {
+    if !path_is_absolute(path) {
+        return None;
+    }
+    let root = super::host_abi::host_cwd_string()?;
+    let root = trim_root_path(&root);
+    let root = root.trim_end_matches('/');
+    let normalized = trim_root_path(path);
+    let rest = normalized.strip_prefix(root)?;
+    if rest.is_empty() {
+        return Some(".".to_string());
+    }
+    rest.strip_prefix('/')
+        .filter(|relative| !relative.is_empty())
+        .map(str::to_string)
 }
 
 fn project_path_rejection(verb: &str, path: &str, allow_outside_root: bool) -> Option<u64> {
@@ -1773,7 +1802,7 @@ fn root_joined_read_path(path: &str, body: &Value) -> String {
         .map(str::trim)
         .filter(|root| !root.is_empty());
     let Some(root) = root else {
-        return path.to_string();
+        return host_root_relative_path(path).unwrap_or_else(|| path.to_string());
     };
     if path_is_absolute(path) {
         return path.to_string();
