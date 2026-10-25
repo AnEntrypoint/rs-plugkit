@@ -57,8 +57,6 @@ pub(super) fn git_commit_dedup_record(key: &str, sha_full: &str, sha: &str, summ
 }
 
 pub(super) const GIT_COMMIT_LOCK_TTL_MS: u64 = 120_000;
-pub(super) const GIT_COMMIT_LOCK_WAIT_MS: u64 = 15_000;
-pub(super) const GIT_COMMIT_LOCK_POLL_MS: u64 = 50;
 
 pub(super) fn git_commit_lock_key(cwd: Option<&str>) -> String {
     format!("repo:{}", cwd.unwrap_or(""))
@@ -74,23 +72,14 @@ fn parse_git_commit_lock(raw: &str) -> Option<(String, u64)> {
 }
 
 pub(super) fn git_commit_lock_acquire(key: &str, owner: &str) -> bool {
-    let started = unsafe { host_now_ms() };
+    let now = unsafe { host_now_ms() };
     let path = git_commit_lock_path(key);
-    loop {
-        let now = unsafe { host_now_ms() };
-        let current = super::host_abi::host_read(&path).unwrap_or_default();
-        let free = match parse_git_commit_lock(&current) {
-            None => true,
-            Some((holder, ts)) => holder == owner || now.saturating_sub(ts) > GIT_COMMIT_LOCK_TTL_MS,
-        };
-        if free && super::host_abi::host_cas_write(&path, &current, &format!("{}|{}", owner, now)) == 1 {
-            return true;
-        }
-        if now.saturating_sub(started) >= GIT_COMMIT_LOCK_WAIT_MS {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(GIT_COMMIT_LOCK_POLL_MS));
-    }
+    let current = super::host_abi::host_read(&path).unwrap_or_default();
+    let free = match parse_git_commit_lock(&current) {
+        None => true,
+        Some((holder, ts)) => holder == owner || now.saturating_sub(ts) > GIT_COMMIT_LOCK_TTL_MS,
+    };
+    free && super::host_abi::host_cas_write(&path, &current, &format!("{}|{}", owner, now)) == 1
 }
 
 pub(super) fn git_commit_lock_release(key: &str, owner: &str) {
@@ -1896,9 +1885,6 @@ pub(super) fn git_push(body: &Value) -> u64 {
     if !push_succeeded && push_output_is_transient_remote_rejection(&push_out) {
         remote_request_ids = push_output_remote_request_ids(&push_out);
         while !push_succeeded && transient_attempts < GIT_PUSH_TRANSIENT_REMOTE_MAX_ATTEMPTS {
-            std::thread::sleep(std::time::Duration::from_millis(
-                GIT_PUSH_TRANSIENT_REMOTE_BACKOFF_MS * transient_attempts as u64,
-            ));
             transient_attempts += 1;
             let (out, ok_now) = exec_git_push_in(
                 repo.as_deref(),
@@ -4133,7 +4119,7 @@ pub(super) fn git_commit(body: &Value) -> u64 {
             return Ok(err_json(
                 "git_commit",
                 json!({
-                    "error": "another git_commit to this repo held the per-repo commit lock past the wait budget; re-dispatch git_commit",
+                    "error": "another git_commit to this repo holds the per-repo commit lock; re-dispatch git_commit once it finishes",
                     "error_code": "commit_lock_timeout",
                     "next_dispatch_hint": "git_commit",
                 }),

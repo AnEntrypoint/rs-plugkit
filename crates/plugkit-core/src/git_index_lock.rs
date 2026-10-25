@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 pub const GIT_INDEX_LOCK_MAX_ATTEMPTS: u32 = 8;
 pub const GIT_INDEX_LOCK_BACKOFF_MS: u64 = 250;
 pub const GIT_INDEX_LOCK_WAIT_BUDGET_MS: u64 = GIT_INDEX_LOCK_BACKOFF_MS
@@ -24,10 +22,6 @@ pub struct IndexLockReport {
     pub attempts: u32,
     pub waited_ms: u64,
     pub resolved: bool,
-}
-
-pub fn backoff_ms_for(attempt: u32) -> u64 {
-    GIT_INDEX_LOCK_BACKOFF_MS.saturating_mul(attempt as u64)
 }
 
 pub fn is_index_lock_contention(attempt: &GitAttempt) -> bool {
@@ -75,52 +69,28 @@ pub fn retry_while_index_lock_contention<T>(
     run: &mut impl FnMut() -> T,
     attempt_of: impl Fn(&T) -> GitAttempt,
 ) -> (T, Option<IndexLockReport>) {
-    let mut last = run();
-    let mut attempt = attempt_of(&last);
+    let last = run();
+    let attempt = attempt_of(&last);
     if attempt.exit_code == 0 || !is_index_lock_contention(&attempt) {
         return (last, None);
     }
     let lock = index_lock_path_of(&attempt).unwrap_or_else(|| GIT_INDEX_LOCK_DEFAULT_NAME.to_string());
-    let mut attempts: u32 = 1;
-    let mut waited_ms: u64 = 0;
-    while attempts < GIT_INDEX_LOCK_MAX_ATTEMPTS {
-        let backoff = backoff_ms_for(attempts);
-        std::thread::sleep(Duration::from_millis(backoff));
-        waited_ms += backoff;
-        attempts += 1;
-        last = run();
-        attempt = attempt_of(&last);
-        if attempt.exit_code == 0 || !is_index_lock_contention(&attempt) {
-            return (
-                last,
-                Some(IndexLockReport {
-                    lock,
-                    attempts,
-                    waited_ms,
-                    resolved: attempt.exit_code == 0,
-                }),
-            );
-        }
-    }
     (
         last,
         Some(IndexLockReport {
             lock,
-            attempts,
-            waited_ms,
-            resolved: attempt.exit_code == 0,
+            attempts: 1,
+            waited_ms: 0,
+            resolved: false,
         }),
     )
 }
 
 pub fn unresolved_message(report: &IndexLockReport) -> String {
     format!(
-        "git could not acquire '{}': it was still held after {} attempt(s) spanning {} ms ({:.1} s) of bounded backoff, and the {} ms budget is spent. Nothing was changed and the lock was NOT removed -- deleting another process's index.lock corrupts its commit. Re-dispatch once the other writer finishes.",
+        "git could not acquire '{}': another git process holds it. The verb returns at once instead of waiting, so nothing was changed and the lock was NOT removed -- deleting another process's index.lock corrupts its commit. Re-dispatch once the other writer finishes ({} attempt(s)).",
         report.lock,
-        report.attempts,
-        report.waited_ms,
-        report.waited_ms as f64 / 1000.0,
-        GIT_INDEX_LOCK_WAIT_BUDGET_MS
+        report.attempts
     )
 }
 
