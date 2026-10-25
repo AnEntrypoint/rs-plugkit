@@ -942,32 +942,99 @@ fn native_search_gate(
         let base = first.rsplit(['/', '\\']).next().unwrap_or(first);
         matches!(base, "find" | "find.exe" | "grep" | "grep.exe" | "rg" | "rg.exe")
     };
-    let native_in_segments = |text: &str| {
-        text.split([';', '\n', '|', '&'])
-            .map(|s| s.trim_start())
-            .any(|s| is_native_search(s.split_whitespace().next().unwrap_or("")))
+    let is_process_source = |first: &str| {
+        let base = first.rsplit(['/', '\\']).next().unwrap_or(first);
+        matches!(
+            base,
+            "ps" | "ps.exe" | "pgrep" | "pgrep.exe" | "pidof" | "tasklist" | "tasklist.exe"
+        )
     };
-    let native_in_subshell = extract_substitution_bodies(cmd)
-        .into_iter()
-        .any(|inner| native_in_segments(&inner));
-    if native_in_segments(cmd) || native_in_subshell {
-        log_deviation(
-            "native-search-bypass",
-            &format!(
-                "verb={} cmd={}",
-                verb,
-                cmd.chars().take(80).collect::<String>()
-            ),
-        );
-        return Some(GateVerdict::deny(format!(
-            "native-search-bypass:a `{}` verb invoking `find`, `grep` or `rg` is denied - codesearch is the code search surface. Use the codesearch verb instead with body {{\"query\":\"<term>\",\"mode\":\"literal\",\"path\":\"<dir>\"}} (mode \"regex\" for patterns; add \"case_insensitive\":true or \"whole_word\":true as needed; \"path\" or \"glob\" narrows scope). Command was: `{}`",
+    let is_stdin_filter = |stage: &str| {
+        let mut words = stage.split_whitespace();
+        let first = words.next().unwrap_or("");
+        let base = first.rsplit(['/', '\\']).next().unwrap_or(first);
+        if !matches!(base, "grep" | "grep.exe") {
+            return false;
+        }
+        let mut file_operands = 0;
+        for word in words {
+            if word.contains(['<', '>']) {
+                continue;
+            }
+            if let Some(long) = word.strip_prefix("--") {
+                if matches!(long, "recursive" | "dereference-recursive") {
+                    return false;
+                }
+            } else if let Some(short) = word.strip_prefix('-') {
+                if short.contains(['r', 'R']) {
+                    return false;
+                }
+            } else {
+                file_operands += 1;
+            }
+        }
+        file_operands <= 1
+    };
+    let scan = |text: &str| {
+        let mut content_denied = false;
+        let mut process_denied = false;
+        for pipeline in text.replace("||", ";").split([';', '\n', '&']) {
+            let mut head_is_process = false;
+            let mut process_stream = false;
+            for (index, stage) in pipeline.split('|').enumerate() {
+                let first = stage.trim_start().split_whitespace().next().unwrap_or("");
+                let exempt = index > 0 && process_stream && is_stdin_filter(stage);
+                if index == 0 {
+                    head_is_process = is_process_source(first);
+                    process_stream = head_is_process;
+                } else if !exempt {
+                    process_stream = false;
+                }
+                if is_native_search(first) && !exempt {
+                    if head_is_process {
+                        process_denied = true;
+                    } else {
+                        content_denied = true;
+                    }
+                }
+            }
+        }
+        (content_denied, process_denied)
+    };
+    let mut verdicts = vec![scan(cmd)];
+    verdicts.extend(
+        extract_substitution_bodies(cmd)
+            .into_iter()
+            .map(|inner| scan(&inner)),
+    );
+    let content_denied = verdicts.iter().any(|v| v.0);
+    let process_denied = verdicts.iter().any(|v| v.1);
+    if !content_denied && !process_denied {
+        return None;
+    }
+    log_deviation(
+        "native-search-bypass",
+        &format!(
+            "verb={} cmd={}",
             verb,
+            cmd.chars().take(80).collect::<String>()
+        ),
+    );
+    let process_hint = if process_denied {
+        "reading process output goes through the proc_list verb; "
+    } else {
+        ""
+    };
+    Some(
+        GateVerdict::deny(format!(
+            "native-search-bypass:a `{}` verb invoking `find`, `grep` or `rg` is denied - {}codesearch is the code search surface. Use the codesearch verb instead with body {{\"query\":\"<term>\",\"mode\":\"literal\",\"path\":\"<dir>\"}} (mode \"regex\" for patterns; add \"case_insensitive\":true or \"whole_word\":true as needed; \"path\" or \"glob\" narrows scope). Command was: `{}`",
+            verb,
+            process_hint,
             cmd.chars().take(120).collect::<String>()
         ))
-        .with_next("codesearch")
-        .gated("deviation.native-search-bypass", Some("native-search-bypass")));
-    }
-    None
+        .with_next(if process_denied { "proc_list" } else { "codesearch" })
+        .gated("deviation.native-search-bypass", Some("native-search-bypass")),
+    )
 }
 
 fn failing_transition_gate(
