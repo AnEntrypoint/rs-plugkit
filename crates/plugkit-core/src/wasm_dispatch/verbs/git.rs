@@ -2392,8 +2392,30 @@ pub(super) fn configured_commit_identity() -> (String, String) {
     (name, email)
 }
 
-pub(super) fn commit_identity(body: &Value) -> (String, String) {
+// The identity git resolves for the repository at cwd: local config first, then global.
+fn repo_commit_identity(cwd: Option<&str>) -> (Option<String>, Option<String>) {
+    let read = |key: &str| {
+        let answer = git_call_argv(&["config", "--get", key], cwd);
+        if answer.get("exit_code").and_then(Value::as_i64) != Some(0) {
+            return None;
+        }
+        non_blank_str(answer.get("stdout"))
+    };
+    (read("user.name"), read("user.email"))
+}
+
+// The author when the body names none: the repository's own identity for each field it sets, the gm config for each field it leaves unset.
+pub(super) fn default_commit_identity(body: &Value) -> (String, String) {
+    let cwd = body_cwd(body)
+        .filter(|c| !c.is_empty())
+        .map(|c| if crate::pkfs::is_absolute(c) { c.to_string() } else { crate::pkfs::anchor(c) });
+    let (repo_name, repo_email) = repo_commit_identity(cwd.as_deref());
     let (name, email) = configured_commit_identity();
+    (repo_name.unwrap_or(name), repo_email.unwrap_or(email))
+}
+
+pub(super) fn commit_identity(body: &Value) -> (String, String) {
+    let (name, email) = default_commit_identity(body);
     (
         non_blank_str(body.get("author_name")).unwrap_or(name),
         non_blank_str(body.get("author_email")).unwrap_or(email),
@@ -2401,13 +2423,15 @@ pub(super) fn commit_identity(body: &Value) -> (String, String) {
 }
 
 pub(super) fn commit_author_override_refusal(body: &Value) -> Option<String> {
-    let configured = configured_commit_identity();
-    if commit_identity(body) == configured {
+    let default = default_commit_identity(body);
+    let name = non_blank_str(body.get("author_name")).unwrap_or_else(|| default.0.clone());
+    let email = non_blank_str(body.get("author_email")).unwrap_or_else(|| default.1.clone());
+    if (name, email) == default {
         return None;
     }
     Some(format!(
-        "git_commit author_name/author_email must match the configured identity ({} <{}>); an author override is refused",
-        configured.0, configured.1
+        "git_commit author_name/author_email must match the repository identity ({} <{}>); an author override is refused",
+        default.0, default.1
     ))
 }
 
