@@ -215,7 +215,7 @@ jobs:
         run: |
           set -e
           git config user.name "lanmower"
-          git config user.email "lanmower@users.noreply.github.com"
+          git config user.email "almagestfraternite@gmail.com"
           git add "$MANIFEST"
           git commit -m "chore: auto-bump version to $VER"
           for attempt in 1 2 3; do
