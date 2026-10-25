@@ -1293,7 +1293,12 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                                 1,
                             );
                         }
-                        let mut rescoped = new_row;
+                        let mut rescoped = slot.clone();
+                        if let (Some(base), Some(named)) = (rescoped.as_mapping_mut(), new_row.as_mapping()) {
+                            for (key, value) in named.iter() {
+                                base.insert(key.clone(), value.clone());
+                            }
+                        }
                         if !item_map.contains_key(&Value::String("status".to_string())) {
                             if let Some(map) = rescoped.as_mapping_mut() {
                                 map.insert(
