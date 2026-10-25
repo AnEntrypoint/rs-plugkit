@@ -6763,7 +6763,11 @@ fn git_show_repo_name(cwd: Option<&str>) -> String {
 }
 
 pub(super) fn git_fetch(body: &Value) -> u64 {
-    if let Some(refusal) = refuse_unknown_fields("git_fetch", body, &["remote", "ref", "rev", "refspec"]) {
+    if let Some(refusal) = refuse_unknown_fields(
+        "git_fetch",
+        body,
+        &["remote", "ref", "rev", "refspec", "fetch_timeout_seconds"],
+    ) {
         return refusal;
     }
     let cwd = body_cwd(body);
