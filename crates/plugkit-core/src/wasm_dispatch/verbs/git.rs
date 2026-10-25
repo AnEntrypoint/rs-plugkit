@@ -1,6 +1,6 @@
 use super::*;
 use super::lane_claims::{lane_claim_conflicts, lane_claim_record, lane_claim_refusal, lane_claim_release};
-use super::secrets_gate::{committed_tree, gate_staged_index, staged_tree, tree_moved};
+use super::secrets_gate::{committed_tree, gate_added_lines, gate_diff_step, gate_staged_index, staged_tree, tree_moved};
 
 pub(super) const GIT_ASYNC_PENDING_TOKEN_REPLAY_PLAN_NS: &str = "git_async";
 pub(super) const GIT_PENDING_RESULT_OUTBOX_NS: &str = "outbox";
@@ -3373,6 +3373,20 @@ pub(super) fn git_commit_hunk_scoped(body: &Value) -> Option<u64> {
         return Some(err_json("git_commit", protected_pathspec_refusal("git_commit", &blocked)));
     }
     let cwd = body_cwd(body).map(|c| if crate::pkfs::is_absolute(c) { c.to_string() } else { crate::pkfs::anchor(c) });
+    if let Some(text) = patch_text.as_deref() {
+        if let Err(refusal) = gate_added_lines(text, "the hunk-scoped patch") {
+            return Some(err_json("git_commit", refusal));
+        }
+    }
+    if let Some(map) = hunks.and_then(Value::as_object) {
+        let mut argv: Vec<&str> = vec!["diff", "--no-color", "--no-ext-diff", "--text", "-U0", "HEAD", "--"];
+        argv.extend(map.keys().map(String::as_str));
+        match gate_diff_step(&mut |a: &[&str]| Ok(git_call_argv(a, cwd.as_deref())), &argv, "the hunk-scoped commit") {
+            Ok(Ok(_)) => {}
+            Ok(Err(refusal)) => return Some(err_json("git_commit", refusal)),
+            Err(_) => return Some(err("git_commit", "the secrets gate did not complete; nothing was committed")),
+        }
+    }
     let input = json!({
         "cwd": cwd,
         "patch": patch_text,
@@ -4653,6 +4667,26 @@ fn scope_reland_commits(
         if tree == parent_tree {
             continue;
         }
+        let mut gate_step = |argv: &[&str]| -> Result<Value, u64> { Ok(git_call_argv(argv, cwd)) };
+        match gate_diff_step(
+            &mut gate_step,
+            &["diff", "--no-color", "--no-ext-diff", "--text", "-U0", parent_tree.as_str(), tree.as_str()],
+            "the re-landed commit",
+        ) {
+            Ok(Ok(_)) => {}
+            Ok(Err(refusal)) => {
+                return Err(refusal
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("the secrets gate refused the re-landed commit")
+                    .to_string())
+            }
+            Err(_) => {
+                return Err(format!(
+                    "the secrets gate did not complete while re-landing {commit}; nothing was pushed"
+                ))
+            }
+        }
         let message = exec_git_in(cwd, &format!("log -1 --pretty=%B {}", commit))
             .trim_end()
             .to_string();
@@ -5855,6 +5889,17 @@ pub(super) fn git_finalize(body: &Value) -> u64 {
                         "step_stdout": flush_stdout,
                     }),
                 );
+            }
+            let flush_gate = match gate_staged_index(&mut |argv: &[&str]| Ok(git_call_argv(argv, cwd_ref))) {
+                Ok(Ok(gate)) => gate,
+                Ok(Err(refusal)) => return err_json("git_finalize", refusal),
+                Err(_) => return err("git_finalize", "the secrets gate did not complete; nothing was committed"),
+            };
+            match staged_tree(&mut |argv: &[&str]| Ok(git_call_argv(argv, cwd_ref))) {
+                Ok(Ok(tree)) if tree == flush_gate.tree => {}
+                Ok(Ok(tree)) => return err_json("git_finalize", tree_moved(&flush_gate.tree, &tree, None)),
+                Ok(Err(refusal)) => return err_json("git_finalize", refusal),
+                Err(_) => return err("git_finalize", "the secrets gate did not complete; nothing was committed"),
             }
             let mut commit_argv = vec![
                 "commit".to_string(),

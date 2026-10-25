@@ -171,53 +171,68 @@ pub(super) fn committed_tree(
     tree_at(step, &["rev-parse", "HEAD^{tree}"], "git rev-parse HEAD^{tree}")
 }
 
-pub(super) fn gate_staged_index(
-    step: &mut dyn FnMut(&[&str]) -> Result<Value, u64>,
-) -> Result<Result<StagedGate, Value>, u64> {
+pub(super) fn gate_added_lines(diff: &str, subject: &str) -> Result<(usize, usize), Value> {
     let rules = match compiled_rules() {
         Ok(rules) => rules,
         Err(detail) => {
-            return Ok(Err(unreadable(&format!(
+            return Err(unreadable(&format!(
                 "the rules did not compile ({detail})"
-            ))))
+            )))
         }
     };
-    let tree = match staged_tree(step)? {
-        Ok(tree) => tree,
-        Err(refusal) => return Ok(Err(refusal)),
-    };
-    let reply = step(&[
-        "diff",
-        "--cached",
-        "-U0",
-        "--no-color",
-        "--no-ext-diff",
-        "--text",
-    ])?;
-    let Some(diff) = complete_stdout(&reply) else {
-        return Ok(Err(unreadable(
-            "git diff --cached did not return the complete staged diff",
-        )));
-    };
-    let scan = scan_added_lines(&diff, rules);
+    let scan = scan_added_lines(diff, rules);
     if !scan.findings.is_empty() {
-        return Ok(Err(json!({
+        return Err(json!({
             "error": format!(
-                "the secrets gate refused the staged set: {} staged line(s) match a credential shape; remove the value, load it from an env var or secret store, re-stage, and commit again",
+                "the secrets gate refused {subject}: {} added line(s) match a credential shape; remove the value, load it from an env var or secret store, and commit again",
                 scan.findings.len()
             ),
             "error_code": crate::wasm_dispatch::ERR_CODE_GATE_DENIED,
             "gate": "secrets",
             "gate_denied": true,
             "findings": scan.findings,
-            "staged_tree": tree,
-        })));
+        }));
     }
-    Ok(Ok(StagedGate {
-        tree,
-        files: scan.files,
-        added_lines: scan.added_lines,
-    }))
+    Ok((scan.files, scan.added_lines))
+}
+
+pub(super) fn gate_diff_step(
+    step: &mut dyn FnMut(&[&str]) -> Result<Value, u64>,
+    argv: &[&str],
+    subject: &str,
+) -> Result<Result<(usize, usize), Value>, u64> {
+    let reply = step(argv)?;
+    let Some(diff) = complete_stdout(&reply) else {
+        return Ok(Err(unreadable(&format!(
+            "{subject}: git diff did not return the complete diff"
+        ))));
+    };
+    Ok(gate_added_lines(&diff, subject))
+}
+
+pub(super) fn gate_staged_index(
+    step: &mut dyn FnMut(&[&str]) -> Result<Value, u64>,
+) -> Result<Result<StagedGate, Value>, u64> {
+    let tree = match staged_tree(step)? {
+        Ok(tree) => tree,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
+    let staged = gate_diff_step(
+        step,
+        &["diff", "--cached", "-U0", "--no-color", "--no-ext-diff", "--text"],
+        "the staged set",
+    )?;
+    Ok(match staged {
+        Ok((files, added_lines)) => Ok(StagedGate {
+            tree,
+            files,
+            added_lines,
+        }),
+        Err(mut refusal) => {
+            refusal["staged_tree"] = json!(tree);
+            Err(refusal)
+        }
+    })
 }
 
 pub(super) fn tree_moved(gated: &str, now: &str, committed_sha: Option<&str>) -> Value {
