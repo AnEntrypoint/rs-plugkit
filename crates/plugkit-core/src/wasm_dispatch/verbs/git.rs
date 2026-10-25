@@ -878,39 +878,65 @@ pub(super) fn branch_status(body: &Value) -> u64 {
             }),
         );
     };
-    if !body
+    let failure = |v: &Value| -> Option<String> {
+        let failed = v.get("exit_code").and_then(Value::as_i64).unwrap_or(0) != 0
+            || v.get("ok").and_then(Value::as_bool) == Some(false);
+        failed.then(|| {
+            v.get("stderr")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .lines()
+                .last()
+                .unwrap_or("no stderr")
+                .trim()
+                .to_string()
+        })
+    };
+    let fetch_state = if body
         .get("no_fetch")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
     {
-        let _ = exec_git_in(cwd, &format!("fetch {} {}", remote, branch));
-    }
-    let tracking = format!("{}/{}", remote, branch);
-    let counts = resolve_ref(cwd, &tracking).and_then(|_| {
-        parse_left_right_counts(&exec_git_in(
-            cwd,
-            &format!("rev-list --left-right --count {}...HEAD", tracking),
-        ))
-    });
-    let (behind, ahead, note) = match counts {
-        Some((behind, ahead)) => (json!(behind), json!(ahead), None),
-        None => (
-            Value::Null,
-            Value::Null,
-            Some(format!("no upstream: {} is not a remote-tracking ref", tracking)),
-        ),
+        json!("skipped")
+    } else {
+        match failure(&git_call(&format!("fetch {} {}", remote, branch), cwd)) {
+            None => json!("ok"),
+            Some(reason) => json!({ "unknown": reason }),
+        }
     };
-    let mut reply = json!({
-        "root": cwd,
-        "branch": branch,
-        "remote": remote,
-        "ahead": ahead,
-        "behind": behind,
-    });
-    if let Some(note) = note {
-        reply["note"] = json!(note);
+    let tracking = format!("{}/{}", remote, branch);
+    if resolve_ref(cwd, &tracking).is_none() {
+        return err(
+            "branch_status",
+            &format!("{tracking} does not resolve, so ahead and behind cannot be counted; fetch: {fetch_state}"),
+        );
     }
-    ok("branch_status", reply)
+    let range = format!("{tracking}...HEAD");
+    let counted = git_call_argv(&["rev-list", "--left-right", "--count", range.as_str()], cwd);
+    if let Some(reason) = failure(&counted) {
+        return err(
+            "branch_status",
+            &format!("rev-list --left-right --count {range} failed ({reason}); fetch: {fetch_state}"),
+        );
+    }
+    let counted_text = counted.get("stdout").and_then(Value::as_str).unwrap_or("");
+    let Some((behind, ahead)) = parse_left_right_counts(counted_text) else {
+        return err(
+            "branch_status",
+            &format!("rev-list --left-right --count {range} printed no counts; fetch: {fetch_state}"),
+        );
+    };
+    ok(
+        "branch_status",
+        json!({
+            "root": cwd,
+            "branch": branch,
+            "remote": remote,
+            "ahead": ahead,
+            "behind": behind,
+            "fetch": fetch_state,
+        }),
+    )
 }
 
 fn expand_short_rev(cwd: Option<&str>, rev: String) -> String {
