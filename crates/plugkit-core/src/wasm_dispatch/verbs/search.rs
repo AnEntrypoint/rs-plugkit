@@ -2985,6 +2985,10 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         .get("auto_indexed")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let mut semantic_skip: Option<String> = body
+        .get("semantic_skip_reason")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
     if !already_indexed {
         let stored = crate::code_index::stored_digest();
         let current = crate::code_index::current_digest();
@@ -3019,8 +3023,21 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
+                if pass.get("complete").and_then(Value::as_bool) != Some(true) {
+                    obj.insert(
+                        "semantic_skip_reason".to_string(),
+                        json!(format!("{reason}: index pass incomplete after topup")),
+                    );
+                }
             }
             return with_index_topup(codesearch_dispatch(&retry), reason, &pass, topup_ms);
+        }
+        if stale {
+            semantic_skip = Some(format!(
+                "digest-mismatch: stored index digest {} != live file-set digest {}; index topup cooling down",
+                stored.as_deref().unwrap_or("absent"),
+                current
+            ));
         }
     }
     let reply_cache_key = dual_reply_cache_key(body);
@@ -3028,9 +3045,13 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         return ok("codesearch", cached);
     }
     let cand_k = scoped_candidate_k(cfg.budget.pool(k as usize).max(50) as u32, scope.as_ref());
-    let embedding = embed_query(query);
+    let embedding = if semantic_skip.is_some() { Value::Null } else { embed_query(query) };
     let code_ns = cfg.namespaces.code.as_str();
-    let vec_hits = vec_search_local(&embedding, code_ns, cand_k as u32);
+    let vec_hits = if semantic_skip.is_some() {
+        json!([])
+    } else {
+        vec_search_local(&embedding, code_ns, cand_k as u32)
+    };
     let vec_ids: Vec<String> = vec_hits
         .as_array()
         .map(|a| {
@@ -3040,7 +3061,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         })
         .unwrap_or_default();
     let mut corpus = crate::code_index::FusionCorpus::load();
-    let vec_ids: Vec<String> = if vec_ids.is_empty() {
+    let vec_ids: Vec<String> = if vec_ids.is_empty() && semantic_skip.is_none() {
         let vres = crate::code_index::search(query, cand_k, Some(&embedding));
         vres.get("rows")
             .and_then(|r| r.as_array())
@@ -3057,7 +3078,11 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
     } else {
         vec_ids
     };
-    let bm25_ranked = corpus.bm25_rank_cfg(query, cand_k, &cfg.scoring);
+    let bm25_ranked = if semantic_skip.is_some() {
+        Vec::new()
+    } else {
+        corpus.bm25_rank_cfg(query, cand_k, &cfg.scoring)
+    };
     let bm25_ids: Vec<String> = bm25_ranked.iter().map(|(key, _)| key.clone()).collect();
     let commit_ranked = crate::code_index::git_commit_rank(query, 20);
     let commits: Vec<Value> = commit_ranked
@@ -3113,9 +3138,10 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         retain_hits_in_scope(&mut phrase_hits, ".", scope.as_ref());
         phrase_total = phrase_hits.len() as u64;
     }
+    let mode_label = if semantic_skip.is_some() { "keyword_live" } else { "dual" };
     if !vec_ids.is_empty() || !bm25_ids.is_empty() || !phrase_hits.is_empty() {
         let mut raw = json!({
-                    "mode": "dual",
+                    "mode": mode_label,
                     "files_scanned": phrase_files_scanned,
                     "count": (vector_ranked.len() + bm25_ranked_response.len() + phrase_hits.len()) as u64,
                     "vector_hits": vector_ranked,
@@ -3128,7 +3154,10 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         if let Some(scope) = scope.as_ref() {
             apply_scope_echo(&mut raw, scope, &[&vector_ranked, &bm25_ranked_response]);
         }
-        let reply = compact_dual_reply(body, query, k, raw);
+        let mut reply = compact_dual_reply(body, query, k, raw);
+        if let (Some(map), Some(reason)) = (reply.as_object_mut(), semantic_skip.as_deref()) {
+            map.insert("semantic_skipped".to_string(), json!(reason));
+        }
         dual_reply_cache_put(reply_cache_key, &reply);
         return ok("codesearch", reply);
     }
@@ -3174,28 +3203,51 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
     }
 
     if vec_unavailable && kv_empty_now && phrase_hits.is_empty() {
-        return err(
-            "codesearch",
-            "semantic retrieval unavailable (no vector hits and the embedder produced nothing) and the keyword fallback matched nothing -- this is NOT an empty-index result",
-        );
+        let skipped = semantic_skip.clone().unwrap_or_else(|| {
+            "vector channel returned no rows (no query embedding or no code_chunks candidates)".to_string()
+        });
+        let served = match literal_fallback_scan(body, query.trim(), k as usize, false) {
+            Some(mut scan) => {
+                if let Some(map) = scan.as_object_mut() {
+                    map.insert("mode".to_string(), json!("keyword_live"));
+                    map.insert("degraded".to_string(), json!(true));
+                    map.insert("semantic_skipped".to_string(), json!(skipped));
+                    map.insert(
+                        "served_by".to_string(),
+                        json!("exhaustive literal scan of the live file set (the gm.grep scan)"),
+                    );
+                }
+                scan
+            }
+            None => json!({
+                "ok": true,
+                "mode": "keyword_live",
+                "degraded": true,
+                "semantic_skipped": skipped,
+                "live_scan": { "ran": false },
+                "note": "the live keyword scan did not run, so this is not a verified zero: retry, or grep the path",
+            }),
+        };
+        return ok("codesearch", served);
     }
 
-    ok(
-        "codesearch",
-        compact_dual_reply(
-            body,
-            query,
-            k,
-            json!({
-                "mode": "fallback_kv", "degraded": vec_unavailable,
-                "files_scanned": phrase_files_scanned,
-                "count": (vector_ranked.len() + bm25_ranked_response.len() + phrase_hits.len()) as u64,
-                "hits": hits, "commits": commits, "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response,
-                "phrase_hits": phrase_hits,
-                "phrase_hits_total": phrase_total,
-                "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
-            }),
-        ),
-    )
+    let mut reply = compact_dual_reply(
+        body,
+        query,
+        k,
+        json!({
+            "mode": "fallback_kv", "degraded": vec_unavailable,
+            "files_scanned": phrase_files_scanned,
+            "count": (vector_ranked.len() + bm25_ranked_response.len() + phrase_hits.len()) as u64,
+            "hits": hits, "commits": commits, "vector_hits": vector_ranked, "bm25_hits": bm25_ranked_response,
+            "phrase_hits": phrase_hits,
+            "phrase_hits_total": phrase_total,
+            "phrase_hits_truncated": !phrase_exhaustive || phrase_total > phrase_hits.len() as u64,
+        }),
+    );
+    if let (Some(map), Some(reason)) = (reply.as_object_mut(), semantic_skip.as_deref()) {
+        map.insert("semantic_skipped".to_string(), json!(reason));
+    }
+    ok("codesearch", reply)
 }
 
