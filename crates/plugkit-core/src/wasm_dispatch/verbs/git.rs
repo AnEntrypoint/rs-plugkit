@@ -1950,6 +1950,11 @@ pub(super) fn git_push(body: &Value) -> u64 {
     if !push_succeeded && push_output_is_transient_remote_rejection(&push_out) {
         remote_request_ids = push_output_remote_request_ids(&push_out);
         while !push_succeeded && transient_attempts < GIT_PUSH_TRANSIENT_REMOTE_MAX_ATTEMPTS {
+            if !crate::orchestrator::task::host_sleep_ms(
+                GIT_PUSH_TRANSIENT_REMOTE_BACKOFF_MS * transient_attempts as u64,
+            ) {
+                break;
+            }
             transient_attempts += 1;
             let (out, ok_now) = exec_git_push_in(
                 repo.as_deref(),
@@ -8098,9 +8103,11 @@ pub(super) fn ci_status_value(body: &Value) -> Result<Value, Value> {
                     if !retryable {
                         break;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(
+                    if !crate::orchestrator::task::host_sleep_ms(
                         wait_ms.unwrap_or(CI_STATUS_RATE_LIMIT_BACKOFF_MS),
-                    ));
+                    ) {
+                        break;
+                    }
                 }
             }
         }

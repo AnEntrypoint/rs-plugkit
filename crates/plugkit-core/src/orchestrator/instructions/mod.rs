@@ -292,7 +292,7 @@ fn prd_items_read() -> Option<Vec<serde_json::Value>> {
             }
         }
         if attempt == 0 {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            crate::orchestrator::task::host_sleep_ms(50);
             continue;
         }
         ilog(&format!("prd_items_read: read/parse failed twice (torn-read retry exhausted), code={code} err={err} -- treating as UNKNOWN, not empty, this instruction dispatch cannot report a trustworthy PRD count"));
