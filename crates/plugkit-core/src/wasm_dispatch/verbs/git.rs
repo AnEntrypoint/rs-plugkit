@@ -9312,6 +9312,11 @@ pub(super) fn ci_log_explain_gh_failure(
     }
 }
 
+pub(super) fn ci_log_is_in_progress(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("in progress") || lower.contains("still running") || lower.contains("logs will be available when it is complete")
+}
+
 pub(super) fn ci_log_is_transient_failure(detail: &str) -> bool {
     let lower = detail.to_ascii_lowercase();
     [
@@ -9474,6 +9479,32 @@ pub(super) fn ci_log(body: &Value) -> u64 {
     let stderr = ci_status_shell_stream(&result, "stderr");
     if let Some(code) = ci_log_marker(&stderr, CI_LOG_FAILURE_MARKER) {
         let detail = ci_status_truncate_for_error(&stderr, 400);
+        if ci_log_is_in_progress(&detail) {
+            let jobs: Vec<Value> = job_conclusions
+                .iter()
+                .map(|(name, conclusion)| json!({ "name": name, "conclusion": conclusion }))
+                .collect();
+            return pack(
+                json!({
+                    "ok": true,
+                    "verb": "ci-log",
+                    "data": {
+                        "repo": repo,
+                        "run_id": run_id,
+                        "run_url": format!("https://github.com/{}/actions/runs/{}", repo, run_id),
+                        "status": "in_progress",
+                        "pending": true,
+                        "partial": true,
+                        "lines": [],
+                        "jobs": jobs,
+                        "hint": "the run is still in progress; gh serves its logs only once it completes. Re-read ci-log after ci-status reports completed, or read the finished jobs by job_id",
+                        "gh_detail": detail,
+                        "attempts": attempts,
+                    }
+                })
+                .to_string(),
+            );
+        }
         let (error_code, hint) = ci_log_gh_failure_class(&detail);
         let (error_code, hint) =
             ci_log_explain_gh_failure(error_code, hint, &repo, run_id, &job_conclusions);
