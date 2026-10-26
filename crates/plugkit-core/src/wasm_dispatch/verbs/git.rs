@@ -1540,6 +1540,10 @@ fn bin_drift_commit_gate(
         };
     }
     let index_only = !add_all && paths.is_empty();
+    let merge_pending = git_call_argv(&["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], repo)
+        .get("exit_code")
+        .and_then(|x| x.as_i64())
+        == Some(0);
     let session_staged = if index_only {
         git_add_staged_recorded(repo, session)
     } else {
@@ -1559,7 +1563,7 @@ fn bin_drift_commit_gate(
         let in_commit = if add_all {
             true
         } else if index_only {
-            staged && session_staged.iter().any(|p| p == path)
+            staged && (merge_pending || session_staged.iter().any(|p| p == path))
         } else {
             bin_drift_pathspec_covers(paths, path)
         };
