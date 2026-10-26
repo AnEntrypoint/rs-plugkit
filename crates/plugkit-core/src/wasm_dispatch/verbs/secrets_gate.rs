@@ -1,6 +1,9 @@
+use crate::pkfs;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
+
+const SCRATCH_DIFF_DIR: &str = ".gm/secrets-gate";
 
 const RULES: &[(&str, &str)] = &[
     ("aws-access-key-id", r"\b(?:\x41KIA|ASIA)[0-9A-Z]{16}\b"),
@@ -138,6 +141,25 @@ fn complete_stdout(reply: &Value) -> Option<String> {
     reply.get("stdout").and_then(Value::as_str).map(str::to_owned)
 }
 
+fn stdout_capped(reply: &Value) -> bool {
+    reply.get("stdout_truncated").and_then(Value::as_bool) == Some(true)
+        && reply.get("stderr_truncated").and_then(Value::as_bool) != Some(true)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn scratch_nonce() -> u64 {
+    let mut buf = [0u8; 8];
+    unsafe { crate::wasm_dispatch::host_abi::host_random_fill(buf.as_mut_ptr(), buf.len() as u32) };
+    u64::from_le_bytes(buf)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn scratch_nonce() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos() as u64)
+}
+
 fn unreadable(detail: &str) -> Value {
     json!({
         "error": format!("the secrets gate could not read the staged set: {detail}; nothing was committed"),
@@ -196,18 +218,56 @@ pub(super) fn gate_added_lines(diff: &str, subject: &str) -> Result<(usize, usiz
     Ok((scan.files, scan.added_lines))
 }
 
+fn gate_diff_via_file(
+    step: &mut dyn FnMut(&[&str]) -> Result<Value, u64>,
+    argv: &[&str],
+    subject: &str,
+) -> Result<Result<(usize, usize), Value>, u64> {
+    if argv.first() != Some(&"diff") {
+        return Ok(Err(unreadable(&format!(
+            "{subject}: the full diff can only be read from a git diff call"
+        ))));
+    }
+    let relative = format!("{SCRATCH_DIFF_DIR}/diff-{:016x}.diff", scratch_nonce());
+    let path = pkfs::anchor(&relative);
+    if !pkfs::write(&path, "") {
+        return Ok(Err(unreadable(&format!(
+            "{subject}: the scratch directory for the full diff could not be created"
+        ))));
+    }
+    let output = format!("--output={path}");
+    let mut full = argv.to_vec();
+    full.insert(1, output.as_str());
+    let outcome = step(&full);
+    let content = match outcome.as_ref() {
+        Ok(reply) if complete_stdout(reply).is_some() => pkfs::read_to_string(&path),
+        _ => None,
+    };
+    pkfs::remove_file(&path);
+    outcome?;
+    let Some(diff) = content else {
+        return Ok(Err(unreadable(&format!(
+            "{subject}: git diff --output did not return the complete diff"
+        ))));
+    };
+    Ok(gate_added_lines(&diff, subject))
+}
+
 pub(super) fn gate_diff_step(
     step: &mut dyn FnMut(&[&str]) -> Result<Value, u64>,
     argv: &[&str],
     subject: &str,
 ) -> Result<Result<(usize, usize), Value>, u64> {
     let reply = step(argv)?;
-    let Some(diff) = complete_stdout(&reply) else {
-        return Ok(Err(unreadable(&format!(
-            "{subject}: git diff did not return the complete diff"
-        ))));
-    };
-    Ok(gate_added_lines(&diff, subject))
+    if let Some(diff) = complete_stdout(&reply) {
+        return Ok(gate_added_lines(&diff, subject));
+    }
+    if stdout_capped(&reply) {
+        return gate_diff_via_file(step, argv, subject);
+    }
+    Ok(Err(unreadable(&format!(
+        "{subject}: git diff did not return the complete diff"
+    ))))
 }
 
 pub(super) fn gate_staged_index(
