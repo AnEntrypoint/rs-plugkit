@@ -1802,7 +1802,7 @@ Raw (non-JSON) body: accepted when the first line is a path= directive, the rest
   <the file contents>
 Returns {\"bytes\": <written>}; missing parent directories are created (\"parents_created\": true when the
 retry made them), and a file standing where a parent directory is needed is named in \"blocking_path\".
-A write outside the root is always refused, allowOutsideRoot included: that flag widens the read verbs only.";
+A write outside the root is refused, except that allowOutsideRoot:true admits an absolute path whose canonical form (symlinks followed) lies inside the gm scratch root /config/tmp; that flag widens no other write.";
 
 pub(super) const FS_READDIR_HELP: &str = "\
 fs_readdir lists one directory inside the project. {\"path\":\"<relative dir>\"} (default \".\").

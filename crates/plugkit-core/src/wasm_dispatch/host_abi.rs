@@ -646,6 +646,23 @@ pub fn host_write(path: &str, data: &str) -> bool {
     host_write_code(path, data) != 0
 }
 
+const PATH_RESOLVES_WITHIN_PROBE: &str = r#"const fs=require('fs'),path=require('path');
+function real(p){try{return fs.realpathSync(p);}catch(e){if(e.code!=='ENOENT')return null;try{if(fs.lstatSync(p).isSymbolicLink())return null;}catch(e2){}const parent=path.dirname(p);if(parent===p)return null;const r=real(parent);return r===null?null:path.join(r,path.basename(p));}}
+const target=real(input.path),base=real(input.root);
+const rel=target===null||base===null?'..':path.relative(base,target);
+console.log(JSON.stringify({ok:true,inside:rel!==''&&rel.split(path.sep)[0]!=='..'&&!path.isAbsolute(rel)}));"#;
+
+pub fn host_path_resolves_within(path: &str, root: &str) -> bool {
+    let code = format!(
+        "const input={};{}",
+        json!({ "path": path, "root": root }),
+        PATH_RESOLVES_WITHIN_PROBE
+    );
+    exec_json_result(&code)
+        .and_then(|r| r.get("inside").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
 pub fn host_cas_write(path: &str, expected: &str, data: &str) -> u32 {
     unsafe {
         host_fs_cas_write(

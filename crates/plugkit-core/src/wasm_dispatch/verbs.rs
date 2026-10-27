@@ -1319,6 +1319,15 @@ fn checkout_writer_refusal(body: &Value) -> Option<Value> {
     writer_lock_refusal(&probe)
 }
 
+const GM_SCRATCH_WRITE_ROOT: &str = "/config/tmp";
+
+fn gm_scratch_write_granted(body: &Value, path: &str) -> bool {
+    caller_opted_outside_root(body)
+        && path_is_absolute(path)
+        && !path_has_parent_traversal(path)
+        && super::host_abi::host_path_resolves_within(path, GM_SCRATCH_WRITE_ROOT)
+}
+
 fn fs_write(body: &Value) -> u64 {
     let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let content = ["content", "data", "text"]
@@ -1332,7 +1341,7 @@ fn fs_write(body: &Value) -> u64 {
     if path.is_empty() {
         return err("fs_write", "path required");
     }
-    if !path_within_project(path) {
+    if !path_within_project(path) && !gm_scratch_write_granted(body, path) {
         let mut message = path_outside_project_message(path, false);
         if caller_opted_outside_root(body) {
             message.push_str(
