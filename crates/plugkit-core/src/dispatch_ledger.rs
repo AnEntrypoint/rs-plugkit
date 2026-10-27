@@ -499,8 +499,16 @@ fn append_ledger_line(path: &str, line: &str) -> bool {
     cas_append_ledger_line(path, line)
 }
 
+const LEDGER_CAS_BACKOFF_MS: u64 = 25;
+
+// Bounded retry with linear backoff: a lost race (Mismatch) or a transient I/O error waits LEDGER_CAS_BACKOFF_MS
+// times the attempt number before the next read, so contending lanes stop colliding in the same window.
+// NoSpace is final.
 fn cas_append_ledger_line(path: &str, line: &str) -> bool {
-    for _ in 0..LEDGER_CAS_ATTEMPTS {
+    for attempt in 0..LEDGER_CAS_ATTEMPTS {
+        if attempt > 0 {
+            let _ = crate::orchestrator::task::host_sleep_ms(LEDGER_CAS_BACKOFF_MS * attempt as u64);
+        }
         let current = crate::pkfs::read_to_string(path).unwrap_or_default();
         let separator = if current.is_empty() || current.ends_with('\n') {
             ""
@@ -510,10 +518,8 @@ fn cas_append_ledger_line(path: &str, line: &str) -> bool {
         let next = format!("{current}{separator}{line}");
         match crate::pkfs::cas_write(path, &current, &next) {
             crate::pkfs::CasWriteOutcome::Swapped => return true,
-            crate::pkfs::CasWriteOutcome::Mismatch => continue,
-            crate::pkfs::CasWriteOutcome::IoError | crate::pkfs::CasWriteOutcome::NoSpace => {
-                return false
-            }
+            crate::pkfs::CasWriteOutcome::Mismatch | crate::pkfs::CasWriteOutcome::IoError => continue,
+            crate::pkfs::CasWriteOutcome::NoSpace => return false,
         }
     }
     false
