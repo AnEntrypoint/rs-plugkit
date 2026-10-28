@@ -10617,14 +10617,42 @@ pub(super) fn git_merge(body: &Value) -> u64 {
         .get("message")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .trim();
+        .trim()
+        .to_string();
+    // git_status excludes .gm, so a tree dirty only under .gm looks clean and then
+    // git merge refuses. Shelf those paths the way git_pull autostashes them.
+    let status_probe = super::host_abi::porcelain_from(&git_call_argv(
+        &["status", "--porcelain", "-uall", "-z"],
+        cwd,
+    ));
+    let runtime_dirty: Vec<String> = if status_probe.partial {
+        Vec::new()
+    } else {
+        status_probe
+            .porcelain
+            .split('\0')
+            .filter(|line| !line.starts_with("??"))
+            .filter_map(|line| line.get(3..).map(|path| path.trim().to_string()))
+            .filter(|path| path.starts_with(".gm/"))
+            .collect()
+    };
+    let shelved_runtime = if !runtime_dirty.is_empty() {
+        let mut stash_argv: Vec<&str> =
+            vec!["stash", "push", "-u", "-m", "gm merge runtime shelf", "--"];
+        stash_argv.extend(runtime_dirty.iter().map(|path| path.as_str()));
+        let stashed = git_call_argv(&stash_argv, cwd);
+        git_exit_code(&stashed) == 0
+            && !git_output_text(&stashed).contains("No local changes to save")
+    } else {
+        false
+    };
     let mut argv: Vec<&str> = vec!["merge", "--no-edit"];
     if ff_only {
         argv.push("--ff-only");
     }
     if !message.is_empty() {
         argv.push("-m");
-        argv.push(message);
+        argv.push(&message);
     }
     argv.push(refspec);
     let r = git_call_with_identity(&argv, &commit_identity(body), cwd);
@@ -10635,6 +10663,9 @@ pub(super) fn git_merge(body: &Value) -> u64 {
         r.get("stderr").and_then(|x| x.as_str()).unwrap_or("")
     );
     if code != 0 {
+        if shelved_runtime {
+            let _ = git_call_argv(&["stash", "pop"], cwd);
+        }
         let conflicts: Vec<String> = exec_git_in(cwd, "diff --name-only --diff-filter=U")
             .lines()
             .map(|l| l.trim().to_string())
@@ -10647,11 +10678,17 @@ pub(super) fn git_merge(body: &Value) -> u64 {
                 "conflicted": !conflicts.is_empty(),
                 "conflicts": conflicts,
                 "head": head_before,
+                "runtime_shelf_restored": shelved_runtime,
                 "hint": "resolve each conflicted path, git_add them, then git_commit; or git_merge_abort to restore the pre-merge HEAD"
             }),
         );
     }
     let head_after = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
+    let runtime_shelf_pop = if shelved_runtime {
+        Some(git_output_text(&git_call_argv(&["stash", "pop"], cwd)))
+    } else {
+        None
+    };
     ok(
         "git_merge",
         json!({
@@ -10660,6 +10697,8 @@ pub(super) fn git_merge(body: &Value) -> u64 {
             "head_after": head_after,
             "already_up_to_date": head_before == head_after,
             "fast_forward": out.lines().any(|line| line == "Fast-forward" || line.starts_with("Fast-forward (")),
+            "runtime_shelved": shelved_runtime,
+            "runtime_shelf_pop": runtime_shelf_pop,
             "output": out
         }),
     )
