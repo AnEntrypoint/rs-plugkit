@@ -68,6 +68,7 @@ pub struct TurnState {
     pub phase: Phase,
     pub session_id: Option<String>,
     pub last_skill: Option<String>,
+    #[serde(default)]
     pub updated_at_ms: u128,
     #[serde(default)]
     pub pending_step_id: Option<String>,
