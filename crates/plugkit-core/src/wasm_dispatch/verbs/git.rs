@@ -2177,10 +2177,10 @@ pub(super) fn git_push(body: &Value) -> u64 {
                 "repo": repo,
                 "branch": branch,
                 "reason": format!(
-                    "push rejected (remote moved); pull --rebase origin {} conflicted and was aborted -- worktree could not be cleanly replayed onto origin. Resolve manually. Rebase output:\n{}",
-                    branch, rebase_out
+                    "push rejected (remote moved); pull --rebase origin {} conflicted and was aborted. next: git_pull {{\"branch\":\"{}\"}} to land the conflict in the tree, resolve the paths it names, git_commit with neither paths nor add_all, then git_push {{\"rev\":\"<full sha>\",\"allow_foreign_commits\":true}}. Rebase output:\n{}",
+                    branch, branch, rebase_out.lines().take(8).collect::<Vec<_>>().join("\n")
                 ),
-                "next_dispatch": "instruction",
+                "next_dispatch": "git_pull",
             }).to_string());
         }
         rebased = true;
