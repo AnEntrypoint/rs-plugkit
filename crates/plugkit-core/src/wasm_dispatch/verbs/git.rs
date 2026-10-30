@@ -7071,16 +7071,39 @@ pub(super) fn git_pull(body: &Value) -> u64 {
     let argv_refs: Vec<&str> = argv.iter().map(|arg| arg.as_str()).collect();
     let child_started = unsafe { host_now_ms() };
     let probe_ms = child_started.saturating_sub(pull_started);
-    let r = git_call_argv(&argv_refs, cwd);
-    let child_ms = unsafe { host_now_ms() }.saturating_sub(child_started);
-    let post_started = unsafe { host_now_ms() };
-    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
-    let output = format!(
+    let mut r = git_call_argv(&argv_refs, cwd);
+    let mut code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    let mut output = format!(
         "{}{}",
         r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
         r.get("stderr").and_then(|x| x.as_str()).unwrap_or("")
     );
-    let conflicts: Vec<String> = exec_git_in(cwd, "diff --name-only --diff-filter=U")
+    if code != 0 && !autostash && output.to_ascii_lowercase().contains("would be overwritten by merge") {
+        let blocking_paths: Vec<String> = output
+            .lines()
+            .filter(|line| line.starts_with('\t'))
+            .map(|line| line.trim().to_string())
+            .collect();
+        if !blocking_paths.is_empty() && blocking_paths.iter().all(|path| path.starts_with(".gm/")) {
+            let mut retry_argv = argv.clone();
+            let retry_at = retry_argv
+                .iter()
+                .position(|arg| arg == "--rebase" || arg == "--no-rebase")
+                .map(|at| at + 1)
+                .unwrap_or(retry_argv.len());
+            retry_argv.insert(retry_at, "--autostash".to_string());
+            let retry_refs: Vec<&str> = retry_argv.iter().map(|arg| arg.as_str()).collect();
+            r = git_call_argv(&retry_refs, cwd);
+            code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+            output = format!(
+                "{}{}",
+                r.get("stdout").and_then(|x| x.as_str()).unwrap_or(""),
+                r.get("stderr").and_then(|x| x.as_str()).unwrap_or("")
+            );
+        }
+    }
+    let child_ms = unsafe { host_now_ms() }.saturating_sub(child_started);
+    let post_started = unsafe { host_now_ms() };
         .lines()
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
