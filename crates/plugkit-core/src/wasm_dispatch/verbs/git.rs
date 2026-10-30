@@ -7104,6 +7104,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
     }
     let child_ms = unsafe { host_now_ms() }.saturating_sub(child_started);
     let post_started = unsafe { host_now_ms() };
+    let conflicts: Vec<String> = exec_git_in(cwd, "diff --name-only --diff-filter=U")
         .lines()
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
