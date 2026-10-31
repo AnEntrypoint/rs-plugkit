@@ -1017,6 +1017,7 @@ fn fs_read_reply(
     requested_end: Option<usize>,
     clamped: bool,
     max_bytes: Option<usize>,
+    size_bytes: usize,
 ) -> u64 {
     let mut truncated_at_bytes = false;
     if let Some(cap) = max_bytes {
@@ -1029,6 +1030,8 @@ fn fs_read_reply(
             truncated_at_bytes = true;
         }
     }
+    let returned_bytes = text.len();
+    let has_more = truncated_at_bytes || start > 1 || end < total_lines;
     let returned_lines = if text.is_empty() {
         0
     } else {
@@ -1055,7 +1058,21 @@ fn fs_read_reply(
     if end < total_lines {
         data["next_start_line"] = json!(end + 1);
     }
-    ok("fs_read", data)
+    fs_read_meta_reply(data, size_bytes, returned_bytes, has_more)
+}
+
+fn fs_read_meta_reply(data: Value, size_bytes: usize, returned_bytes: usize, has_more: bool) -> u64 {
+    pack(
+        json!({
+            "ok": true,
+            "verb": "fs_read",
+            "data": data,
+            "size_bytes": size_bytes,
+            "returned_bytes": returned_bytes,
+            "has_more": has_more,
+        })
+        .to_string(),
+    )
 }
 
 fn fs_read(body: &Value) -> u64 {
@@ -1091,6 +1108,7 @@ fn fs_read(body: &Value) -> u64 {
     };
     match host_read(path) {
         Some(content) => {
+            let size_bytes = content.len();
             let total_lines = fs_read_lines(&content).len();
             let range = match fs_read_line_range(body, total_lines, path) {
                 Ok(range) => range,
@@ -1099,7 +1117,7 @@ fn fs_read(body: &Value) -> u64 {
             match range {
                 None => {
                     if max_bytes.is_none() || total_lines == 0 {
-                        return ok("fs_read", Value::String(content));
+                        return fs_read_meta_reply(Value::String(content), size_bytes, size_bytes, false);
                     }
                     fs_read_reply(
                         path,
@@ -1110,6 +1128,7 @@ fn fs_read(body: &Value) -> u64 {
                         None,
                         false,
                         max_bytes,
+                        size_bytes,
                     )
                 }
                 Some(range) => {
@@ -1124,6 +1143,7 @@ fn fs_read(body: &Value) -> u64 {
                         range.requested_end,
                         range.clamped,
                         max_bytes,
+                        size_bytes,
                     )
                 }
             }
@@ -1469,15 +1489,18 @@ fn fs_edit(body: &Value) -> u64 {
     if !path_within_project(path) {
         return err("fs_edit", &path_outside_project_message(path, false));
     }
+    if let Some(detail) = writer_lock_refusal(path) {
+        return err_json("fs_edit", detail);
+    }
     let (Some(old), Some(new)) = (
-        body.get("old_string").and_then(|v| v.as_str()),
-        body.get("new_string").and_then(|v| v.as_str()),
+        body.get("old").and_then(|v| v.as_str()),
+        body.get("new").and_then(|v| v.as_str()),
     ) else {
         return err_json_coded(
             "fs_edit",
             ERR_CODE_INVALID_ARGS,
             json!({
-                "error": "fs_edit needs old_string (the exact text to replace) and new_string (its replacement, empty to delete) as JSON strings",
+                "error": "fs_edit needs old (the exact text to replace) and new (its replacement, empty to delete) as JSON strings",
                 "path": path,
                 "next_dispatch": "fs_read",
             }),
@@ -1488,7 +1511,7 @@ fn fs_edit(body: &Value) -> u64 {
             "fs_edit",
             ERR_CODE_INVALID_ARGS,
             json!({
-                "error": "old_string must not be empty; an empty string matches every position",
+                "error": "old must not be empty; an empty string matches every position",
                 "path": path,
                 "next_dispatch": "fs_read",
             }),
@@ -1516,30 +1539,25 @@ fn fs_edit(body: &Value) -> u64 {
     };
     let matches = text.matches(old).count();
     if matches != 1 {
-        let (code, reason) = if matches == 0 {
-            ("edit_no_match", "old_string occurs 0 times; nothing was edited".to_string())
-        } else {
-            (
-                "edit_ambiguous",
-                format!("old_string occurs {matches} times; widen it until exactly one occurrence remains. Nothing was edited"),
-            )
-        };
         return err_json_coded(
             "fs_edit",
-            code,
+            ERR_CODE_INVALID_ARGS,
             json!({
-                "error": reason,
+                "error": format!("old occurs {matches} times in {path}; it must occur exactly once, so nothing was edited"),
                 "path": path,
                 "matches": matches,
                 "next_dispatch": "fs_read",
             }),
         );
     }
+    let at = text.find(old).unwrap_or(0);
+    let line = text[..at].matches('\n').count() + 1;
     let edited = text.replacen(old, new, 1);
+    let delta_bytes = edited.len() as i64 - text.len() as i64;
     if super::host_abi::host_write(path, &edited) {
         return ok(
             "fs_edit",
-            json!({ "path": path, "replacements": 1, "bytes": edited.len() }),
+            json!({ "path": path, "line": line, "delta_bytes": delta_bytes }),
         );
     }
     err_json(
@@ -1672,7 +1690,7 @@ fn readdir_entry_name(entry: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn fs_readdir_walk(root: &str, root_names: Vec<Value>, recursive: bool, cap: usize) -> (Vec<Value>, bool) {
+fn fs_readdir_walk(root: &str, root_names: Vec<Value>, recursive: bool, cap: usize, skip_runtime: bool) -> (Vec<Value>, bool) {
     let mut out: Vec<Value> = Vec::new();
     let mut pending: Vec<(String, String, usize)> = Vec::new();
     let mut dir = match root.trim_end_matches('/') {
@@ -1693,6 +1711,9 @@ fn fs_readdir_walk(root: &str, root_names: Vec<Value>, recursive: bool, cap: usi
             let stat = super::host_abi::host_stat(&full).filter(|v| !v.is_null());
             let field = |key: &str| stat.as_ref().and_then(|s| s.get(key)).cloned().unwrap_or(Value::Null);
             let is_dir = field("isDirectory").as_bool() == Some(true);
+            if skip_runtime && (name == "exec-spool" || (is_dir && name.starts_with('.'))) {
+                continue;
+            }
             let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
             out.push(json!({
                 "path": rel,
@@ -1731,9 +1752,11 @@ fn fs_readdir(body: &Value) -> u64 {
         .and_then(Value::as_u64)
         .filter(|n| *n > 0)
         .map(|n| (n as usize).min(FS_READDIR_MAX_ENTRIES));
+    let include_hidden = body.get("include_hidden").and_then(Value::as_bool) == Some(true);
     let (entries, capped, cap_applied) = if mtime {
         let applied = cap.unwrap_or(FS_READDIR_DEFAULT_MAX_ENTRIES);
-        let (walked, capped) = fs_readdir_walk(path, names, recursive, applied);
+        let skip_runtime = recursive && !include_hidden;
+        let (walked, capped) = fs_readdir_walk(path, names, recursive, applied, skip_runtime);
         (walked, capped, applied)
     } else {
         match cap {
