@@ -1807,7 +1807,8 @@ A write outside the root is refused, except that allowOutsideRoot:true admits an
 pub(super) const FS_READDIR_HELP: &str = "\
 fs_readdir lists one directory inside the project. {\"path\":\"<relative dir>\"} (default \".\").
 A missing directory answers ok with an empty listing and \"missing\": true; a file path (ENOTDIR) or an
-unreadable directory (EACCES) is an error.
+unreadable directory (EACCES) is an error. A recursive walk skips dot-directories and exec-spool unless
+{\"include_hidden\":true} is passed.
   {\"allowOutsideRoot\":true}      opt in to an absolute path outside the project root; required per call.
                                   \"allow_outside_root\" is an alias. A path holding a \"..\" segment is still
                                   refused, and the host sandbox still serves only paths under the user gm root
