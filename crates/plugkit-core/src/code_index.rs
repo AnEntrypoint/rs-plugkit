@@ -4464,7 +4464,33 @@ pub const LITERAL_SCAN_MAX_FILES: usize = 50_000;
 
 const LITERAL_SNIPPET_MAX_CHARS: usize = 160;
 
-const LITERAL_SCAN_MINIFIED_LINE_BYTES: usize = 300;
+const MINIFIED_MIN_BYTES: usize = 2000;
+
+const MINIFIED_AVG_LINE_BYTES: usize = 1000;
+
+fn is_minified_content(content: &str) -> bool {
+    let lines = content.lines().count().max(1);
+    content.len() >= MINIFIED_MIN_BYTES && content.len() / lines >= MINIFIED_AVG_LINE_BYTES
+}
+
+fn match_window(line: &str, start: usize, end: usize) -> (String, bool) {
+    if line.len() <= LITERAL_SNIPPET_MAX_CHARS {
+        return (line.to_string(), false);
+    }
+    let margin = LITERAL_SNIPPET_MAX_CHARS.saturating_sub(end.saturating_sub(start)) / 2;
+    let mut from = start.saturating_sub(margin);
+    if from + LITERAL_SNIPPET_MAX_CHARS > line.len() {
+        from = line.len() - LITERAL_SNIPPET_MAX_CHARS;
+    }
+    while !line.is_char_boundary(from) {
+        from -= 1;
+    }
+    let mut to = (from + LITERAL_SNIPPET_MAX_CHARS).min(line.len());
+    while !line.is_char_boundary(to) {
+        to += 1;
+    }
+    (line[from..to].to_string(), true)
+}
 
 const LITERAL_SCAN_MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -5421,9 +5447,7 @@ fn scan_uncovered_files(
         result.lines_scanned += content.lines().count();
         let mut this_file_matched = false;
         let mut this_file_lines = 0usize;
-        let minified_file = content
-            .lines()
-            .any(|l| l.len() > LITERAL_SCAN_MINIFIED_LINE_BYTES);
+        let minified_file = is_minified_content(&content);
         let mut this_file_hits = 0usize;
         for (idx, raw_line) in content.split_inclusive('\n').enumerate() {
             let line = raw_line.trim_end_matches(['\n', '\r']);
@@ -5459,12 +5483,7 @@ fn scan_uncovered_files(
             }
             this_file_hits += 1;
             let (start, end) = found[0];
-            let text_truncated = line.len() > LITERAL_SNIPPET_MAX_CHARS;
-            let shown: String = if text_truncated {
-                line.chars().take(LITERAL_SNIPPET_MAX_CHARS).collect()
-            } else {
-                line.to_string()
-            };
+            let (shown, text_truncated) = match_window(line, start, end);
             let mut hit = serde_json::Map::new();
             hit.insert("path".to_string(), json!(path));
             hit.insert("line".to_string(), json!(idx + 1));
@@ -5684,6 +5703,8 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
     let mut files_quota_truncated = 0usize;
     let mut files_skipped_too_large: Vec<String> = Vec::new();
     let mut files_skipped_too_large_count = 0usize;
+    let mut files_skipped_minified: Vec<String> = Vec::new();
+    let mut files_skipped_minified_count = 0usize;
     let mut files_skipped_binary_extension = 0usize;
     let mut files_skipped_binary_extension_paths: Vec<String> = Vec::new();
     let mut files_skipped_binary = 0usize;
@@ -5790,6 +5811,13 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
             }
             continue;
         };
+        if is_minified_content(&content) {
+            files_skipped_minified_count += 1;
+            if files_skipped_minified.len() < SKIPPED_SAMPLE_LEN {
+                files_skipped_minified.push(path.clone());
+            }
+            continue;
+        }
         if content.as_bytes().contains(&0u8) {
             files_with_nul_scanned += 1;
         }
@@ -5836,15 +5864,19 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                         split_form_truncated = true;
                         continue;
                     }
-                    let shown: String = line.chars().take(LITERAL_SNIPPET_MAX_CHARS).collect();
-                    split_form_matches.push(json!({
+                    let (shown, text_truncated) = match_window(line, start, end);
+                    let mut split_hit = json!({
                         "path": path,
                         "line": idx + 1,
                         "column": start + 1,
                         "match": line.get(start..end).unwrap_or(""),
                         "joined": joined,
                         "text": shown.trim_end()
-                    }));
+                    });
+                    if text_truncated {
+                        split_hit["text_truncated"] = json!(true);
+                    }
+                    split_form_matches.push(split_hit);
                 }
             }
             let (found, distinct) = if !multi {
@@ -5932,12 +5964,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
                 continue;
             }
             let (start, end) = found[0];
-            let text_truncated = line.len() > LITERAL_SNIPPET_MAX_CHARS;
-            let shown: String = if text_truncated {
-                line.chars().take(LITERAL_SNIPPET_MAX_CHARS).collect()
-            } else {
-                line.to_string()
-            };
+            let (shown, text_truncated) = match_window(line, start, end);
             let mut hit = serde_json::Map::new();
             hit.insert("path".to_string(), json!(path));
             hit.insert("line".to_string(), json!(idx + 1));
@@ -6063,6 +6090,7 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         && !(matches_truncated && !walk_every_file_in_scope)
         && !budget_exhausted
         && files_skipped_too_large_count == 0
+        && files_skipped_minified_count == 0
         && files_unreadable == 0
         && !glob_matched_no_files
         && glob_outside_path.is_empty()
@@ -6336,6 +6364,9 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         if files_skipped_too_large_count > 0 {
             gaps.push(format!("{files_skipped_too_large_count} file(s) over {} bytes were skipped", LITERAL_SCAN_MAX_FILE_BYTES));
         }
+        if files_skipped_minified_count > 0 {
+            gaps.push(format!("{files_skipped_minified_count} minified or generated file(s) were skipped (average line over {MINIFIED_AVG_LINE_BYTES} bytes)"));
+        }
         if files_unreadable > 0 {
             gaps.push(format!("{files_unreadable} file(s) could not be read"));
         }
@@ -6524,6 +6555,10 @@ pub fn scan_literal(req: &LiteralScan, cfg: &crate::ragconfig::RagConfig) -> Val
         out.insert("budget_exhausted".to_string(), json!(true));
         out.insert("timed_out".to_string(), json!(true));
         out.insert("budget_ms".to_string(), json!(budget_ms));
+    }
+    if files_skipped_minified_count > 0 {
+        out.insert("files_skipped_minified_count".to_string(), json!(files_skipped_minified_count));
+        out.insert("files_skipped_minified".to_string(), json!(files_skipped_minified));
     }
     if files_skipped_too_large_count > 0 {
         out.insert(
