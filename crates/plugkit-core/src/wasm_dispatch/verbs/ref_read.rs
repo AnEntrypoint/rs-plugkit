@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 use super::git::refuse_unknown_fields;
-use super::search::CODESEARCH_EXHAUSTIVE_FIELDS;
+use super::search::{ok_codesearch, CODESEARCH_EXHAUSTIVE_FIELDS};
 use super::{err_coded, ok, ERR_CODE_FAILED};
 
 const DEFAULT_CAP: usize = 200;
@@ -42,7 +42,7 @@ pub(super) fn codesearch_at_ref(body: &Value) -> Option<u64> {
         return Some(refusal);
     }
     Some(match codesearch_at_ref_data(body, requested) {
-        Ok(data) => ok("codesearch", data),
+        Ok(data) => ok_codesearch(data),
         Err(reason) => err_coded("codesearch", ERR_CODE_FAILED, &reason),
     })
 }

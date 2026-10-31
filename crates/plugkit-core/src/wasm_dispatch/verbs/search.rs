@@ -1,6 +1,15 @@
 use super::*;
 use crate::scan_universe::GM_STATE_EXCLUSION_RULES;
 
+pub(super) fn ok_codesearch(mut data: Value) -> u64 {
+    if data.get("ok") == Some(&json!(true)) {
+        if let Some(map) = data.as_object_mut() {
+            map.remove("ok");
+        }
+    }
+    ok("codesearch", data)
+}
+
 pub(super) const UNINDEXED_CANDIDATE_MAX: usize = 500;
 
 pub(super) const DUAL_PHRASE_SCAN_BUDGET_MS: u64 = 6_000;
@@ -758,7 +767,7 @@ pub(super) fn codesearch_at_root(
             };
             let index_only = body.get("index_only").and_then(|v| v.as_bool()).unwrap_or(false);
             if cold_start && !index_only {
-                return ok("codesearch", cold_pending_reply_queued(root, body));
+                return ok_codesearch(cold_pending_reply_queued(root, body));
             }
             let index_started = unsafe { crate::wasm_dispatch::host_now_ms() };
             let cold_budget_ms = match caller_remaining_ms() {
@@ -787,7 +796,7 @@ pub(super) fn codesearch_at_root(
                     "root": root,
                     "index_progress": retry.get("index_progress").cloned().unwrap_or_else(|| json!({})),
                 }));
-                return ok("codesearch", cold_index_pending_reply(root, &retry));
+                return ok_codesearch(cold_index_pending_reply(root, &retry));
             }
             return codesearch_at_root(&retry, root, query, k, cfg);
         }
@@ -943,7 +952,7 @@ pub(super) fn codesearch_at_root(
             map.insert("stale_digest".to_string(), json!(stored));
         }
     }
-    ok("codesearch", reply)
+    ok_codesearch(reply)
 }
 
 pub(super) fn sum_stage_ms(prior: Value, now: Value) -> Value {
@@ -1546,7 +1555,7 @@ pub(super) fn codesearch_exhaustive(
     }
     let mut out = match scanned {
         Value::Object(map) => map,
-        other => return ok("codesearch", other),
+        other => return ok_codesearch(other),
     };
     let partial = finish_scan_reply(&mut out, max_matches.min(u32::MAX as usize) as u32);
     out.insert("guest_elapsed_ms".to_string(), json!(guest_elapsed_ms()));
@@ -3100,7 +3109,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
         && crate::codesearch_rank::is_identifier(identifier);
     if identifier_route {
         match codesearch_identifier(body, identifier, root.as_deref(), &cfg, &rank_opts) {
-            Some(Ok(report)) => return ok("codesearch", report),
+            Some(Ok(report)) => return ok_codesearch(report),
             Some(Err(e)) => return err("codesearch", &e),
             None => {}
         }
@@ -3128,7 +3137,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
                 obj.insert("cand_k".to_string(), json!(cand_k));
             }
             let out = crate::dataflow_exec::run(&pipeline, request);
-            return ok("codesearch", out);
+            return ok_codesearch(out);
         }
     }
     if body
@@ -3184,7 +3193,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             };
             if cold_start && !body.get("index_only").and_then(|v| v.as_bool()).unwrap_or(false) {
                 let root = crate::wasm_dispatch::host_abi::host_cwd_string().unwrap_or_else(|| ".".to_string());
-                return ok("codesearch", cold_pending_reply_queued(&root, body));
+                return ok_codesearch(cold_pending_reply_queued(&root, body));
             }
             let topup_started = unsafe { host_now_ms() };
             let pass = if cold_start {
@@ -3224,7 +3233,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
     }
     let reply_cache_key = dual_reply_cache_key(body);
     if let Some(cached) = dual_reply_cache_get(&reply_cache_key) {
-        return ok("codesearch", cached);
+        return ok_codesearch(cached);
     }
     let cand_k = scoped_candidate_k(cfg.budget.pool(k as usize).max(50) as u32, scope.as_ref());
     let embedding = if semantic_skip.is_some() { Value::Null } else { embed_query(query) };
@@ -3341,7 +3350,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             map.insert("semantic_skipped".to_string(), json!(reason));
         }
         dual_reply_cache_put(reply_cache_key, &reply);
-        return ok("codesearch", reply);
+        return ok_codesearch(reply);
     }
     let ns = cfg.namespaces.code.as_str();
     let packed = unsafe {
@@ -3410,7 +3419,7 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
                 "note": "the live keyword scan did not run, so this is not a verified zero: retry, or grep the path",
             }),
         };
-        return ok("codesearch", served);
+        return ok_codesearch(served);
     }
 
     let mut reply = compact_dual_reply(
@@ -3430,6 +3439,6 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
     if let (Some(map), Some(reason)) = (reply.as_object_mut(), semantic_skip.as_deref()) {
         map.insert("semantic_skipped".to_string(), json!(reason));
     }
-    ok("codesearch", reply)
+    ok_codesearch(reply)
 }
 
