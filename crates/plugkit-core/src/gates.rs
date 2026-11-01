@@ -427,26 +427,39 @@ fn effective_severity_is_deny(kind: &str) -> bool {
         == crate::orchestrator::deviations::Severity::Deny
 }
 
-fn is_synthetic_test_path(rel: &str) -> bool {
+pub(crate) fn is_synthetic_test_path(rel: &str) -> bool {
     let norm = rel.replace('\\', "/").to_lowercase();
     let segments: Vec<&str> = norm.split('/').filter(|s| !s.is_empty()).collect();
-    let Some(file) = segments.last() else {
+    let Some((file, dirs)) = segments.split_last() else {
         return false;
     };
-    if segments
-        .iter()
-        .rev()
-        .skip(1)
-        .any(|s| *s == "test" || *s == "tests" || *s == "__tests__" || *s == "spec")
-    {
+    if dirs.iter().any(|d| SYNTHETIC_DIR_NAMES.contains(d)) {
         return true;
     }
-    let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
-    stem.ends_with(".test")
-        || stem.ends_with(".spec")
-        || stem.ends_with("_test")
-        || stem.ends_with("_spec")
+    file.starts_with("test_") || SYNTHETIC_NAME_MARKERS.iter().any(|m| file.contains(m))
 }
+
+const SYNTHETIC_DIR_NAMES: &[&str] = &[
+    "test",
+    "tests",
+    "__tests__",
+    "fixtures",
+    "__fixtures__",
+    "__mocks__",
+    "mocks",
+];
+
+const SYNTHETIC_NAME_MARKERS: &[&str] = &[
+    ".test.",
+    ".spec.",
+    "_test.",
+    ".mock.",
+    ".stub.",
+    ".fixture.",
+    "_mock.",
+    "_stub.",
+    "_fixture.",
+];
 
 fn is_unsolicited_toplevel_doc(rel: &str) -> bool {
     let norm = rel.replace('\\', "/");

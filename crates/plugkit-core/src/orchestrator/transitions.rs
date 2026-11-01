@@ -411,16 +411,7 @@ fn synthetic_test_files_added_in_working_diff() -> Vec<String> {
         if path.is_empty() {
             continue;
         }
-        let lower = path.to_ascii_lowercase();
-        let name = lower.rsplit('/').next().unwrap_or(&lower).to_string();
-        let is_test_file = name.contains(".test.") || name.contains(".spec.");
-        let is_test_dir = lower.contains("/test/")
-            || lower.contains("/tests/")
-            || lower.contains("/__tests__/")
-            || lower.starts_with("test/")
-            || lower.starts_with("tests/")
-            || lower.starts_with("__tests__/");
-        if is_test_file || is_test_dir {
+        if crate::gates::is_synthetic_test_path(path) {
             found.push(path.to_string());
         }
     }
