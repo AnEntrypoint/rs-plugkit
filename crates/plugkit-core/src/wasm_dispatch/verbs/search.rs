@@ -1,12 +1,16 @@
 use super::*;
 use crate::scan_universe::GM_STATE_EXCLUSION_RULES;
 
-pub(super) fn ok_codesearch(mut data: Value) -> u64 {
+pub(super) fn strip_duplicate_ok(data: &mut Value) {
     if data.get("ok") == Some(&json!(true)) {
         if let Some(map) = data.as_object_mut() {
             map.remove("ok");
         }
     }
+}
+
+pub(super) fn ok_codesearch(mut data: Value) -> u64 {
+    strip_duplicate_ok(&mut data);
     ok("codesearch", data)
 }
 
@@ -2520,9 +2524,11 @@ fn with_index_topup(packed: u64, reason: &str, pass: &Value, pass_ms: u64) -> u6
 }
 
 pub(super) fn answer_scan(verb: &str, out: serde_json::Map<String, Value>, partial: Option<String>) -> u64 {
+    let mut data = Value::Object(out);
+    strip_duplicate_ok(&mut data);
     match partial {
-        Some(reason) => ok_partial(verb, Value::Object(out), &reason),
-        None => ok(verb, Value::Object(out)),
+        Some(reason) => ok_partial(verb, data, &reason),
+        None => ok(verb, data),
     }
 }
 
