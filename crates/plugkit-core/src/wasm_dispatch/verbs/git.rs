@@ -10015,10 +10015,10 @@ fn git_remote_mutate(body: &Value, action: &str) -> u64 {
                 "name must start with a letter or digit and hold only letters, digits, '.', '_' or '-' (max 64)",
             ));
         }
-        if name == "origin" {
+        if name == "origin" && action != "add" {
             return Ok(err(
                 "git_remote",
-                "origin is never added, removed or changed by git_remote; choose another name",
+                "origin is never removed by git_remote; add creates it only while no origin exists",
             ));
         }
         let argv: Vec<&str> = if action == "add" {
@@ -11606,6 +11606,9 @@ pub(super) fn git_init(body: &Value) -> u64 {
         .trim()
         .to_string();
     let gitignore = git_init_gitignore(&root);
+    if gitignore == "added" {
+        let _ = git_call_argv(&["add", "--", ".gitignore"], Some(root.as_str()));
+    }
     ok(
         "git_init",
         json!({
