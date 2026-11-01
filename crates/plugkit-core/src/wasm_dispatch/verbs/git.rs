@@ -7162,7 +7162,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
         return err_json(
             "git_pull",
             json!({
-                "error": "tracked paths are dirty; git_pull never autostashes, so nothing was fetched or merged",
+                "error": format!("tracked paths are dirty ({}); git_pull never autostashes, so nothing was fetched or merged", dirty_tracked.join(", ")),
                 "error_code": "dirty_worktree",
                 "dirty_paths": dirty_tracked,
                 "dirty_count": dirty_tracked.len(),
