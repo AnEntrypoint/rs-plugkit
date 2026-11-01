@@ -147,7 +147,7 @@ pub const DEVIATION_TABLE: &[(&str, &str, Severity)] = &[
     ),
     (
         "synthetic-test-file",
-        "the working tree carries a standing test file (a `*.test.*`/`*.spec.*`/`*_test.*`/`test_*` path, or a file under a `test/`/`tests/`/`__tests__/` directory) or a synthetic or stub fixture (a `*.mock.*`/`*.stub.*`/`*.fixture.*` path, or a file under a `fixtures/`/`__fixtures__/`/`__mocks__/`/`mocks/` directory) -- doctrine is live exec_js witnesses, not framework legwork deferred to a later run",
+        "the working tree carries a standing test file (a `*.test.*`/`*.spec.*` path, or a `test/`/`__tests__/`/`spec/` directory) -- doctrine is live exec_js witnesses, not framework legwork deferred to a later run",
         Severity::Log,
     ),
     (
