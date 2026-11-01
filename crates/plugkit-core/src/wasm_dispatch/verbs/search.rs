@@ -2890,10 +2890,26 @@ fn attach_unrouted_groups(body: &Value, v: &mut Value) {
     );
     let elapsed = unsafe { host_now_ms() }.saturating_sub(started);
     let commits_group = group_reply(ranked.hits, ranked.complete, elapsed, ranked.skipped, ranked.stalled_step);
-    let bm25_skip = if scoped { "scope_exhaustive" } else { "route_without_index" };
+    let stored = crate::code_index::stored_digest();
+    let current = crate::code_index::current_digest();
+    let stale = match &stored { Some(s) => s != &current, None => true };
+    let bm25_skip = if scoped {
+        "scope_exhaustive"
+    } else if stale {
+        "stale_digest"
+    } else {
+        "route_without_index"
+    };
     let bm25_group = group_reply(Vec::new(), false, 0, Some(bm25_skip), None);
     if let Some(map) = v.as_object_mut() {
         map.insert("groups".to_string(), json!({ "bm25": bm25_group, "commits": commits_group }));
+        if stale && !scoped {
+            map.entry("semantic_skipped").or_insert_with(|| json!(format!(
+                "digest-mismatch: stored index digest {} != live file-set digest {}; this route runs no index top-up, so the stale index is named instead of used",
+                stored.as_deref().unwrap_or("absent"),
+                current
+            )));
+        }
     }
 }
 
