@@ -11608,6 +11608,20 @@ pub(super) fn git_init(body: &Value) -> u64 {
     let gitignore = git_init_gitignore(&root);
     if gitignore == "added" {
         let _ = git_call_argv(&["add", "--", ".gitignore"], Some(root.as_str()));
+        let committed = git_call_with_identity(
+            &["commit", "-m", "Add managed .gitignore"],
+            &commit_identity(body),
+            Some(root.as_str()),
+        );
+        if git_exit_code(&committed) != 0 {
+            return err(
+                "git_init",
+                &format!(
+                    "managed .gitignore commit failed: {}",
+                    git_output_text(&committed)
+                ),
+            );
+        }
     }
     ok(
         "git_init",
