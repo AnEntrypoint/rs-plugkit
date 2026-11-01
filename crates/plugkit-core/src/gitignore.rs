@@ -21,6 +21,8 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/.last-scan-deps-result.json",
     ".gm/.embed-generation.*",
     ".gm/dream-rsi/",
+    ".gm/locks/",
+    ".gm/unknowns.dir-migrated.json",
     ".gm/fsm-graph-rejected.json",
     ".gm/bootstrap-status.json",
     ".gm/bootstrap-error.json",
@@ -74,6 +76,25 @@ pub const MUST_STAY_TRACKED: &[&str] = &[
     "gm-data/code-search/",
     "gm-data/disciplines/",
 ];
+
+fn runtime_matcher() -> &'static ignore::gitignore::Gitignore {
+    static MATCHER: std::sync::OnceLock<ignore::gitignore::Gitignore> = std::sync::OnceLock::new();
+    MATCHER.get_or_init(|| {
+        let mut builder = ignore::gitignore::GitignoreBuilder::new("");
+        for entry in MANAGED_ENTRIES {
+            let _ = builder.add_line(None, entry);
+        }
+        builder
+            .build()
+            .unwrap_or_else(|_| ignore::gitignore::Gitignore::empty())
+    })
+}
+
+pub fn is_runtime_path(path: &str) -> bool {
+    runtime_matcher()
+        .matched_path_or_any_parents(path, false)
+        .is_ignore()
+}
 
 const START_MARKER: &str = "# >>> plugkit managed";
 const END_MARKER: &str = "# <<< plugkit managed";

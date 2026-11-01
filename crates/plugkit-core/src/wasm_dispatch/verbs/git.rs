@@ -643,10 +643,52 @@ pub(super) fn git_status(body: &Value) -> u64 {
         // A submodule is listed as modified only for dirt outside the gm state
         // pathspecs (.gm/, .agentplug*) inside that submodule.
         let declared_submodules = submodule_gitlink_paths(cwd);
+        let mut runtime_dirty: Vec<String> = Vec::new();
+        let mut submodules_with_real_dirt: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for path in &modified {
+            if !declared_submodules.contains(path.as_str()) {
+                continue;
+            }
+            let (runtime, real) = submodule_dirt_split(cwd, path.as_str());
+            runtime_dirty.extend(runtime.into_iter().map(|inner| format!("{path}/{inner}")));
+            if !real.is_empty() {
+                submodules_with_real_dirt.insert(path.clone());
+            }
+        }
         modified.retain(|path| {
             !declared_submodules.contains(path.as_str())
-                || submodule_has_unprotected_dirt(cwd, path.as_str())
+                || submodules_with_real_dirt.contains(path.as_str())
         });
+        let parent_status = git_call_argv(&["status", "--porcelain", "--untracked-files=all"], cwd);
+        let mut protected_dirty: Vec<String> = Vec::new();
+        for line in parent_status.get("stdout").and_then(Value::as_str).unwrap_or("").lines() {
+            let Some(path) = line.get(3..).map(|p| p.trim().trim_matches('"').to_string()) else {
+                continue;
+            };
+            if !(path.starts_with(".gm/") || path.starts_with(".agentplug")) {
+                continue;
+            }
+            if crate::gitignore::is_runtime_path(&path) {
+                runtime_dirty.push(path);
+            } else {
+                protected_dirty.push(path);
+            }
+        }
+        runtime_dirty.sort();
+        runtime_dirty.dedup();
+        let mut dirty_paths: Vec<String> = modified
+            .iter()
+            .chain(untracked.iter())
+            .chain(deleted.iter())
+            .chain(staged.iter())
+            .chain(conflicted.iter())
+            .cloned()
+            .chain(protected_dirty)
+            .collect();
+        dirty_paths.sort();
+        dirty_paths.dedup();
+        let clean = dirty_paths.is_empty();
         let dirty = !porcelain.trim().is_empty();
         let head_sha = status.head_sha;
         let head_branch = status.branch;
@@ -758,6 +800,9 @@ pub(super) fn git_status(body: &Value) -> u64 {
                 "excluded".to_string(),
                 json!(GIT_PROTECTED_PATHSPECS.iter().map(|(name, _)| *name).collect::<Vec<_>>()),
             );
+            map.insert("dirty".to_string(), json!(dirty_paths));
+            map.insert("clean".to_string(), json!(clean));
+            map.insert("runtime_dirty".to_string(), json!(runtime_dirty));
             if let Some(divergence) = submodule_divergence(cwd, &modified) {
                 map.insert("submodules".to_string(), divergence);
             }
@@ -7055,6 +7100,7 @@ pub(super) fn git_pull(body: &Value) -> u64 {
     let mut argv: Vec<String> = identity_config_argv(&pull_id);
     argv.push("pull".to_string());
     argv.push("--no-edit".to_string());
+    argv.push("--no-recurse-submodules".to_string());
     argv.push(String::from(if rebase { "--rebase" } else { "--no-rebase" }));
     if autostash {
         argv.push("--autostash".to_string());
@@ -9764,9 +9810,53 @@ pub(super) fn ci_log(body: &Value) -> u64 {
     pack(json!({ "ok": true, "verb": "ci-log", "data": data }).to_string())
 }
 
+fn git_branch_rename(body: &Value, rename: &Value) -> u64 {
+    let cwd = body_cwd(body);
+    let field = |key: &str| rename.get(key).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let from = field("from");
+    let to = field("to");
+    if from.is_empty() || to.is_empty() {
+        return err("git_branch", "rename needs non-empty from and to");
+    }
+    for name in [from.as_str(), to.as_str()] {
+        let valid = git_call_argv(&["check-ref-format", "--branch", name], cwd)
+            .get("exit_code")
+            .and_then(|x| x.as_i64())
+            .unwrap_or(1)
+            == 0;
+        if !valid || name.starts_with('-') {
+            return err("git_branch", &format!("{:?} is not a valid branch name", name));
+        }
+    }
+    let branch_exists = |name: &str| {
+        git_call_argv(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{}", name)], cwd)
+            .get("exit_code")
+            .and_then(|x| x.as_i64())
+            .unwrap_or(1)
+            == 0
+    };
+    if !branch_exists(&from) {
+        return err("git_branch", &format!("branch {} does not exist", from));
+    }
+    if branch_exists(&to) {
+        return err(
+            "git_branch",
+            &format!("branch {} already exists; rename refuses to overwrite it", to),
+        );
+    }
+    if let Err(e) = run_git_checked(&["branch", "-m", from.as_str(), to.as_str()], cwd, "git_branch", "git branch rename failed") {
+        return e;
+    }
+    let current = exec_git_in(cwd, "rev-parse --abbrev-ref HEAD").trim().to_string();
+    ok("git_branch", json!({ "renamed": { "from": from, "to": to }, "current": current }))
+}
+
 pub(super) fn git_branch(body: &Value) -> u64 {
-    if let Some(refusal) = refuse_unknown_fields("git_branch", body, &["remote", "all"]) {
+    if let Some(refusal) = refuse_unknown_fields("git_branch", body, &["remote", "all", "rename"]) {
         return refusal;
+    }
+    if let Some(rename) = body.get("rename") {
+        return git_branch_rename(body, rename);
     }
     for flag in ["remote", "all"] {
         match body.get(flag) {
@@ -10014,9 +10104,14 @@ pub(super) fn git_submodule_update(body: &Value) -> u64 {
                 .unwrap_or("git submodule update failed");
             return Ok(err("git_submodule_update", reason));
         }
+        let sub_dir = format!("{}/{}", cwd.unwrap_or(".").trim_end_matches('/'), path);
+        let managed = match crate::gitignore::ensure_managed_gitignore(&sub_dir) {
+            Ok(changed) => json!(changed),
+            Err(reason) => json!(reason),
+        };
         Ok(ok(
             "git_submodule_update",
-            json!({ "path": path, "recursive": recursive }),
+            json!({ "path": path, "recursive": recursive, "managed_gitignore_changed": managed }),
         ))
     })
 }
@@ -11404,7 +11499,7 @@ pub(super) fn git_init(body: &Value) -> u64 {
             }
             Some(format!("--initial-branch={}", b))
         }
-        Ok(None) => None,
+        Ok(None) => Some("--initial-branch=main".to_string()),
         Err(reason) => return err("git_init", &reason),
     };
     let mut argv: Vec<&str> = vec!["init"];
@@ -12771,6 +12866,31 @@ fn submodule_has_unprotected_dirt(cwd: Option<&str>, path: &str) -> bool {
         .get("stdout")
         .and_then(Value::as_str)
         .is_some_and(|out| out.lines().any(|line| !line.trim().is_empty()))
+}
+
+pub(super) fn submodule_dirt_split(cwd: Option<&str>, path: &str) -> (Vec<String>, Vec<String>) {
+    let root = cwd.unwrap_or(".").trim_end_matches(['/', '\\']);
+    let dir = format!("{root}/{path}");
+    let probe = git_call_argv(&["status", "--porcelain", "--untracked-files=all"], Some(dir.as_str()));
+    if probe.get("exit_code").and_then(Value::as_i64) != Some(0) {
+        return (Vec::new(), vec![format!("{path}: git status failed")]);
+    }
+    let mut runtime = Vec::new();
+    let mut real = Vec::new();
+    for line in probe.get("stdout").and_then(Value::as_str).unwrap_or("").lines() {
+        let Some(inner) = line.get(3..).map(|p| p.trim().trim_matches('"').to_string()) else {
+            continue;
+        };
+        if inner.is_empty() {
+            continue;
+        }
+        if crate::gitignore::is_runtime_path(&inner) {
+            runtime.push(inner);
+        } else {
+            real.push(inner);
+        }
+    }
+    (runtime, real)
 }
 
 pub(super) fn path_is_submodule_gitlink(cwd: Option<&str>, path: &str) -> bool {
