@@ -8625,6 +8625,15 @@ pub(super) fn ci_status_job_entry(workflow: &str, run_id: u64, job: &Value) -> V
         ("completed", _) => "failure",
         _ => "pending",
     };
+    let failed_step = job
+        .get("steps")
+        .and_then(Value::as_array)
+        .and_then(|steps| {
+            steps
+                .iter()
+                .find(|step| step.get("conclusion").and_then(Value::as_str) == Some("failure"))
+        })
+        .and_then(|step| step.get("name").and_then(Value::as_str));
     json!({
         "workflow": workflow,
         "name": job.get("name").and_then(Value::as_str).unwrap_or(""),
@@ -8634,6 +8643,7 @@ pub(super) fn ci_status_job_entry(workflow: &str, run_id: u64, job: &Value) -> V
         "run_id": run_id,
         "job_id": job.get("id").and_then(Value::as_u64),
         "job_url": job.get("html_url").and_then(Value::as_str),
+        "failed_step": failed_step,
     })
 }
 
@@ -8671,6 +8681,7 @@ pub(super) fn ci_status_reply_shape(mut reply: Value) -> Value {
             .map(|j| {
                 json!({
                     "name": j.get("name"),
+                    "failed_step": j.get("failed_step"),
                     "workflow": j.get("workflow"),
                     "job_id": j.get("job_id"),
                     "run_id": j.get("run_id"),
