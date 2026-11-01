@@ -402,6 +402,29 @@ pub(super) fn narrow_caller_budget(ms: u64) {
     });
 }
 
+fn index_topup_budget(body: &Value, config_ms: u64) -> Result<u64, String> {
+    let left = match body.get("timeout_ms").and_then(|v| v.as_u64()) {
+        Some(timeout) => Some(timeout.saturating_sub(guest_elapsed_ms())),
+        None => caller_remaining_ms(),
+    };
+    match left {
+        None => Ok(config_ms),
+        Some(left) if left < DUAL_SEARCH_RESERVE_MS => Err(format!(
+            "caller-budget: {left} ms of timeout_ms left, under the {DUAL_SEARCH_RESERVE_MS} ms reserve; index topup not started"
+        )),
+        Some(left) => Ok(config_ms.min(left)),
+    }
+}
+
+fn timed_index_topup(body: &Value, config_ms: u64, max_files: usize) -> (Value, u64, u64) {
+    let started = unsafe { host_now_ms() };
+    let (pass, budget_ms) = match index_topup_budget(body, config_ms) {
+        Ok(ms) => (crate::code_index::index_topup(".", max_files, ms), ms),
+        Err(why) => (json!({"ok": false, "complete": false, "skipped": why}), 0),
+    };
+    (pass, budget_ms, unsafe { host_now_ms() }.saturating_sub(started))
+}
+
 pub(super) const COMMITS_GROUP_BUDGET_MS: u64 = 10_000;
 
 pub(super) const BM25_GROUP_MIN_BUDGET_MS: u64 = 5_000;
@@ -2502,7 +2525,7 @@ pub(super) fn grep(body: &Value) -> u64 {
     answer_scan("grep", out, partial)
 }
 
-fn with_index_topup(packed: u64, reason: &str, pass: &Value, pass_ms: u64) -> u64 {
+fn with_index_topup(packed: u64, reason: &str, pass: &Value, pass_ms: u64, budget_ms: u64) -> u64 {
     let Some(text) = unpack_to_string(packed) else {
         return packed;
     };
@@ -2512,8 +2535,11 @@ fn with_index_topup(packed: u64, reason: &str, pass: &Value, pass_ms: u64) -> u6
                 "index_topup".to_string(),
                 json!({
                     "reason": reason,
+                    "budget_ms": budget_ms,
                     "pass_ms": pass_ms,
                     "pass_ok": pass.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "complete": pass.get("complete").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "skipped": pass.get("skipped").cloned().unwrap_or(Value::Null),
                     "changed_files_count": pass.get("changed_files_count").cloned().unwrap_or_else(|| json!(0)),
                 }),
             );
@@ -3201,33 +3227,29 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
                 let root = crate::wasm_dispatch::host_abi::host_cwd_string().unwrap_or_else(|| ".".to_string());
                 return ok_codesearch(cold_pending_reply_queued(&root, body));
             }
-            let topup_started = unsafe { host_now_ms() };
-            let pass = if cold_start {
-                crate::code_index::index_topup(
-                    ".",
-                    cfg.index.prune_pass_file_limit_ceiling,
-                    COLD_INDEX_PASS_BUDGET_MS,
-                )
+            let config_budget_ms = if cold_start {
+                COLD_INDEX_PASS_BUDGET_MS
             } else {
-                crate::code_index::index_topup(
-                    ".",
-                    cfg.index.prune_pass_file_limit_ceiling,
-                    cfg.index.incremental_topup_wall_budget_ms,
-                )
+                cfg.index.incremental_topup_wall_budget_ms
             };
-            let topup_ms = unsafe { host_now_ms() }.saturating_sub(topup_started);
+            let (pass, budget_ms, topup_ms) =
+                timed_index_topup(body, config_budget_ms, cfg.index.prune_pass_file_limit_ceiling);
             emit_codeinsight_pass_outcome(reason, ".", &pass);
             let mut retry = body.clone();
             if let Some(obj) = retry.as_object_mut() {
                 obj.insert("auto_indexed".to_string(), Value::Bool(true));
                 if pass.get("complete").and_then(Value::as_bool) != Some(true) {
+                    let why = pass
+                        .get("skipped")
+                        .and_then(Value::as_str)
+                        .unwrap_or("index pass incomplete after topup");
                     obj.insert(
                         "semantic_skip_reason".to_string(),
-                        json!(format!("{reason}: index pass incomplete after topup")),
+                        json!(format!("{reason}: {why}")),
                     );
                 }
             }
-            return with_index_topup(codesearch_dispatch(&retry), reason, &pass, topup_ms);
+            return with_index_topup(codesearch_dispatch(&retry), reason, &pass, topup_ms, budget_ms);
         }
         if stale {
             semantic_skip = Some(format!(
@@ -3375,16 +3397,16 @@ pub(super) fn codesearch_dispatch(body: &Value) -> u64 {
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     {
-        let _ = crate::code_index::index_topup(
-            ".",
-            cfg.index.prune_pass_file_limit_ceiling,
+        let (pass, budget_ms, topup_ms) = timed_index_topup(
+            body,
             COLD_INDEX_PASS_BUDGET_MS,
+            cfg.index.prune_pass_file_limit_ceiling,
         );
         let mut retry = body.clone();
         if let Some(obj) = retry.as_object_mut() {
             obj.insert("auto_indexed".to_string(), Value::Bool(true));
         }
-        return codesearch_dispatch(&retry);
+        return with_index_topup(codesearch_dispatch(&retry), "kv-empty", &pass, topup_ms, budget_ms);
     }
     let vec_unavailable = vector_ranked.is_empty();
     let kv_empty_now = hits.is_null() || hits.as_array().map(|a| a.is_empty()).unwrap_or(true);
