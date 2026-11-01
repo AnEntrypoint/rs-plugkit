@@ -289,6 +289,7 @@ pub(super) fn git_async_reenter(verb: &str, body: &Value) -> u64 {
         "git_amend" => git_amend(body),
         "git_rewrite_authors" => git_rewrite_authors(body),
         "git_log" => git_log(body),
+        "git_tree" => git_tree(body),
         "git_diff" => git_diff(body),
         "git_remote" => git_remote(body),
         "git_submodule_add" => git_submodule_add(body),
@@ -6682,6 +6683,71 @@ pub(super) fn git_diff(body: &Value) -> u64 {
 
 pub(super) const GIT_SHOW_PAGE_BYTES: usize = 60000;
 
+/// Lists the entries of `path` (default ".") at `ref` (default HEAD), like `git ls-tree`; read-only.
+pub(super) fn git_tree(body: &Value) -> u64 {
+    if let Some(refusal) = refuse_unknown_fields("git_tree", body, &["path", "ref"]) {
+        return refusal;
+    }
+    let cwd = body_cwd(body);
+    let rev = body.get("ref").and_then(|v| v.as_str()).unwrap_or("HEAD");
+    let raw_path = body.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let normalized = raw_path.replace('\\', "/");
+    let trimmed = normalized.trim_start_matches("./").trim_end_matches('/');
+    let unsafe_path = trimmed.starts_with('-')
+        || trimmed.starts_with('/')
+        || trimmed.split('/').any(|part| part == "..");
+    if rev.starts_with('-') || unsafe_path {
+        return err_json(
+            "git_tree",
+            json!({
+                "error_code": "git_tree_bad_argument",
+                "error": "ref must not start with '-', and path must be repo-relative without '..'",
+                "ref": rev,
+                "path": raw_path,
+            }),
+        );
+    }
+    let spec = if trimmed.is_empty() || trimmed == "." {
+        String::new()
+    } else {
+        format!("{}/", trimmed)
+    };
+    let mut argv: Vec<&str> = vec!["ls-tree", "-z", "-l", rev];
+    if !spec.is_empty() {
+        argv.push("--");
+        argv.push(spec.as_str());
+    }
+    let r = git_call_argv(&argv, cwd);
+    let code = r.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(0);
+    if code != 0 || !r.get("ok").and_then(|x| x.as_bool()).unwrap_or(true) {
+        let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
+        return err_json(
+            "git_tree",
+            json!({
+                "error_code": "git_tree_unresolved",
+                "error": format!("ref {} path {} does not resolve: {}", rev, raw_path, stderr),
+                "ref": rev,
+                "path": raw_path,
+            }),
+        );
+    }
+    let out = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("");
+    let entries: Vec<Value> = out
+        .split('\0')
+        .filter(|record| !record.is_empty())
+        .filter_map(|record| {
+            let (meta, name) = record.split_once('\t')?;
+            let mut fields = meta.split_whitespace();
+            let mode = fields.next()?;
+            let kind = fields.next()?;
+            let sha = fields.next()?;
+            let size = fields.next().unwrap_or("-");
+            Some(json!({ "mode": mode, "type": kind, "sha": sha, "size": size.parse::<u64>().ok(), "path": name }))
+        })
+        .collect();
+    ok("git_tree", json!({ "ref": rev, "path": raw_path, "count": entries.len(), "entries": entries }))
+}
+
 pub(super) fn git_show(body: &Value) -> u64 {
     if let Some(refusal) = refuse_unknown_fields(
         "git_show",
@@ -7092,9 +7158,21 @@ pub(super) fn git_pull(body: &Value) -> u64 {
             }),
         );
     }
-    let only_runtime_state_dirty =
-        !dirty_tracked.is_empty() && dirty_tracked.iter().all(|path| path.starts_with(".gm/"));
-    let autostash = autostash_requested || only_runtime_state_dirty;
+    if !dirty_tracked.is_empty() {
+        return err_json(
+            "git_pull",
+            json!({
+                "error": "tracked paths are dirty; git_pull never autostashes, so nothing was fetched or merged",
+                "error_code": "dirty_worktree",
+                "dirty_paths": dirty_tracked,
+                "dirty_count": dirty_tracked.len(),
+                "autostash_requested": autostash_requested,
+                "remote": remote,
+                "hint": "Commit or revert these paths from their own writer, then re-dispatch git_pull.",
+            }),
+        );
+    }
+    let autostash = false;
     let head_before = exec_git_in(cwd, "rev-parse HEAD").trim().to_string();
     let pull_id = pull_identity(body);
     let mut argv: Vec<String> = identity_config_argv(&pull_id);

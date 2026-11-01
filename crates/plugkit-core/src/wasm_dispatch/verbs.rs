@@ -1398,6 +1398,12 @@ fn fs_write(body: &Value) -> u64 {
     if path.is_empty() {
         return err("fs_write", "path required");
     }
+    if body.get("startLine").is_some() || body.get("endLine").is_some() {
+        return err(
+            "fs_write",
+            "startLine/endLine is the exact-line form, which the front end must rewrite to a whole-file content write; the guest refuses it so a content key beside a line range cannot truncate the file. Nothing was written.",
+        );
+    }
     if !path_within_project(path) && !gm_scratch_write_granted(body, path) {
         let mut message = path_outside_project_message(path, false);
         if caller_opted_outside_root(body) {
@@ -3907,6 +3913,7 @@ fn dispatch_verb_unranked(verb: &str, body: &Value, body_s: &str) -> u64 {
         "git_log" => timed_git(git_log, &body),
         "git_diff" => timed_git(git_diff, &body),
         "git_show" => timed_git(git_show, &body),
+        "git_tree" => timed_git(git_tree, &body),
         "git_fetch" => timed_git(git_fetch, &body),
         "git_pull" => timed_git(git_pull, &body),
         "ci-status" | "ci_status" => ci_status(&body),

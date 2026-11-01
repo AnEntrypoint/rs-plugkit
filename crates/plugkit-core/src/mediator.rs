@@ -48,6 +48,7 @@ pub const GIT_VERBS: &[&str] = &[
     "git_log",
     "git_diff",
     "git_show",
+    "git_tree",
     "git_fetch",
     "git_branch",
     "git_remote",
