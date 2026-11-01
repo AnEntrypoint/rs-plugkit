@@ -941,6 +941,24 @@ impl AddOutcome {
             AddOutcome::Added | AddOutcome::AlreadyIdentical => "added",
         }
     }
+
+    fn outcome(self) -> &'static str {
+        match self {
+            AddOutcome::Added => "created",
+            AddOutcome::Rescoped | AddOutcome::AlreadyIdentical => "updated",
+        }
+    }
+}
+
+fn conflict_reply(id: &str, status: &str) -> String {
+    serde_json::json!({
+        "ok": false,
+        "outcome": "conflict",
+        "error_code": "prd_add_conflict",
+        "id": id,
+        "status": status,
+    })
+    .to_string()
 }
 
 const DISPOSITIONS: [&str; 4] = ["open", "accepted", "rejected", "deferred"];
@@ -1212,13 +1230,6 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
         }
     }
     let cas_max_attempts = super::fsm::graph().policy.cas_max_attempts;
-    let overwrite = item_map
-        .get(&Value::String("overwrite".to_string()))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    // A resolved row leaves .gm/prd/ for .gm/prd-log.jsonl, so the folder check
-    // alone cannot see it: refuse an id whose newest log record is closed,
-    // with or without overwrite.
     match row_store::log_row(&store, &id) {
         Ok(Some(logged)) => {
             let closed_status = logged
@@ -1228,9 +1239,9 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                 .to_string();
             if !status_is_open(&closed_status) {
                 return (
-                    String::new(),
+                    conflict_reply(&id, &closed_status),
                     format!(
-                        "prd-add refused: id '{}' is closed (status '{}') in .gm/prd-log.jsonl. A resolved row cannot be re-added or reopened; log the new work under a new id.",
+                        "prd-add conflict: id '{}' is closed (status '{}') in .gm/prd-log.jsonl. A resolved row cannot be re-added or reopened; log the new work under a new id.",
                         id, closed_status
                     ),
                     1,
@@ -1276,7 +1287,7 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                 Some(slot) => {
                     if *slot == new_row {
                         add_outcome = AddOutcome::AlreadyIdentical;
-                    } else if overwrite {
+                    } else {
                         let existing_status = slot
                             .as_mapping()
                             .and_then(|m| m.get(&Value::String("status".to_string())))
@@ -1285,9 +1296,9 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                             .to_string();
                         if !status_is_open(&existing_status) {
                             return cas::CasOutcome::Abort(
-                                String::new(),
+                                conflict_reply(&id, &existing_status),
                                 format!(
-                                    "prd-add refused: id '{}' is closed (status '{}'). overwrite cannot rescope or reopen a resolved row; log the new work under a new id.",
+                                    "prd-add conflict: id '{}' is closed (status '{}'). A resolved row cannot be rescoped or reopened; log the new work under a new id.",
                                     id, existing_status
                                 ),
                                 1,
@@ -1309,15 +1320,6 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
                         }
                         add_outcome = AddOutcome::Rescoped;
                         *slot = rescoped;
-                    } else {
-                        return cas::CasOutcome::Abort(
-                            String::new(),
-                            format!(
-                                "prd-add refused: id '{}' already exists. Pass overwrite:true to rescope it.",
-                                id
-                            ),
-                            1,
-                        );
                     }
                 }
                 None => seq.push(new_row),
@@ -1369,6 +1371,10 @@ pub fn handle_add(content: &str) -> (String, String, i32) {
     response.insert(
         add_outcome.response_key().to_string(),
         serde_json::Value::String(id.clone()),
+    );
+    response.insert(
+        "outcome".to_string(),
+        serde_json::Value::String(add_outcome.outcome().to_string()),
     );
     if add_outcome == AddOutcome::AlreadyIdentical {
         response.insert(

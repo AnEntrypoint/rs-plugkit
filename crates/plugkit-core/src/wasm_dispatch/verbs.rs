@@ -1580,22 +1580,49 @@ fn fs_edit(body: &Value) -> u64 {
             }),
         );
     };
-    let matches = text.matches(old).count();
-    if matches != 1 {
+    let Ok(occurrence) = fs_edit_selector(body, "occurrence") else {
         return err_json_coded(
             "fs_edit",
             ERR_CODE_INVALID_ARGS,
             json!({
-                "error": format!("old occurs {matches} times in {path}; it must occur exactly once, so nothing was edited"),
+                "error": "occurrence must be a 1-based integer when given, so nothing was edited",
                 "path": path,
-                "matches": matches,
                 "next_dispatch": "fs_read",
             }),
         );
-    }
-    let at = text.find(old).unwrap_or(0);
-    let line = text[..at].matches('\n').count() + 1;
-    let edited = text.replacen(old, new, 1);
+    };
+    let Ok(line_anchor) = fs_edit_selector(body, "line") else {
+        return err_json_coded(
+            "fs_edit",
+            ERR_CODE_INVALID_ARGS,
+            json!({
+                "error": "line must be a 1-based integer when given, so nothing was edited",
+                "path": path,
+                "next_dispatch": "fs_read",
+            }),
+        );
+    };
+    let starts: Vec<usize> = text.match_indices(old).map(|(at, _)| at).collect();
+    let line_of = |at: usize| (text[..at].matches('\n').count() + 1) as u64;
+    let chosen = match (occurrence, line_anchor) {
+        (Some(n), _) => usize::try_from(n - 1).ok().and_then(|i| starts.get(i).copied()),
+        (None, Some(wanted)) => starts.iter().copied().find(|&at| line_of(at) == wanted),
+        (None, None) => (starts.len() == 1).then(|| starts[0]),
+    };
+    let Some(at) = chosen else {
+        return err_json_coded(
+            "fs_edit",
+            ERR_CODE_INVALID_ARGS,
+            json!({
+                "error": format!("old occurs {} times in {path}; no match was selected by occurrence or line, so nothing was edited", starts.len()),
+                "path": path,
+                "matches": starts.len(),
+                "next_dispatch": "fs_read",
+            }),
+        );
+    };
+    let line = line_of(at);
+    let edited = format!("{}{}{}", &text[..at], new, &text[at + old.len()..]);
     let delta_bytes = edited.len() as i64 - text.len() as i64;
     if super::host_abi::host_write(path, &edited) {
         return ok(
@@ -1611,6 +1638,18 @@ fn fs_edit(body: &Value) -> u64 {
             "next_dispatch": "fs_stat",
         }),
     )
+}
+
+fn fs_edit_selector(body: &Value, key: &str) -> Result<Option<u64>, ()> {
+    match body.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+            .filter(|n| *n >= 1)
+            .map(Some)
+            .ok_or(()),
+    }
 }
 
 fn ensure_parent_dirs(path: &str) -> Value {

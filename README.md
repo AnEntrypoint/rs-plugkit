@@ -243,8 +243,9 @@ would need a proof assistant, not a Rust crate), but real and executed
 rather than asserted in a doc comment.
 
 Wasm-direct verbs: `fs_read`/`fs_write`/`fs_edit`/`fs_stat`/`fs_readdir` (`fs_edit`
-takes `path`, `old` and `new` and replaces one exact occurrence; zero or several matches
-refuse with `error_code` `invalid_args` and the `matches` count, writing nothing, and a
+takes `path`, `old` and `new` and replaces one exact occurrence; `occurrence` (1-based) or
+`line` (the 1-based line where the match starts) picks one of several matches; zero matches, or
+several with neither selector, refuse with `error_code` `invalid_args` and the `matches` count, writing nothing, and a
 success replies with the 1-based `line` and `delta_bytes`; the three read verbs accept `{"allowOutsideRoot": true}` to address an absolute path outside
 the project root -- per call, never inferred, `".."` still refused; `fs_write`
 ignores it and stays project-only), `scan_deps`
