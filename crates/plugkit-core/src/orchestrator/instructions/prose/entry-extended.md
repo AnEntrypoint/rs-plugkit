@@ -17,7 +17,7 @@ English describing intent = liability when code encodes it; comments = liability
 
 ## Install
 
-`bun x skills add AnEntrypoint/gm` copies the skill directory into `~/.claude/skills/gm/` (and `~/.agents/skills/gm/`), installed as `/gm`. The `install.sh`/`install.ps1`/`bin/gm-install.js` installers, run beside `skills/` or with `GM_SKILL_SOURCE_DIR` set, place a link instead, junction on Windows, symlink elsewhere, so the installed `SKILL.md` and the checkout's are one file; with no local source they copy and announce it. No npx, no marketplace, no npm registry.
+Skills are served over MCP only. Nothing installs a skill on the host: the gm MCP server serves every skill as a prompt and a resource. No `skills add`, npx, marketplace, npm registry or installer step is needed, and no host skill root is written.
 
 ## Bootstrap
 
