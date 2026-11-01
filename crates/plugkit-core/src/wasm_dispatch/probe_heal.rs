@@ -32,8 +32,26 @@ pub(crate) fn begin(body: impl FnOnce() -> String) -> Option<ProbeDir> {
     Some(ProbeDir(dir))
 }
 
+const DISPATCH_TS_TEMP_PREFIX: &str = "last-dispatch-ts.tmp-";
+
 pub(crate) fn end(probe: Option<ProbeDir>) {
+    sweep_dispatch_ts_temps();
     if let Some(ProbeDir(dir)) = probe {
         crate::pkfs::remove_tree(&dir);
+    }
+}
+
+fn sweep_dispatch_ts_temps() {
+    let Some(Value::Array(entries)) = crate::pkfs::readdir(".gm") else {
+        return;
+    };
+    for entry in entries {
+        let name = entry
+            .get("name")
+            .and_then(|n| n.as_str())
+            .or_else(|| entry.as_str());
+        if let Some(name) = name.filter(|n| n.starts_with(DISPATCH_TS_TEMP_PREFIX)) {
+            crate::pkfs::remove_file(&format!(".gm/{name}"));
+        }
     }
 }

@@ -16,6 +16,7 @@ pub const MANAGED_ENTRIES: &[&str] = &[
     ".gm/.gm-continue-count",
     ".gm/long-gap-retry-state",
     ".gm/last-dispatch-ts",
+    ".gm/last-dispatch-ts.tmp-*",
     ".gm/last-instruction-ts",
     ".gm/.last-scan-deps-ts",
     ".gm/.last-scan-deps-result.json",
