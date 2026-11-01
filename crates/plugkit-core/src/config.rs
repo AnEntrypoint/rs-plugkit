@@ -29,6 +29,34 @@ pub fn global_probe_root(project_gm_fallback_dir: Option<&str>) -> Option<String
     }
 }
 
+pub fn project_read_roots(project_root: &str) -> Vec<String> {
+    let Some(text) = pkfs::read_to_string(&join(project_root, PROJECT_CONFIG_REL)) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    value
+        .get("read_roots")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|root| declarable_read_root(root))
+        .map(str::to_string)
+        .collect()
+}
+
+fn declarable_read_root(root: &str) -> bool {
+    let slashed = root.replace('\\', "/");
+    let trimmed = slashed.trim_end_matches('/');
+    let absolute = slashed.starts_with('/') || slashed.as_bytes().get(1) == Some(&b':');
+    absolute
+        && !trimmed.is_empty()
+        && !trimmed.ends_with(':')
+        && !slashed.split('/').any(|segment| segment == "..")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     ProjectVendored,
@@ -100,6 +128,7 @@ impl Config {
             "memory_md_tables",
             "retention",
             "traversal",
+            "read_roots",
         ];
         let Some(obj) = self.value.as_object() else {
             return Vec::new();

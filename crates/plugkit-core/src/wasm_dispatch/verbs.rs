@@ -459,6 +459,14 @@ fn guard_surface_report() -> Value {
                                "every write verb: fs_write stays project-only and ignores the flag"],
             "note": "The opt-in widens WHICH root a read may address, never whether a read may climb out of one. It is per call and never inferred from the path shape, so a call without it fails exactly as before.",
         },
+        "read_roots": {
+            "accepts": ["an absolute path under an entry of read_roots in .gm/gm.config.json (each entry an absolute directory; the host grants only a directory holding a project marker)"],
+            "requires": ["no opt-in field: the project-declared entry alone admits the read"],
+            "applied_to": READ_ONLY_OUTSIDE_ROOT_VERBS,
+            "still_rejected": ["any \"..\" segment, with or without the opt-in",
+                               "every write verb: fs_write and fs_edit ignore read_roots"],
+            "note": "Read roots come from the project's own config file only, never from a call, a remote tier or a user tier, and they grant reads only: nothing in the config grants execution.",
+        },
         "project_path_or_granted_root": {
             "accepts": ["a relative path within the project", "an absolute directory the host grants (an existing directory holding .git, .gm, package.json, Cargo.toml, go.mod or pyproject.toml)"],
             "applied_to": verbs_with_capability(Capability::ProjectPathOrGrantedRoot),
@@ -731,6 +739,10 @@ fn outside_root_not_granted_message(path: &str) -> String {
     format!("allowOutsideRoot:true was accepted and the path has no \"..\" segment, but the host sandbox will not serve \"{path}\": outside the project root it reads only paths under the user gm root or under a directory carrying a project marker (.git, .gm, package.json, Cargo.toml, go.mod, pyproject.toml). Point the call at such a directory, or read this path with the host's own file-read tool.")
 }
 
+fn read_root_not_granted_message(path: &str, root: &str) -> String {
+    format!("\"{path}\" lies under the read_roots entry \"{root}\" in .gm/gm.config.json, but the host sandbox serves only a directory holding a project marker (.git, .gm, package.json, Cargo.toml, go.mod or pyproject.toml); add a marker to that directory or read the path with the host's own file-read tool.")
+}
+
 fn path_within_project(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     !normalized.split('/').any(|seg| seg == "..")
@@ -812,12 +824,37 @@ fn host_root_relative_path(path: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn declared_read_root_covering(path: &str) -> Option<String> {
+    if path_has_parent_traversal(path) || !path_is_absolute(path) {
+        return None;
+    }
+    let project = super::host_abi::host_cwd_string()?;
+    let target = trim_root_path(path);
+    crate::config::project_read_roots(&project)
+        .iter()
+        .map(|root| trim_root_path(root).trim_end_matches('/').to_string())
+        .find(|root| {
+            target
+                .strip_prefix(root.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+}
+
 fn project_path_rejection(verb: &str, path: &str, allow_outside_root: bool) -> Option<u64> {
     if path_within_project(path) || path_inside_host_root(path) {
         return None;
     }
     let read_verb = READ_ONLY_OUTSIDE_ROOT_VERBS.contains(&verb);
-    if !read_verb || !allow_outside_root {
+    if !read_verb {
+        return Some(err(verb, &path_outside_project_message(path, read_verb)));
+    }
+    if let Some(root) = declared_read_root_covering(path) {
+        if crate::wasm_dispatch::host_allow_root(&root) {
+            return None;
+        }
+        return Some(err(verb, &read_root_not_granted_message(path, &root)));
+    }
+    if !allow_outside_root {
         return Some(err(verb, &path_outside_project_message(path, read_verb)));
     }
     if path_has_parent_traversal(path) {
