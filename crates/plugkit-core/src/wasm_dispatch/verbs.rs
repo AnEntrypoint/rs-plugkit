@@ -3307,8 +3307,10 @@ pub extern "C" fn dispatch_verb(verb_ptr: u32, verb_len: u32, body_ptr: u32, bod
     let dispatched_verb = read_str(verb_ptr as *const u8, verb_len);
     #[cfg(target_arch = "wasm32")]
     let panic_start_ms = unsafe { host_now_ms() };
+    let probe = super::probe_heal::begin(|| read_str(body_ptr as *const u8, body_len));
     let result =
         std::panic::catch_unwind(|| dispatch_verb_inner(verb_ptr, verb_len, body_ptr, body_len));
+    super::probe_heal::end(probe);
     match result {
         Ok(packed) => packed,
         Err(payload) => {

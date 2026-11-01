@@ -5,6 +5,7 @@ pub(crate) mod host_abi;
 mod wit_env;
 mod dangling_refs;
 mod events;
+mod probe_heal;
 mod verbs;
 
 pub(crate) use events::{current_dispatch_session_id, emit_event};
