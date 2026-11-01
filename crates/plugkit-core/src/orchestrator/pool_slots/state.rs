@@ -5,7 +5,7 @@ use super::super::pool_rank;
 use super::super::prd;
 use super::super::transitions::{prd_open_rows_with_recency, prd_row_ids};
 use super::admission::{dirty_target_verdict, row_by_id, worktree_dirt, writer_targets_of};
-use super::heartbeats::{count_of_record_live, declared_holds, held_rows, read_heartbeats};
+use super::heartbeats::{count_of_record_live, declared_holds, held_rows, launched_runs, read_heartbeats};
 use super::{now_ms, pool_dir, DEFAULT_SPAWN_CEILING, LAUNCH_ID_PREFIX, TRAVERSAL_LAUNCH_ID};
 use crate::pkfs;
 
@@ -27,10 +27,7 @@ pub(super) fn slot_parts(
     let dir = pool_dir(project_root);
     let live = read_heartbeats(&dir, extra_heartbeat_dirs, now_ms());
     let heartbeat_live = live.count as u64;
-    let live_count = observed.map_or(heartbeat_live, |(count, _)| count);
-    let live_source = observed.map_or("heartbeats", |(_, source)| source);
     let ceiling = read_ceiling(&dir);
-    let free = ceiling.map(|c| c.saturating_sub(live_count));
     let (blocker_entries, work): (Vec<(Value, usize)>, Vec<(Value, usize)>) = prd_open_rows_with_recency()
         .into_iter()
         .partition(|(row, _)| pool_rank::is_blocker_row(row));
@@ -41,7 +38,18 @@ pub(super) fn slot_parts(
         .iter()
         .filter(|(row, _)| row.get("id").and_then(Value::as_str).is_some_and(|id| id.starts_with(LAUNCH_ID_PREFIX)))
         .count();
-    let (live_rows, live_rows_unmatched) = reconcile_live_rows(held_rows(&live, &work), &work, &dir);
+    let launched = launched_runs(&dir, &work);
+    let recorded_only = launched.iter().filter(|(_, session)| !live.sessions.contains(session)).count() as u64;
+    let live_count = observed.map_or(heartbeat_live + recorded_only, |(count, _)| count);
+    let live_source = match (observed, recorded_only) {
+        (Some((_, source)), _) => source,
+        (None, 0) => "heartbeats",
+        (None, _) => "heartbeats+launch-records",
+    };
+    let free = ceiling.map(|c| c.saturating_sub(live_count));
+    let mut held = held_rows(&live, &work);
+    held.extend(launched.into_iter().map(|(row, _)| row));
+    let (live_rows, live_rows_unmatched) = reconcile_live_rows(held, &work, &dir);
     let ranked = pool_rank::rank(&work, &blockers, &live_rows);
     let dirt = worktree_dirt();
     let mut claimed: HashSet<String> = work

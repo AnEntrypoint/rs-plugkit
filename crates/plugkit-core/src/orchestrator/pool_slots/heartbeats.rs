@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::pool_dir;
 use crate::pkfs;
@@ -11,6 +11,7 @@ const COUNT_OF_RECORD_FILE: &str = "count-of-record.json";
 const COUNT_OF_RECORD_TTL_MS: u64 = 5 * 60 * 1000;
 pub(super) const HELD_ROWS_FILE: &str = "held-rows.json";
 const HELD_ROWS_TTL_MS: u64 = 30 * 60 * 1000;
+const RUNS_LEDGER_FILE: &str = "runs.jsonl";
 
 #[derive(Default)]
 struct HeartbeatIdentity {
@@ -313,4 +314,31 @@ pub(super) fn held_rows(live: &LiveHeartbeats, work: &[(Value, usize)]) -> Vec<S
     rows.sort();
     rows.dedup();
     rows
+}
+
+pub(super) fn launched_runs(dir: &str, work: &[(Value, usize)]) -> Vec<(String, String)> {
+    let Some(text) = pkfs::read_to_string(&format!("{}/{}", dir, RUNS_LEDGER_FILE)) else {
+        return Vec::new();
+    };
+    let open: BTreeSet<&str> = work
+        .iter()
+        .filter_map(|(row, _)| row.get("id").and_then(Value::as_str))
+        .collect();
+    let mut last_per_run: BTreeMap<String, Value> = BTreeMap::new();
+    for record in text.lines().filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok()) {
+        if let Some(run) = record.get("run").and_then(Value::as_str) {
+            last_per_run.insert(run.to_string(), record);
+        }
+    }
+    last_per_run
+        .values()
+        .filter(|record| record.get("state").and_then(Value::as_str) == Some("launched"))
+        .filter_map(|record| {
+            let row = record.get("row").and_then(Value::as_str).and_then(non_empty)?;
+            open.contains(row.as_str()).then(|| {
+                let session = record.get("session").and_then(Value::as_str).and_then(non_empty).unwrap_or_default();
+                (row, session)
+            })
+        })
+        .collect()
 }
