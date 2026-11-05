@@ -174,6 +174,13 @@ Write `in/<lang>/<N>.<ext>` for language stems, `in/<verb>/<N>.txt` for orchestr
 | `git submodule add` | `git_submodule_add` |
 | `git submodule update` | `git_submodule_update` |
 
+Only an actual `git` CLI invocation is blocked; a path or quoted string that
+merely contains the word `git` (for example `os.path.isdir("/x/.git")` inside a
+`python3 -c` body) is a normal command and runs. `comment-audit` honours
+`path`, `files` and `glob` (strings or arrays): a scoped audit lists and reads
+only the named files, and its reply echoes `scope` and `files_listed`; the
+default row cap is 200, raise it with `limit`.
+
 ## SESSION_ID
 
 Thread SESSION_ID through every spool body; plugkit rejects empty. A verb that
@@ -189,6 +196,14 @@ dispatching N subagents into the same project passes each a value derived from
 its own id plus an index (e.g. `<parent_session_id>-sub<k>`), never the bare
 parent id -- this is the interference-avoidance contract for concurrent gm
 subagents, not a suggestion.
+
+`subagent_start` takes `parent_session_id` -- a subagent session uses the
+`session_id` from `status` for its own parent, or the `subagent_session_id`
+returned when this session was started -- and an optional `subagent_session_id`.
+Omit the latter and one is generated as `<parent_session_id>-sub<N>`, unique
+against starts already in the ledger; if you supply it, it must start with the
+parent id plus `-` and contain `-sub`. Never pass the bare parent id as the
+subagent id.
 
 ## Subagent fan-out
 

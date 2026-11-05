@@ -1931,8 +1931,10 @@ against a file:line inventory a doc claims.
   {\"root\":\"<dir>\"}                     project root; \"projectPath\" and \"cwd\" are aliases, in that
                                        order, and the default is the resolved project root
   {\"kind\":\"comment\"|\"docstring\"}        keep only that kind; omitted returns both
+  {\"path\":\"<file-or-dir>\"}              scope to one path; \"paths\" and \"files\" take arrays
+  {\"glob\":\"**/*.py\"}                    scope to a glob; \"globs\" takes an array
   {\"max_files\":20000}                   cap on files listed and read (aliases maxFiles)
-  {\"limit\":2000}                        cap on rows returned (aliases max_results, maxResults)
+  {\"limit\":200}                         cap on rows returned (aliases max_results, maxResults)
 Rows carry \"file\", \"line\", \"text\", \"enclosing\" and \"kind\". \"file\" is relative to the root and \"line\" is
 1-based at the first line of the comment. \"enclosing\" is the innermost function or class name, or
 \"-\" at module level. \"text\" is the comment as written, whitespace collapsed and clamped at 240
@@ -1941,7 +1943,7 @@ The walk uses the project source list, so .git, node_modules, target, venv, .gm 
 path are skipped. Comments come from the same language-agnostic scanner codesearch's \"comments\"
 mode uses, so every language that scanner covers is covered here; docstrings are the string literal
 at the start of a module, def or class body and are collected for .py files.
-The reply carries \"files_scanned\", \"files_unreadable\", \"findings_total\" and \"truncated\";
+The reply carries \"scope\", \"files_listed\", \"files_scanned\", \"files_unreadable\", \"findings_total\" and \"truncated\";
 \"truncated\" true means the \"limit\" cap fired and the rows are a prefix of the full list.";
 
 pub(super) fn verb_help_doc(verb: &str) -> Option<&'static str> {

@@ -672,17 +672,6 @@ fn split_inline_scripts(text: &str) -> (String, Vec<(&str, char)>) {
     (code, scripts)
 }
 
-fn contains_git_word(script: &str) -> bool {
-    let lower = script.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    lower.match_indices("git").any(|(i, _)| {
-        let before = i.checked_sub(1).is_some_and(|p| is_word(bytes[p]));
-        let after = bytes.get(i + 3).is_some_and(|&b| is_word(b));
-        !before && !after
-    })
-}
-
 fn substitutions_invoke_git(
     text: &str,
     is_git_token: &dyn Fn(&str) -> bool,
@@ -793,11 +782,13 @@ fn text_invokes_git(text: &str, is_git_token: &dyn Fn(&str) -> bool, depth: usiz
     let quoted_substitution = scripts.iter().any(|&(script, quote)| {
         quote == '"' && substitutions_invoke_git(script, is_git_token, depth)
     });
-    let script_names_git = scripts.iter().any(|&(script, _)| contains_git_word(script));
+    let script_invokes_git = scripts
+        .iter()
+        .any(|&(script, _)| text_invokes_git(script, is_git_token, depth + 1));
     let segments = split_words(&code);
     let vars = assignments(&segments);
     quoted_substitution
-        || script_names_git
+        || script_invokes_git
         || segments
             .iter()
             .any(|segment| segment_invokes_git(segment, &vars, is_git_token, depth))
@@ -1311,4 +1302,48 @@ fn policy_gate(
     }
 
     GateVerdict::allow()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn is_git_token(first: &str) -> bool {
+        let base = first.rsplit(['/', '\\']).next().unwrap_or(first).to_ascii_lowercase();
+        let stem = [".exe", ".cmd", ".bat"]
+            .iter()
+            .find_map(|ext| base.strip_suffix(*ext))
+            .unwrap_or(base.as_str());
+        stem == "git"
+    }
+
+    #[test]
+    fn quoted_path_mention_is_not_an_invocation() {
+        let cmd = r#"python3 -I -c 'import os; print(os.path.isdir("/config/workspace/gm/.git"))'"#;
+        assert!(!text_invokes_git(cmd, &is_git_token, 0), "{cmd}");
+    }
+
+    #[test]
+    fn real_invocations_still_denied() {
+        for cmd in [
+            "git status",
+            "git -C /x push",
+            "bash -c 'git status'",
+            "python3 -c 'git status'",
+            "echo hi; git status",
+        ] {
+            assert!(text_invokes_git(cmd, &is_git_token, 0), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn strings_merely_naming_git_are_allowed() {
+        for cmd in [
+            r#"python3 -I -c 'import os; print(os.path.isdir("/config/workspace/gm/.git"))'"#,
+            r#"bash -c 'echo ".git" is a directory'"#,
+            r#"python3 -c 'print("git is a spool surface")'"#,
+        ] {
+            assert!(!text_invokes_git(cmd, &is_git_token, 0), "{cmd}");
+        }
+    }
 }

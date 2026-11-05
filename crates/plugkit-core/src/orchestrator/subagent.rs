@@ -46,6 +46,25 @@ fn is_valid_subagent_id(parent: &str, subagent: &str) -> bool {
     subagent.starts_with(&format!("{parent}-")) && subagent.contains("-sub")
 }
 
+fn started_subagent_ids(cwd: &str, parent: &str) -> Vec<String> {
+    parse_rows(&read_ledger(&ledger_path(cwd)))
+        .iter()
+        .filter(|row| body_str(row, "kind") == "start" && body_str(row, "parent") == parent)
+        .map(|row| body_str(row, "subagent").to_string())
+        .collect()
+}
+
+fn derive_subagent_id(parent: &str, used: &[String]) -> String {
+    let mut index = 1usize;
+    loop {
+        let candidate = format!("{parent}-sub{index}");
+        if !used.iter().any(|id| id == &candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
 fn ledger_path(cwd: &str) -> String {
     if cwd.is_empty() {
         gm_dir()
@@ -401,17 +420,22 @@ pub fn handle_start(content: &str) -> (String, String, i32) {
         Err(e) => return reject(&format!("invalid JSON: {e}")),
     };
     let parent = body_str(&body, "parent_session_id");
-    let subagent = body_str(&body, "subagent_session_id");
+    let mut subagent = body_str(&body, "subagent_session_id").to_string();
     if parent.is_empty() {
-        return reject("parent_session_id required");
+        return reject("parent_session_id required: use the session_id from status as the parent id, or the subagent_session_id returned when this session was started");
     }
-    if !is_valid_subagent_id(parent, subagent) {
-        return reject("invalid subagent session id");
+    if subagent.is_empty() {
+        subagent = derive_subagent_id(parent, &started_subagent_ids(body_str(&body, "cwd"), parent));
+    }
+    if !is_valid_subagent_id(parent, &subagent) {
+        return reject(&format!(
+            "invalid subagent session id '{subagent}': it must start with the parent id plus '-' and contain '-sub' (for example '{parent}-sub1'); omit subagent_session_id to have one generated"
+        ));
     }
     run_start(
         body_str(&body, "cwd"),
         parent,
-        subagent,
+        &subagent,
         body_str(&body, "slice_id"),
     )
 }
@@ -528,4 +552,34 @@ pub fn handle_resume(content: &str) -> (String, String, i32) {
         return reject("new_subagent_session_id must start with the parent id and contain -sub");
     }
     run_resume(body_str(&body, "cwd"), parent, subagent, successor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_id_is_valid_and_unique() {
+        let parent = "mcp-codemode-596532-1793910138088-230";
+        let first = derive_subagent_id(parent, &[]);
+        assert!(is_valid_subagent_id(parent, &first), "{first}");
+        let second = derive_subagent_id(parent, &[first.clone()]);
+        assert_ne!(first, second);
+        assert!(is_valid_subagent_id(parent, &second), "{second}");
+    }
+
+    #[test]
+    fn start_with_only_parent_is_no_longer_refused_for_id_shape() {
+        let body = json!({ "parent_session_id": "sess-1", "cwd": "/tmp/gm-subagent-witness-absent" });
+        let (reply, _, _) = handle_start(&body.to_string());
+        assert!(!reply.contains("parent_session_id required"), "{reply}");
+        assert!(!reply.contains("invalid subagent session id"), "{reply}");
+    }
+
+    #[test]
+    fn wrong_shape_still_names_the_required_shape() {
+        let body = json!({ "parent_session_id": "sess-1", "subagent_session_id": "other-id" });
+        let (reply, _, _) = handle_start(&body.to_string());
+        assert!(reply.contains("sess-1-sub1"), "{reply}");
+    }
 }

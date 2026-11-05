@@ -4,7 +4,7 @@ use serde_json::Value;
 use serde_json::json;
 
 pub const DEFAULT_MAX_FILES: usize = 20_000;
-pub const DEFAULT_FINDING_LIMIT: usize = 2_000;
+pub const DEFAULT_FINDING_LIMIT: usize = 200;
 pub const MAX_TEXT_CHARS: usize = 240;
 pub const COMMENT_KIND: &str = "comment";
 pub const DOCSTRING_KIND: &str = "docstring";
@@ -38,9 +38,47 @@ pub fn handle_audit(content: &str) -> (String, String, i32) {
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty());
+    let scopes = audit_scopes(&body);
+    let paths: Vec<String> = scopes
+        .iter()
+        .filter(|scope| !crate::path_glob::looks_like_glob(scope))
+        .cloned()
+        .collect();
+    let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let globs: Vec<crate::path_glob::PathGlob> = scopes
+        .iter()
+        .filter(|scope| crate::path_glob::looks_like_glob(scope))
+        .filter_map(|scope| crate::path_glob::PathGlob::parse(scope).ok())
+        .collect();
     let mut cfg = crate::ragconfig::IndexConfig::default();
     cfg.digest_max_files = max_files;
-    let files = crate::scan_universe::project_source_files(&root, max_files, &cfg);
+    let listed = if path_refs.is_empty() {
+        crate::scan_universe::project_source_files(&root, max_files, &cfg)
+    } else {
+        match crate::scan_universe::list_scan_universe(
+            &root,
+            &path_refs,
+            max_files,
+            &cfg,
+            crate::scan_universe::TargetOrigin::ProjectDefault,
+            false,
+            false,
+            false,
+        ) {
+            Ok(universe) => universe.files,
+            Err(_) => Vec::new(),
+        }
+    };
+    let files: Vec<String> = if globs.is_empty() {
+        listed.into_iter().take(max_files).collect()
+    } else {
+        listed
+            .into_iter()
+            .filter(|path| globs.iter().any(|glob| glob.admits(&root, None, path)))
+            .take(max_files)
+            .collect()
+    };
+    let files_listed = files.len();
     let mut findings: Vec<CommentFinding> = Vec::new();
     let mut scanned = 0usize;
     let mut unreadable = 0usize;
@@ -73,6 +111,8 @@ pub fn handle_audit(content: &str) -> (String, String, i32) {
         "ok": true,
         "verb": "comment-audit",
         "root": root,
+        "scope": scopes,
+        "files_listed": files_listed,
         "files_scanned": scanned,
         "files_unreadable": unreadable,
         "findings_total": total,
@@ -92,6 +132,67 @@ pub fn requested_root(body: &Value) -> String {
         }
     }
     ".".to_string()
+}
+
+pub fn audit_scopes(body: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in ["path", "paths", "file", "files", "glob", "globs"] {
+        match body.get(key) {
+            Some(Value::String(value)) => push_scope(&mut out, value),
+            Some(Value::Array(values)) => {
+                for value in values {
+                    if let Some(value) = value.as_str() {
+                        push_scope(&mut out, value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn push_scope(out: &mut Vec<String>, value: &str) {
+    let value = value.trim().replace('\\', "/");
+    let value = value.trim_start_matches("./");
+    if !value.is_empty() && !out.iter().any(|existing| existing == value) {
+        out.push(value.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn audit_scopes_collect_paths_files_and_globs() {
+        let body = json!({
+            "path": "tools/phrase_telemetry_analyzer.py",
+            "files": ["main/a.cpp", "main/b.cpp"],
+            "glob": "**/*.py"
+        });
+        assert_eq!(
+            audit_scopes(&body),
+            vec![
+                "tools/phrase_telemetry_analyzer.py",
+                "main/a.cpp",
+                "main/b.cpp",
+                "**/*.py"
+            ]
+        );
+    }
+
+    #[test]
+    fn audit_scopes_empty_without_scope_fields() {
+        assert!(audit_scopes(&json!({ "limit": 5 })).is_empty());
+        assert!(audit_scopes(&json!({ "path": "  " })).is_empty());
+    }
+
+    #[test]
+    fn default_row_cap_stays_compact() {
+        assert_eq!(DEFAULT_FINDING_LIMIT, 200);
+    }
 }
 
 pub fn positive_usize(body: &Value, keys: &[&str], fallback: usize) -> usize {
