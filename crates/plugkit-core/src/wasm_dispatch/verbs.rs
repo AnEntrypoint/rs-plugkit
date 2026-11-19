@@ -714,7 +714,7 @@ fn path_has_parent_traversal(path: &str) -> bool {
     path.replace('\\', "/").split('/').any(|seg| seg == "..")
 }
 
-fn outside_root_read_granted(path: &str) -> bool {
+pub(super) fn outside_root_read_granted(path: &str) -> bool {
     if crate::wasm_dispatch::host_allow_root(path) {
         return true;
     }

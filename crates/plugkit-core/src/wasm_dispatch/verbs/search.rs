@@ -486,6 +486,9 @@ fn outside_project_root(body: &Value) -> Option<String> {
         }
     }
     let absolute = entries.into_iter().find(|entry| crate::pkfs::is_absolute(entry.trim()))?;
+    if super::outside_root_read_granted(absolute) {
+        return None;
+    }
     let project = crate::pkfs::anchor(".").replace('\\', "/");
     let project = project.trim_end_matches("/.").trim_end_matches('/').to_string();
     if project.is_empty() || project == "." {
